@@ -1,0 +1,192 @@
+export const PROVIDERS = {
+  veo: {
+    id: 'veo',
+    name: 'Veo',
+    vendor: 'Google',
+    color: '#4285f4',
+    models: [
+      { value: 'veo-3.1-generate-preview', label: 'Veo 3.1', tag: '最新' },
+      { value: 'veo-3.1-fast-generate-preview', label: 'Veo 3.1 Fast', tag: '快速' },
+    ],
+    aspectRatios: ['16:9', '9:16'],
+    resolutions: {
+      default: ['720p', '1080p'],
+      'veo-3.1-generate-preview': ['720p', '1080p', '4k'],
+    },
+    durations: [4, 6, 8],
+    sampleCounts: [1, 2, 3, 4],
+    features: {
+      generateAudio: true,
+      enhancePrompt: 'veo-2',
+      negativePrompt: true,
+      personGeneration: true,
+      compressionQuality: true,
+      referenceImage: true,
+    },
+    personOptions: [
+      { value: 'allow_adult', label: '仅成人' },
+      { value: 'dont_allow', label: '无人物' },
+      { value: 'allow_all', label: '允许所有' },
+    ],
+    compressionOptions: [
+      { value: 'optimized', label: '优化' },
+      { value: 'lossless', label: '无损' },
+    ],
+    defaults: {
+      model: 'veo-3.1-generate-preview',
+      aspectRatio: '16:9',
+      resolution: '720p',
+      duration: 8,
+      sampleCount: 1,
+      generateAudio: true,
+      enhancePrompt: true,
+      compressionQuality: 'optimized',
+      personGeneration: 'allow_adult',
+      negativePrompt: '',
+    },
+  },
+
+  wan: {
+    id: 'wan',
+    name: 'Wan',
+    vendor: 'Alibaba',
+    color: '#ff6a00',
+    models: [
+      { value: 'wan-2.6-t2v', label: 'Wan 2.6', tag: '最新' },
+    ],
+    aspectRatios: ['16:9', '9:16', '1:1'],
+    resolutions: {
+      default: ['480P', '720P', '1080P'],
+    },
+    durations: [5, 8],
+    sampleCounts: [1],
+    features: {
+      generateAudio: false,
+      negativePrompt: true,
+      watermark: true,
+      referenceImage: true,
+    },
+    defaults: {
+      model: 'wan-2.6-t2v',
+      aspectRatio: '16:9',
+      resolution: '720P',
+      duration: 5,
+      sampleCount: 1,
+      negativePrompt: '',
+      watermark: false,
+    },
+  },
+
+  kling: {
+    id: 'kling',
+    name: 'Kling',
+    vendor: 'Kuaishou',
+    color: '#7c3aed',
+    models: [
+      { value: 'kling-v3-pro', label: 'Kling 3.0 Pro', tag: '最新' },
+      { value: 'kling-v3-standard', label: 'Kling 3.0 Std', tag: '' },
+    ],
+    aspectRatios: ['16:9', '9:16', '1:1'],
+    resolutions: { default: [] },
+    durations: [5, 10],
+    sampleCounts: [1],
+    modes: [
+      { value: 'std', label: '标准' },
+      { value: 'pro', label: '专业' },
+    ],
+    features: {
+      generateAudio: true,
+      negativePrompt: true,
+      cfgScale: true,
+      cameraControl: true,
+      mode: true,
+      referenceImage: true,
+      referenceVideo: true,
+    },
+    cameraAxes: [
+      { key: 'horizontal', label: '水平移动', min: -10, max: 10 },
+      { key: 'vertical', label: '垂直移动', min: -10, max: 10 },
+      { key: 'pan', label: '平移', min: -10, max: 10 },
+      { key: 'tilt', label: '俯仰', min: -10, max: 10 },
+      { key: 'roll', label: '翻滚', min: -10, max: 10 },
+      { key: 'zoom', label: '缩放', min: -10, max: 10 },
+    ],
+    defaults: {
+      model: 'kling-v3-pro',
+      aspectRatio: '16:9',
+      duration: 5,
+      sampleCount: 1,
+      mode: 'std',
+      cfgScale: 0.5,
+      generateAudio: false,
+      negativePrompt: '',
+      cameraControl: { horizontal: 0, vertical: 0, pan: 0, tilt: 0, roll: 0, zoom: 0 },
+    },
+  },
+
+
+  'gemini-image': {
+    id: 'gemini-image',
+    name: '绘图',
+    vendor: 'Google',
+    color: '#10a37f',
+    outputType: 'image',
+    models: [
+      { value: 'gemini-3.1-flash-image-preview', label: 'Gemini 3.1 Flash', tag: '最新' },
+    ],
+    aspectRatios: ['1:1', '16:9', '9:16', '3:4', '4:3'],
+    resolutions: { default: [] },
+    durations: [],
+    sampleCounts: [1],
+    features: {
+      generateAudio: false,
+      negativePrompt: false,
+      referenceImage: true,
+    },
+    promptTemplates: [
+      {
+        id: 'three-view',
+        emoji: '🎨',
+        title: '产品三视图',
+        prompt: 'Professional product photography showing three views of the product: front view, side view, and back view, arranged in a triptych layout on a clean white background, studio lighting, ultra-detailed, 8K',
+      },
+      {
+        id: 'white-bg',
+        emoji: '📦',
+        title: '产品白底图',
+        prompt: 'Product photography on pure white background, professional e-commerce style, clean studio lighting, high resolution, centered composition, no shadows',
+      },
+      {
+        id: 'social-ad',
+        emoji: '📱',
+        title: '社媒广告图',
+        prompt: 'Eye-catching social media advertisement banner, vibrant colors, modern design, trending aesthetic, professional marketing photo, dynamic composition',
+      },
+      {
+        id: 'cartoon',
+        emoji: '🎭',
+        title: '卡通风格',
+        prompt: '把这张图转换成卡通风格，高清',
+      },
+      {
+        id: 'ghibli',
+        emoji: '🏔️',
+        title: '吉卜力风格',
+        prompt: '把这张图转换成吉卜力动画风格，柔和的色彩，手绘质感，宫崎骏风格，高清',
+      },
+      {
+        id: 'oil-painting',
+        emoji: '🖼️',
+        title: '油画风格',
+        prompt: '把这张图转换成经典油画风格，浓郁的色彩，厚重的笔触，艺术质感，高清',
+      },
+    ],
+    defaults: {
+      model: 'gemini-3.1-flash-image-preview',
+      aspectRatio: '1:1',
+      sampleCount: 1,
+    },
+  },
+}
+
+export const PROVIDER_ORDER = ['veo', 'wan', 'kling', 'gemini-image']

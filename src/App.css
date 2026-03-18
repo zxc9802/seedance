@@ -1,0 +1,43 @@
+.app-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 15% 0%, rgba(196, 168, 130, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse at 85% 100%, rgba(196, 168, 130, 0.04) 0%, transparent 50%),
+    var(--bg-primary);
+}
+
+.app-main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.left-panel {
+  width: 520px;
+  min-width: 520px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-light);
+  overflow-y: auto;
+  background: var(--bg-card);
+}
+
+.right-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+@media (max-width: 960px) {
+  .app-main { flex-direction: column; }
+  .left-panel {
+    width: 100%; min-width: unset;
+    max-height: 55vh;
+    border-right: none;
+    border-bottom: 1px solid var(--border-light);
+  }
+}
