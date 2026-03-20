@@ -44,7 +44,7 @@ export default function PromptInput({
   const fileInputRef = useRef(null)
 
   const isImageOutput = providerConfig.outputType === 'image'
-  const isVideoProvider = providerConfig.id === 'veo'
+  const isVideoProvider = providerConfig.outputType !== 'image' && providerConfig.id !== 'gemini-image'
   const templates = providerConfig.promptTemplates || []
   const modeOptions = providerConfig.generationModes || buildDefaultModes(providerConfig, isImageOutput)
 
@@ -281,7 +281,7 @@ export default function PromptInput({
                 {maxImages > 0 && (
                   <AssetUploadBucket
                     title={mode === 'flf' ? '首尾帧图片' : '参考图片'}
-                    subtitle={mode === 'flf' ? '顺序上传：先首帧，再尾帧' : mode === 'fusion' ? '最多 9 张参考图片' : '上传 1 张参考图片'}
+                    subtitle={mode === 'flf' ? '顺序上传：先首帧，再尾帧' : mode === 'fusion' ? '最多 9 张参考图片' : mode === 'ref' ? `最多 ${maxImages} 张参考图片` : '上传 1 张参考图片'}
                     icon={<ImageIcon size={14} />}
                     accept="image/jpeg,image/png,image/webp"
                     assets={videoReferences.images}
@@ -291,6 +291,8 @@ export default function PromptInput({
                     kind="images"
                   />
                 )}
+
+                {(mode === 'fusion' || mode === 'ref') ? null : null}
 
                 {mode === 'fusion' && maxVideos > 0 && (
                   <AssetUploadBucket
@@ -455,6 +457,8 @@ function renderModeIcon(mode, isImageOutput) {
       return <Layers3 size={13} />
     case 'fusion':
       return <Video size={13} />
+    case 'ref':
+      return <ImageIcon size={13} />
     case 't2v':
     default:
       return isImageOutput ? <Palette size={13} /> : <FileImage size={13} />
@@ -470,6 +474,9 @@ function hasRequiredVideoAssets(mode, references) {
     const videoCount = references.videos.length
     const audioCount = references.audios.length
     return imageCount + videoCount + audioCount > 0 && imageCount + videoCount > 0
+  }
+  if (mode === 'ref') {
+    return references.images.length > 0
   }
   return false
 }

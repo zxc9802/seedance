@@ -1,5 +1,12 @@
 import { useCallback, useState } from 'react'
 import { PROVIDERS, PROVIDER_ORDER } from './modelConfig'
+
+const VIDEO_PROVIDERS = new Set(
+  PROVIDER_ORDER.filter((key) => PROVIDERS[key].outputType !== 'image')
+)
+function isVideoProvider(id) {
+  return VIDEO_PROVIDERS.has(id)
+}
 import Header from './components/Header'
 import ProviderTabs from './components/ProviderTabs'
 import PromptInput from './components/PromptInput'
@@ -67,7 +74,9 @@ function App() {
     setProvider(nextProvider)
     setPrompt('')
     setSelectedTemplate(null)
-    setGenerationMode('t2v')
+    const nextConfig = PROVIDERS[nextProvider]
+    const firstMode = nextConfig.generationModes?.[0]?.value || 't2v'
+    setGenerationMode(firstMode)
     resetReferences()
   }, [resetReferences])
 
@@ -83,7 +92,7 @@ function App() {
 
     if (!finalPrompt) return
 
-    if (provider === 'veo') {
+    if (isVideoProvider(provider)) {
       const validationError = validateVideoReferenceInput(generationMode, videoReferences)
       if (validationError) {
         updateProviderState(provider, { error: validationError })
@@ -104,7 +113,7 @@ function App() {
     }, 900)
 
     try {
-      if (provider === 'veo') {
+      if (isVideoProvider(provider)) {
         const uploadedReferences = await uploadVideoReferences(videoReferences)
         if (uploadedReferences.requiresPublicBaseUrl) {
           throw new Error('参考素材已经上传到本地后端，但当前后端地址不是公网可访问地址。请部署后端到公网，或设置 PUBLIC_BASE_URL 指向公网域名/隧道。')
@@ -184,7 +193,7 @@ function App() {
             throw new Error(task.message || '视频生成失败')
           }
         }
-      } else if (provider === 'gemini-image') {
+      } else if (!isVideoProvider(provider)) {
         const requestInfo = buildImageRequest(params, finalPrompt, generationMode, referenceMedia)
         const response = await fetch(requestInfo.url, {
           method: 'POST',
@@ -275,7 +284,7 @@ function App() {
 }
 
 function buildVideoRequest(provider, params, prompt, mode, references) {
-  if (provider !== 'veo') throw new Error(`Unsupported provider: ${provider}`)
+  if (!isVideoProvider(provider)) throw new Error(`Unsupported provider: ${provider}`)
 
   return {
     url: '/api/veo/generate',
@@ -332,6 +341,7 @@ function mapVideoMode(mode) {
     case 'flf':
       return 'first_last_frame'
     case 'fusion':
+    case 'ref':
       return 'fusion_video'
     case 't2v':
     default:
@@ -349,6 +359,10 @@ function validateVideoReferenceInput(mode, references) {
   if (mode === 't2v') return null
   if (mode === 'i2v' && references.images.length !== 1) return '图生视频模式需要 1 张参考图片'
   if (mode === 'flf' && references.images.length !== 2) return '首尾帧模式需要 2 张图片，第一张是首帧，第二张是尾帧'
+
+  if (mode === 'ref') {
+    if (references.images.length === 0) return '参考图片模式至少需要 1 张参考图片'
+  }
 
   if (mode === 'fusion') {
     const imageCount = references.images.length
@@ -436,6 +450,18 @@ async function resolvePreviewUrl(url) {
 }
 
 async function formatHttpError(response) {
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    const payload = await response.json()
+    const message = payload?.message || payload?.error?.message || JSON.stringify(payload)
+
+    if (response.status === 401 && payload?.redirectUrl && typeof window !== 'undefined') {
+      window.location.href = payload.redirectUrl
+      return message || '登录已失效，正在返回主站...'
+    }
+
+    return `API 错误 (${response.status}): ${message}`
+  }
   const body = await response.text()
   return `API 错误 (${response.status}): ${body}`
 }

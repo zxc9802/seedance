@@ -1,7 +1,7 @@
 export const PROVIDERS = {
   veo: {
     id: 'veo',
-    name: '视频',
+    name: 'Seedance 2.0',
     vendor: '聚合 API',
     color: '#2563eb',
     models: [
@@ -46,6 +46,46 @@ export const PROVIDERS = {
       duration: 5,
       sampleCount: 1,
       generateAudio: false,
+    },
+  },
+  ve31p: {
+    id: 've31p',
+    name: 'Veo',
+    vendor: '聚合 API',
+    color: '#7c3aed',
+    models: [
+      { value: 'VE3.1P', label: 'Veo 3.1', tag: '已接入' },
+    ],
+    aspectRatios: ['16:9', '9:16'],
+    resolutions: {
+      default: ['720p', '1080p'],
+    },
+    durations: [4, 6, 8],
+    sampleCounts: [1],
+    features: {
+      generateAudio: false,
+      negativePrompt: false,
+      referenceImage: true,
+      referenceVideo: false,
+      referenceAudio: false,
+    },
+    generationModes: [
+      { value: 'i2v', label: '首帧' },
+      { value: 'flf', label: '首尾帧' },
+      { value: 'ref', label: '参考图片' },
+    ],
+    referenceInputMode: 'url',
+    maxReferenceImages: {
+      i2v: 1,
+      flf: 2,
+      ref: 3,
+    },
+    defaults: {
+      model: 'VE3.1P',
+      aspectRatio: '16:9',
+      resolution: '720p',
+      duration: 6,
+      sampleCount: 1,
     },
   },
   'gemini-image': {
@@ -113,4 +153,4 @@ export const PROVIDERS = {
   },
 }
 
-export const PROVIDER_ORDER = ['veo', 'gemini-image']
+export const PROVIDER_ORDER = ['veo', 've31p', 'gemini-image']

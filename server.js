@@ -3,7 +3,7 @@ import multer from 'multer'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createViteServer, loadEnv } from 'vite'
@@ -27,6 +27,13 @@ const cleanupIntervalMinutes = Number(process.env.UPLOAD_CLEANUP_INTERVAL_MINUTE
 const publicBaseUrl = stripTrailingSlash(process.env.PUBLIC_BASE_URL || '')
 const videoApiBaseUrl = stripTrailingSlash(process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const imageApiBaseUrl = stripTrailingSlash(process.env.IMAGE_API_BASE_URL || 'http://47.77.198.47:3001/v1')
+const mainAppUrl = stripTrailingSlash(process.env.MAIN_APP_URL || 'https://www.qycm.top')
+const mainAppVideoEntryPath = normalizeMainAppEntryPath(process.env.MAIN_APP_VIDEO_ENTRY_PATH || '/bot/video-workbench-seedance')
+const requireMainAppSso = readBooleanEnv(process.env.REQUIRE_MAIN_APP_SSO, isProduction)
+const videoSiteSessionCookieName = process.env.VIDEO_SITE_SESSION_COOKIE_NAME?.trim() || 'veo_studio_session'
+const videoSiteSessionTtlMinutes = Math.max(5, Number(process.env.VIDEO_SITE_SESSION_TTL_MINUTES || 720))
+const videoSiteSessionTtlMs = videoSiteSessionTtlMinutes * 60 * 1000
+const videoSiteSessionSecret = resolveVideoSiteSessionSecret()
 
 fs.mkdirSync(uploadDir, { recursive: true })
 
@@ -50,6 +57,11 @@ const app = express()
 app.disable('x-powered-by')
 app.use(express.json({ limit: '80mb' }))
 app.use(express.urlencoded({ extended: true, limit: '80mb' }))
+app.use((req, _, next) => {
+  req.videoSiteSession = readVideoSiteSession(req)
+  next()
+})
+
 app.use('/temp-assets', express.static(uploadDir, {
   setHeaders: (res) => {
     res.setHeader('Cache-Control', `public, max-age=${Math.max(60, uploadTtlMinutes * 60)}`)
@@ -62,7 +74,88 @@ app.get('/api/health', (_, res) => {
     mode,
     uploadTtlMinutes,
     publicBaseUrl: publicBaseUrl || null,
+    requireMainAppSso,
   })
+})
+
+app.get('/api/session', (req, res) => {
+  const session = req.videoSiteSession
+  if (!session) {
+    res.status(401).json({
+      success: false,
+      message: 'Please launch VEO Studio from the main site first.',
+      redirectUrl: buildMainAppVideoEntryUrl(mainAppUrl),
+    })
+    return
+  }
+
+  res.json({
+    success: true,
+    data: {
+      user: session.user,
+      mainAppUrl: session.mainAppUrl,
+      expiresAt: new Date(session.expiresAt).toISOString(),
+    },
+  })
+})
+
+app.use(async (req, res, next) => {
+  if (!requireMainAppSso) {
+    next()
+    return
+  }
+
+  if (shouldBypassSso(req)) {
+    next()
+    return
+  }
+
+  const session = req.videoSiteSession
+  if (req.path.startsWith('/api/')) {
+    if (session) {
+      next()
+      return
+    }
+
+    res.status(401).json({
+      success: false,
+      message: 'Please launch VEO Studio from the main site first.',
+      redirectUrl: buildMainAppVideoEntryUrl(resolveRequestedMainAppUrl(req)),
+    })
+    return
+  }
+
+  if (!isHtmlDocumentRequest(req)) {
+    next()
+    return
+  }
+
+  if (session) {
+    next()
+    return
+  }
+
+  const ticket = readSingleQueryValue(req.query.ticket)
+  const requestedMainAppUrl = resolveRequestedMainAppUrl(req)
+
+  if (!ticket) {
+    res.redirect(302, buildMainAppVideoEntryUrl(requestedMainAppUrl))
+    return
+  }
+
+  try {
+    const exchangeResult = await exchangeVideoSsoTicket(ticket, requestedMainAppUrl)
+    writeVideoSiteSession(res, {
+      token: exchangeResult.token,
+      user: exchangeResult.user,
+      mainAppUrl: requestedMainAppUrl,
+    })
+    res.redirect(302, normalizeStudioRedirectPath(exchangeResult.redirectPath))
+  } catch (error) {
+    console.error('[video-sso] Ticket exchange failed:', error)
+    clearVideoSiteSession(res)
+    res.redirect(302, buildMainAppVideoEntryUrl(requestedMainAppUrl))
+  }
 })
 
 app.post('/api/upload', upload.array('files', 12), (req, res) => {
@@ -278,4 +371,251 @@ function isLikelyPublicBaseUrl(baseUrl) {
   } catch {
     return false
   }
+}
+
+function normalizeMainAppEntryPath(value) {
+  if (!value) return '/bot/video-workbench'
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('/')) return '/bot/video-workbench'
+  return trimmed
+}
+
+function readBooleanEnv(value, fallbackValue) {
+  if (!value) return fallbackValue
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+}
+
+function resolveVideoSiteSessionSecret() {
+  const candidates = [
+    process.env.VIDEO_SITE_SESSION_SECRET,
+    process.env.VIDEO_SSO_INTERNAL_SECRET,
+    process.env.VIDEO_SECRET_KEY,
+  ]
+
+  for (const candidate of candidates) {
+    const normalized = candidate?.trim()
+    if (normalized) {
+      return normalized
+    }
+  }
+
+  if (!isProduction) {
+    return 'veo-studio-dev-session-secret'
+  }
+
+  throw new Error('VIDEO_SITE_SESSION_SECRET is required in production when REQUIRE_MAIN_APP_SSO is enabled.')
+}
+
+function shouldBypassSso(req) {
+  if (!requireMainAppSso) return true
+  if (req.path === '/api/health') return true
+  if (req.path.startsWith('/temp-assets/')) return true
+  if (!isProduction && (
+    req.path.startsWith('/@vite')
+    || req.path.startsWith('/@react-refresh')
+    || req.path.startsWith('/src/')
+    || req.path.startsWith('/node_modules/')
+  )) {
+    return true
+  }
+  return false
+}
+
+function isHtmlDocumentRequest(req) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false
+  if (req.path.startsWith('/api/')) return false
+  if (req.path.startsWith('/temp-assets/')) return false
+  if (path.extname(req.path)) return false
+  if (!isProduction && (
+    req.path.startsWith('/@vite')
+    || req.path.startsWith('/@react-refresh')
+    || req.path.startsWith('/src/')
+    || req.path.startsWith('/node_modules/')
+  )) {
+    return false
+  }
+
+  const accept = req.get('accept') || ''
+  return !accept || accept.includes('text/html') || accept.includes('*/*')
+}
+
+function parseCookieHeader(cookieHeader = '') {
+  return cookieHeader
+    .split(';')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .reduce((cookies, item) => {
+      const index = item.indexOf('=')
+      if (index <= 0) return cookies
+      const key = item.slice(0, index).trim()
+      const value = item.slice(index + 1).trim()
+      cookies[key] = decodeURIComponent(value)
+      return cookies
+    }, {})
+}
+
+function buildMainAppVideoEntryUrl(baseUrl) {
+  return `${stripTrailingSlash(baseUrl || mainAppUrl)}${mainAppVideoEntryPath}`
+}
+
+function readSingleQueryValue(value) {
+  if (typeof value === 'string') return value.trim()
+  if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0].trim() : ''
+  return ''
+}
+
+function sanitizeMainAppUrl(value) {
+  const candidate = value?.trim()
+  if (!candidate) return null
+
+  try {
+    const requested = new URL(candidate)
+    if (!['http:', 'https:'].includes(requested.protocol)) {
+      return null
+    }
+
+    const configured = new URL(mainAppUrl)
+    if (requested.origin === configured.origin) {
+      return stripTrailingSlash(requested.origin)
+    }
+
+    if (!isProduction && isLocalHostname(requested.hostname)) {
+      return stripTrailingSlash(requested.origin)
+    }
+  } catch {
+    return null
+  }
+
+  return null
+}
+
+function resolveRequestedMainAppUrl(req) {
+  return sanitizeMainAppUrl(readSingleQueryValue(req.query.mainApp)) || mainAppUrl
+}
+
+function isLocalHostname(hostname) {
+  return ['localhost', '127.0.0.1', '0.0.0.0'].includes(hostname)
+}
+
+async function exchangeVideoSsoTicket(ticket, baseUrl) {
+  const response = await fetch(`${stripTrailingSlash(baseUrl)}/api/video-sso/exchange`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ ticket }),
+  })
+
+  const contentType = response.headers.get('content-type') || ''
+  const payload = contentType.includes('application/json')
+    ? await response.json()
+    : await response.text()
+
+  if (!response.ok) {
+    const message = typeof payload === 'string'
+      ? payload
+      : payload?.message || payload?.error || 'SSO exchange failed.'
+    throw new Error(message)
+  }
+
+  const data = payload?.data || payload
+  if (!data?.token || !data?.user) {
+    throw new Error('SSO exchange response is missing token or user.')
+  }
+
+  return {
+    token: data.token,
+    user: data.user,
+    redirectPath: normalizeStudioRedirectPath(data.redirectPath),
+  }
+}
+
+function normalizeStudioRedirectPath(value) {
+  if (typeof value !== 'string') return '/'
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('/') || trimmed.startsWith('//')) return '/'
+  return trimmed
+}
+
+function signSessionPayload(payload) {
+  return createHmac('sha256', videoSiteSessionSecret).update(payload).digest('base64url')
+}
+
+function writeVideoSiteSession(res, session) {
+  const expiresAt = Date.now() + videoSiteSessionTtlMs
+  const payload = Buffer.from(JSON.stringify({
+    token: session.token,
+    user: session.user,
+    mainAppUrl: session.mainAppUrl,
+    expiresAt,
+  }), 'utf8').toString('base64url')
+  const signature = signSessionPayload(payload)
+  const cookieValue = `${payload}.${signature}`
+
+  appendSetCookie(res, serializeCookie(videoSiteSessionCookieName, cookieValue, {
+    httpOnly: true,
+    sameSite: 'Lax',
+    secure: isProduction,
+    path: '/',
+    maxAge: Math.floor(videoSiteSessionTtlMs / 1000),
+  }))
+}
+
+function readVideoSiteSession(req) {
+  const cookies = parseCookieHeader(req.headers.cookie)
+  const rawValue = cookies[videoSiteSessionCookieName]
+  if (!rawValue) return null
+
+  const [payload, signature] = rawValue.split('.', 2)
+  if (!payload || !signature) return null
+
+  const expected = signSessionPayload(payload)
+  const providedBuffer = Buffer.from(signature, 'utf8')
+  const expectedBuffer = Buffer.from(expected, 'utf8')
+  if (providedBuffer.length !== expectedBuffer.length) return null
+  if (!timingSafeEqual(providedBuffer, expectedBuffer)) return null
+
+  try {
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    if (!data?.user || !data?.token || typeof data.expiresAt !== 'number') return null
+    if (data.expiresAt <= Date.now()) return null
+    return data
+  } catch {
+    return null
+  }
+}
+
+function clearVideoSiteSession(res) {
+  appendSetCookie(res, serializeCookie(videoSiteSessionCookieName, '', {
+    httpOnly: true,
+    sameSite: 'Lax',
+    secure: isProduction,
+    path: '/',
+    maxAge: 0,
+  }))
+}
+
+function appendSetCookie(res, cookie) {
+  const current = res.getHeader('Set-Cookie')
+  if (!current) {
+    res.setHeader('Set-Cookie', cookie)
+    return
+  }
+
+  if (Array.isArray(current)) {
+    res.setHeader('Set-Cookie', [...current, cookie])
+    return
+  }
+
+  res.setHeader('Set-Cookie', [current, cookie])
+}
+
+function serializeCookie(name, value, options) {
+  const parts = [`${name}=${encodeURIComponent(value)}`]
+  if (options.maxAge !== undefined) parts.push(`Max-Age=${options.maxAge}`)
+  if (options.path) parts.push(`Path=${options.path}`)
+  if (options.httpOnly) parts.push('HttpOnly')
+  if (options.sameSite) parts.push(`SameSite=${options.sameSite}`)
+  if (options.secure) parts.push('Secure')
+  return parts.join('; ')
 }
