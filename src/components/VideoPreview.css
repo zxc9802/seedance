@@ -51,7 +51,7 @@
 .preview-frame.ratio-3-4 { height: min(100%, 420px); aspect-ratio: 3/4; }
 .preview-frame.ratio-4-3 { width: min(100%, 460px); aspect-ratio: 4/3; }
 
-.preview-video { width: 100%; height: 100%; object-fit: cover; }
+.preview-video { width: 100%; height: 100%; object-fit: contain; background: #000; }
 .preview-image { object-fit: contain; background: var(--bg-secondary); }
 
 /* Generating state */
@@ -132,6 +132,13 @@
   object-fit: contain;
   border-radius: 12px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.fullscreen-video {
+  max-width: 90vw; max-height: 82vh;
+  object-fit: contain;
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  background: #000;
 }
 .fullscreen-toolbar {
   display: flex; gap: 10px;

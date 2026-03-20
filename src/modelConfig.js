@@ -1,130 +1,53 @@
 export const PROVIDERS = {
   veo: {
     id: 'veo',
-    name: 'Veo',
-    vendor: 'Google',
-    color: '#4285f4',
+    name: '视频',
+    vendor: '聚合 API',
+    color: '#2563eb',
     models: [
-      { value: 'veo-3.1-generate-preview', label: 'Veo 3.1', tag: '最新' },
-      { value: 'veo-3.1-fast-generate-preview', label: 'Veo 3.1 Fast', tag: '快速' },
+      { value: 'doubao-seedance-2-0-260128', label: 'Seedance 2.0', tag: '已接入' },
     ],
-    aspectRatios: ['16:9', '9:16'],
+    aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {
-      default: ['720p', '1080p'],
-      'veo-3.1-generate-preview': ['720p', '1080p', '4k'],
+      default: ['480p', '720p', '1080p'],
     },
-    durations: [4, 6, 8],
-    sampleCounts: [1, 2, 3, 4],
-    features: {
-      generateAudio: true,
-      enhancePrompt: 'veo-2',
-      negativePrompt: true,
-      personGeneration: true,
-      compressionQuality: true,
-      referenceImage: true,
-    },
-    personOptions: [
-      { value: 'allow_adult', label: '仅成人' },
-      { value: 'dont_allow', label: '无人物' },
-      { value: 'allow_all', label: '允许所有' },
-    ],
-    compressionOptions: [
-      { value: 'optimized', label: '优化' },
-      { value: 'lossless', label: '无损' },
-    ],
-    defaults: {
-      model: 'veo-3.1-generate-preview',
-      aspectRatio: '16:9',
-      resolution: '720p',
-      duration: 8,
-      sampleCount: 1,
-      generateAudio: true,
-      enhancePrompt: true,
-      compressionQuality: 'optimized',
-      personGeneration: 'allow_adult',
-      negativePrompt: '',
-    },
-  },
-
-  wan: {
-    id: 'wan',
-    name: 'Wan',
-    vendor: 'Alibaba',
-    color: '#ff6a00',
-    models: [
-      { value: 'wan-2.6-t2v', label: 'Wan 2.6', tag: '最新' },
-    ],
-    aspectRatios: ['16:9', '9:16', '1:1'],
-    resolutions: {
-      default: ['480P', '720P', '1080P'],
-    },
-    durations: [5, 8],
+    durations: [4, 5, 6, 8, 10, 12, 15],
     sampleCounts: [1],
     features: {
-      generateAudio: false,
-      negativePrompt: true,
-      watermark: true,
-      referenceImage: true,
-    },
-    defaults: {
-      model: 'wan-2.6-t2v',
-      aspectRatio: '16:9',
-      resolution: '720P',
-      duration: 5,
-      sampleCount: 1,
-      negativePrompt: '',
-      watermark: false,
-    },
-  },
-
-  kling: {
-    id: 'kling',
-    name: 'Kling',
-    vendor: 'Kuaishou',
-    color: '#7c3aed',
-    models: [
-      { value: 'kling-v3-pro', label: 'Kling 3.0 Pro', tag: '最新' },
-      { value: 'kling-v3-standard', label: 'Kling 3.0 Std', tag: '' },
-    ],
-    aspectRatios: ['16:9', '9:16', '1:1'],
-    resolutions: { default: [] },
-    durations: [5, 10],
-    sampleCounts: [1],
-    modes: [
-      { value: 'std', label: '标准' },
-      { value: 'pro', label: '专业' },
-    ],
-    features: {
       generateAudio: true,
-      negativePrompt: true,
-      cfgScale: true,
-      cameraControl: true,
-      mode: true,
+      negativePrompt: false,
       referenceImage: true,
       referenceVideo: true,
+      referenceAudio: true,
     },
-    cameraAxes: [
-      { key: 'horizontal', label: '水平移动', min: -10, max: 10 },
-      { key: 'vertical', label: '垂直移动', min: -10, max: 10 },
-      { key: 'pan', label: '平移', min: -10, max: 10 },
-      { key: 'tilt', label: '俯仰', min: -10, max: 10 },
-      { key: 'roll', label: '翻滚', min: -10, max: 10 },
-      { key: 'zoom', label: '缩放', min: -10, max: 10 },
+    generationModes: [
+      { value: 't2v', label: '文生视频' },
+      { value: 'i2v', label: '图生视频' },
+      { value: 'flf', label: '首尾帧' },
+      { value: 'fusion', label: '融合参考' },
     ],
+    referenceInputMode: 'url',
+    maxReferenceImages: {
+      t2v: 0,
+      i2v: 1,
+      flf: 2,
+      fusion: 9,
+    },
+    maxReferenceVideos: {
+      fusion: 3,
+    },
+    maxReferenceAudios: {
+      fusion: 3,
+    },
     defaults: {
-      model: 'kling-v3-pro',
+      model: 'doubao-seedance-2-0-260128',
       aspectRatio: '16:9',
+      resolution: '720p',
       duration: 5,
       sampleCount: 1,
-      mode: 'std',
-      cfgScale: 0.5,
       generateAudio: false,
-      negativePrompt: '',
-      cameraControl: { horizontal: 0, vertical: 0, pan: 0, tilt: 0, roll: 0, zoom: 0 },
     },
   },
-
-
   'gemini-image': {
     id: 'gemini-image',
     name: '绘图',
@@ -143,34 +66,35 @@ export const PROVIDERS = {
       negativePrompt: false,
       referenceImage: true,
     },
+    maxReferenceImages: 5,
     promptTemplates: [
       {
         id: 'three-view',
-        emoji: '🎨',
+        emoji: '📦',
         title: '产品三视图',
         prompt: 'Professional product photography showing three views of the product: front view, side view, and back view, arranged in a triptych layout on a clean white background, studio lighting, ultra-detailed, 8K',
       },
       {
         id: 'white-bg',
-        emoji: '📦',
+        emoji: '🧾',
         title: '产品白底图',
         prompt: 'Product photography on pure white background, professional e-commerce style, clean studio lighting, high resolution, centered composition, no shadows',
       },
       {
         id: 'social-ad',
-        emoji: '📱',
+        emoji: '🪧',
         title: '社媒广告图',
         prompt: 'Eye-catching social media advertisement banner, vibrant colors, modern design, trending aesthetic, professional marketing photo, dynamic composition',
       },
       {
         id: 'cartoon',
-        emoji: '🎭',
+        emoji: '🎨',
         title: '卡通风格',
         prompt: '把这张图转换成卡通风格，高清',
       },
       {
         id: 'ghibli',
-        emoji: '🏔️',
+        emoji: '🌅',
         title: '吉卜力风格',
         prompt: '把这张图转换成吉卜力动画风格，柔和的色彩，手绘质感，宫崎骏风格，高清',
       },
@@ -189,4 +113,4 @@ export const PROVIDERS = {
   },
 }
 
-export const PROVIDER_ORDER = ['veo', 'wan', 'kling', 'gemini-image']
+export const PROVIDER_ORDER = ['veo', 'gemini-image']

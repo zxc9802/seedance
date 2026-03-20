@@ -1,9 +1,8 @@
 import { motion } from 'framer-motion'
-import { Settings, Film } from 'lucide-react'
+import { Film } from 'lucide-react'
 import './Header.css'
 
-export default function Header({ onApiConfig, apiKeys, provider }) {
-  const hasKey = !!apiKeys[provider]?.apiKey
+export default function Header() {
   return (
     <motion.header
       className="header"
@@ -13,14 +12,8 @@ export default function Header({ onApiConfig, apiKeys, provider }) {
     >
       <div className="header-left">
         <div className="logo-mark"><Film size={17} strokeWidth={1.5} /></div>
-        <span className="logo-name">视频工作室</span>
-        <span className="logo-badge">多模型</span>
+        <span className="logo-name">视频工作台</span>
       </div>
-      <button className={`api-btn ${hasKey ? 'ok' : ''}`} onClick={onApiConfig}>
-        <Settings size={14} strokeWidth={1.5} />
-        <span>{hasKey ? 'API 已连接' : '配置 API'}</span>
-        {hasKey && <span className="dot" />}
-      </button>
     </motion.header>
   )
 }

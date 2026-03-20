@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { MonitorPlay, Download, Copy, Loader2, Maximize2, X } from 'lucide-react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { Copy, Download, Loader2, Maximize2, MonitorPlay, X } from 'lucide-react'
 import { PROVIDERS } from '../modelConfig'
 import './VideoPreview.css'
 
@@ -23,12 +23,7 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
     if (!videoUrl) return
     const link = document.createElement('a')
     link.href = videoUrl
-    // Generate filename with timestamp
-    const ext = videoUrl.startsWith('data:image/png') ? 'png'
-      : videoUrl.startsWith('data:image/webp') ? 'webp'
-      : videoUrl.startsWith('data:image/gif') ? 'gif'
-      : 'jpg'
-    link.download = `gemini-image-${Date.now()}.${ext}`
+    link.download = `${isImageOutput ? 'image' : 'video'}-${Date.now()}.${inferExtension(videoUrl, isImageOutput)}`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -41,13 +36,12 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
           <MonitorPlay size={15} strokeWidth={1.5} />
           <span>{isImageOutput ? '图片预览' : '视频预览'}</span>
         </div>
+
         {videoUrl && (
           <div className="preview-actions">
-            {isImageOutput && (
-              <button className="pa-btn" onClick={() => setShowFullscreen(true)}>
-                <Maximize2 size={13} /> 放大预览
-              </button>
-            )}
+            <button className="pa-btn" onClick={() => setShowFullscreen(true)}>
+              <Maximize2 size={13} /> 放大预览
+            </button>
             <button className="pa-btn" onClick={handleDownload}>
               <Download size={13} /> 下载
             </button>
@@ -84,9 +78,10 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
                 <Loader2 size={28} className="spin" style={{ color: cfg.color }} />
               </div>
               <div className="gen-info">
-                <span className="gen-label">正在使用 {cfg.name} {isImageOutput ? '生成图片' : '生成视频'}...</span>
+                <span className="gen-label">正在使用 {cfg.name} 生成{isImageOutput ? '图片' : '视频'}...</span>
                 <div className="gen-progress-bar">
-                  <motion.div className="gen-progress-fill"
+                  <motion.div
+                    className="gen-progress-fill"
                     style={{ background: cfg.color }}
                     initial={{ width: 0 }}
                     animate={{ width: `${progress}%` }}
@@ -116,14 +111,11 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
           <MetaTag label="比例" value={params.aspectRatio} />
           {params.duration != null && <MetaTag label="时长" value={`${params.duration}秒`} />}
           {params.resolution && <MetaTag label="分辨率" value={params.resolution} />}
-          {params.mode && <MetaTag label="模式" value={params.mode} />}
-          {params.guidanceScale != null && <MetaTag label="引导" value={params.guidanceScale} />}
         </div>
       </div>
 
-      {/* Fullscreen Image Preview Modal */}
       <AnimatePresence>
-        {showFullscreen && videoUrl && isImageOutput && (
+        {showFullscreen && videoUrl && (
           <motion.div
             className="fullscreen-overlay"
             initial={{ opacity: 0 }}
@@ -137,12 +129,16 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
               transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-              onClick={e => e.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
             >
-              <img src={videoUrl} className="fullscreen-image" alt="Preview" />
+              {isImageOutput ? (
+                <img src={videoUrl} className="fullscreen-image" alt="Preview" />
+              ) : (
+                <video src={videoUrl} controls autoPlay loop className="fullscreen-video" />
+              )}
               <div className="fullscreen-toolbar">
                 <button className="fs-btn" onClick={handleDownload}>
-                  <Download size={16} /> 下载图片
+                  <Download size={16} /> {isImageOutput ? '下载图片' : '下载视频'}
                 </button>
                 <button className="fs-btn fs-close" onClick={() => setShowFullscreen(false)}>
                   <X size={16} /> 关闭
@@ -163,4 +159,16 @@ function MetaTag({ label, value, color }) {
       <span className="mt-value">{value}</span>
     </span>
   )
+}
+
+function inferExtension(url, isImageOutput) {
+  if (isImageOutput) {
+    if (url.startsWith('data:image/png')) return 'png'
+    if (url.startsWith('data:image/webp')) return 'webp'
+    if (url.startsWith('data:image/gif')) return 'gif'
+    return 'jpg'
+  }
+
+  if (url.includes('.mov')) return 'mov'
+  return 'mp4'
 }

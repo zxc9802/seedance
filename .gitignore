@@ -11,6 +11,11 @@ node_modules
 dist
 dist-ssr
 *.local
+.temp_uploads
+.env
+.env.*
+!.env.example
+original_app.txt
 
 # Editor directories and files
 .vscode/*
