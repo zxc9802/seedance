@@ -171,7 +171,11 @@ if (!isProduction) {
 } else {
   const distDir = path.join(__dirname, 'dist')
   app.use(express.static(distDir))
-  app.get('*', (_, res) => {
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      next()
+      return
+    }
     res.sendFile(path.join(distDir, 'index.html'))
   })
 }
