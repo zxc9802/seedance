@@ -108,6 +108,13 @@
   font-size: 10px; color: var(--text-placeholder); margin-top: 2px;
 }
 
+.param-help {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
 /* Camera Control */
 .camera-grid { display: flex; flex-direction: column; gap: 6px; }
 .cam-row { display: flex; align-items: center; gap: 8px; }

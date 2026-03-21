@@ -26,7 +26,12 @@ const uploadTtlMinutes = Number(process.env.UPLOAD_TTL_MINUTES || 60)
 const cleanupIntervalMinutes = Number(process.env.UPLOAD_CLEANUP_INTERVAL_MINUTES || 15)
 const publicBaseUrl = stripTrailingSlash(process.env.PUBLIC_BASE_URL || '')
 const videoApiBaseUrl = stripTrailingSlash(process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
+const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const imageApiBaseUrl = stripTrailingSlash(process.env.IMAGE_API_BASE_URL || 'http://47.77.198.47:3001/v1')
+const materialThirdChannel = Number(process.env.MATERIAL_THIRD_CHANNEL || 1)
+const materialPollIntervalMs = Math.max(1000, Number(process.env.MATERIAL_POLL_INTERVAL_MS || 3000))
+const materialPollTimeoutMs = Math.max(materialPollIntervalMs, Number(process.env.MATERIAL_POLL_TIMEOUT_MS || 180000))
+const materialResourceTemplate = (process.env.MATERIAL_RESOURCE_TEMPLATE || '{materialId}').trim() || '{materialId}'
 const mainAppUrl = stripTrailingSlash(process.env.MAIN_APP_URL || 'https://www.qycm.top')
 const mainAppVideoEntryPath = normalizeMainAppEntryPath(process.env.MAIN_APP_VIDEO_ENTRY_PATH || '/bot/video-workbench-seedance')
 const requireMainAppSso = readBooleanEnv(process.env.REQUIRE_MAIN_APP_SSO, isProduction)
@@ -158,32 +163,71 @@ app.use(async (req, res, next) => {
   }
 })
 
-app.post('/api/upload', upload.array('files', 12), (req, res) => {
+app.post('/api/upload', upload.array('files', 12), async (req, res) => {
   const files = Array.isArray(req.files) ? req.files : []
   if (files.length === 0) {
     res.status(400).json({ success: false, message: 'No files uploaded' })
     return
   }
 
-  const baseUrl = resolveBaseUrl(req)
-  const publiclyReachable = isLikelyPublicBaseUrl(baseUrl)
-  const expiresAt = new Date(Date.now() + uploadTtlMinutes * 60 * 1000).toISOString()
-  const payload = files.map((file) => ({
-    name: file.originalname,
-    size: file.size,
-    mimeType: file.mimetype,
-    url: `${baseUrl}/temp-assets/${encodeURIComponent(file.filename)}`,
-    expiresAt,
-  }))
+  try {
+    const baseUrl = resolveBaseUrl(req)
+    const publiclyReachable = isLikelyPublicBaseUrl(baseUrl)
+    const expiresAt = new Date(Date.now() + uploadTtlMinutes * 60 * 1000).toISOString()
+    const materialType = parseMaterialType(req.body?.materialType)
+    const payload = []
 
-  res.json({
-    success: true,
-    files: payload,
-    publiclyReachable,
-    message: publiclyReachable
-      ? 'Upload succeeded.'
-      : 'Upload succeeded. Set PUBLIC_BASE_URL to a public domain or tunnel before using these files as generation references.',
-  })
+    if (materialType !== null) {
+      const missing = getMissingMaterialConfig()
+      if (missing.length > 0) {
+        res.status(500).json({
+          success: false,
+          message: `Missing backend config: ${missing.join(', ')}`,
+        })
+        return
+      }
+    }
+
+    for (const file of files) {
+      const url = `${baseUrl}/temp-assets/${encodeURIComponent(file.filename)}`
+      const item = {
+        name: file.originalname,
+        size: file.size,
+        mimeType: file.mimetype,
+        url,
+        resourceRef: url,
+        expiresAt,
+      }
+
+      if (materialType !== null && publiclyReachable && file.mimetype.startsWith('image/')) {
+        const material = await createMaterialReference({
+          name: buildMaterialName(file.originalname),
+          originalUrl: url,
+          type: materialType,
+        })
+        item.materialId = material.materialId
+        item.materialStatus = material.status
+        item.resourceRef = material.resourceRef
+      }
+
+      payload.push(item)
+    }
+
+    res.json({
+      success: true,
+      files: payload,
+      publiclyReachable,
+      message: publiclyReachable
+        ? 'Upload succeeded.'
+        : 'Upload succeeded. Set PUBLIC_BASE_URL to a public domain or tunnel before using these files as generation references.',
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Upload failed',
+    })
+  }
 })
 
 app.post('/api/veo/generate', async (req, res) => {
@@ -312,11 +356,116 @@ async function proxyJson(req, res, url, extraHeaders = {}) {
   }
 }
 
+async function createMaterialReference({ name, originalUrl, type }) {
+  const createPayload = await requestJson(materialApiBaseUrl, '/openApi/material/create', buildMaterialHeaders(), {
+    name,
+    originalUrl,
+    type,
+    fileType: 1,
+    thirdChannel: materialThirdChannel,
+  })
+
+  if (!createPayload?.success) {
+    throw createHttpError(400, createPayload?.msg || createPayload?.message || 'Material creation failed.')
+  }
+
+  const materialId = createPayload?.data?.materialId
+  if (!materialId) {
+    throw createHttpError(502, 'Material creation succeeded but no materialId was returned.')
+  }
+
+  let currentStatus = Number(createPayload?.data?.status || 1)
+  let lastError = createPayload?.data?.errorMsg || ''
+  const deadline = Date.now() + materialPollTimeoutMs
+
+  while (currentStatus === 1 && Date.now() < deadline) {
+    await sleep(materialPollIntervalMs)
+    const listPayload = await requestJson(materialApiBaseUrl, '/openApi/material/pageList', buildMaterialHeaders(), {
+      materialId,
+      pageNo: 1,
+      pageSize: 10,
+    })
+
+    if (!listPayload?.success) {
+      throw createHttpError(502, listPayload?.msg || listPayload?.message || 'Material status query failed.')
+    }
+
+    const records = Array.isArray(listPayload?.data?.records) ? listPayload.data.records : []
+    const record = records.find((item) => item?.materialId === materialId) || records[0]
+    if (!record) {
+      continue
+    }
+
+    currentStatus = Number(record.status || currentStatus)
+    lastError = record.errorMsg || lastError
+  }
+
+  if (currentStatus !== 2) {
+    if (currentStatus === 3) {
+      throw createHttpError(400, lastError || 'Material review failed.')
+    }
+    throw createHttpError(504, 'Material review timed out. Please retry later.')
+  }
+
+  return {
+    materialId,
+    status: currentStatus,
+    resourceRef: formatMaterialResource(materialId),
+  }
+}
+
+function buildMaterialHeaders() {
+  return {
+    projectCode: process.env.MATERIAL_PROJECT_CODE || process.env.VIDEO_PROJECT_CODE,
+    'X-Access-Key': process.env.MATERIAL_ACCESS_KEY || process.env.VIDEO_ACCESS_KEY,
+    'X-Secret-Key': process.env.MATERIAL_SECRET_KEY || process.env.VIDEO_SECRET_KEY,
+  }
+}
+
+async function requestJson(baseUrl, endpoint, headers, body) {
+  const response = await fetch(`${baseUrl}${endpoint}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+    body: JSON.stringify(body),
+  })
+
+  const contentType = response.headers.get('content-type') || ''
+  const payload = contentType.includes('application/json')
+    ? await response.json()
+    : await response.text()
+
+  if (!response.ok) {
+    const message = typeof payload === 'string'
+      ? payload
+      : payload?.msg || payload?.message || payload?.error?.message || JSON.stringify(payload)
+    throw createHttpError(response.status, message || 'Upstream request failed.')
+  }
+
+  return payload
+}
+
+function createHttpError(statusCode, message) {
+  const error = new Error(message)
+  error.statusCode = statusCode
+  return error
+}
+
 function getMissingVideoConfig() {
   return [
     !process.env.VIDEO_PROJECT_CODE && 'VIDEO_PROJECT_CODE',
     !process.env.VIDEO_ACCESS_KEY && 'VIDEO_ACCESS_KEY',
     !process.env.VIDEO_SECRET_KEY && 'VIDEO_SECRET_KEY',
+  ].filter(Boolean)
+}
+
+function getMissingMaterialConfig() {
+  return [
+    !(process.env.MATERIAL_PROJECT_CODE || process.env.VIDEO_PROJECT_CODE) && 'MATERIAL_PROJECT_CODE|VIDEO_PROJECT_CODE',
+    !(process.env.MATERIAL_ACCESS_KEY || process.env.VIDEO_ACCESS_KEY) && 'MATERIAL_ACCESS_KEY|VIDEO_ACCESS_KEY',
+    !(process.env.MATERIAL_SECRET_KEY || process.env.VIDEO_SECRET_KEY) && 'MATERIAL_SECRET_KEY|VIDEO_SECRET_KEY',
   ].filter(Boolean)
 }
 
@@ -358,6 +507,45 @@ function inferExtension(mimeType = '') {
     'audio/wav': '.wav',
   }
   return map[mimeType] || ''
+}
+
+function parseMaterialType(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  switch (normalized) {
+    case '':
+    case 'direct':
+      return null
+    case '1':
+    case 'role':
+      return 1
+    case '2':
+    case 'object':
+      return 2
+    case '3':
+    case 'scene':
+      return 3
+    default:
+      throw createHttpError(400, `Unsupported materialType: ${value}`)
+  }
+}
+
+function buildMaterialName(originalName) {
+  const parsed = path.parse(originalName || '')
+  const baseName = (parsed.name || 'reference-image').trim()
+  return baseName.slice(0, 80)
+}
+
+function formatMaterialResource(materialId) {
+  if (!materialId) return materialId
+  if (!materialResourceTemplate.includes('{materialId}')) {
+    return materialId
+  }
+  // Default to the raw materialId. Override MATERIAL_RESOURCE_TEMPLATE if the provider expects a URI wrapper.
+  return materialResourceTemplate.replaceAll('{materialId}', materialId)
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function isLikelyPublicBaseUrl(baseUrl) {

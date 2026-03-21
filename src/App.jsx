@@ -114,7 +114,7 @@ function App() {
 
     try {
       if (isVideoProvider(provider)) {
-        const uploadedReferences = await uploadVideoReferences(videoReferences)
+        const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
         if (uploadedReferences.requiresPublicBaseUrl) {
           throw new Error('参考素材已经上传到本地后端，但当前后端地址不是公网可访问地址。请部署后端到公网，或设置 PUBLIC_BASE_URL 指向公网域名/隧道。')
         }
@@ -379,27 +379,31 @@ function validateVideoReferenceInput(mode, references) {
   return null
 }
 
-async function uploadVideoReferences(references) {
-  const images = await uploadReferenceBatch(references.images)
+async function uploadVideoReferences(provider, params, references) {
+  const imageMaterialType = resolveImageMaterialType(provider, params)
+  const images = await uploadReferenceBatch(references.images, { materialType: imageMaterialType })
   const videos = await uploadReferenceBatch(references.videos)
   const audios = await uploadReferenceBatch(references.audios)
 
   return {
-    images: images.urls,
-    videos: videos.urls,
-    audios: audios.urls,
+    images: images.resourceRefs,
+    videos: videos.resourceRefs,
+    audios: audios.resourceRefs,
     requiresPublicBaseUrl: images.requiresPublicBaseUrl || videos.requiresPublicBaseUrl || audios.requiresPublicBaseUrl,
   }
 }
 
-async function uploadReferenceBatch(assets) {
+async function uploadReferenceBatch(assets, options = {}) {
   if (!assets.length) {
-    return { urls: [], requiresPublicBaseUrl: false }
+    return { resourceRefs: [], requiresPublicBaseUrl: false }
   }
 
   const formData = new FormData()
   for (const asset of assets) {
     formData.append('files', asset.file, asset.file.name)
+  }
+  if (options.materialType && options.materialType !== 'direct') {
+    formData.append('materialType', options.materialType)
   }
 
   const response = await fetch('/api/upload', {
@@ -417,9 +421,14 @@ async function uploadReferenceBatch(assets) {
   }
 
   return {
-    urls: data.files.map((file) => file.url),
+    resourceRefs: data.files.map((file) => file.resourceRef || file.url),
     requiresPublicBaseUrl: data.publiclyReachable === false,
   }
+}
+
+function resolveImageMaterialType(provider, params) {
+  if (provider !== 'veo') return 'direct'
+  return params.imageMaterialType || 'direct'
 }
 
 function createEmptyVideoReferences() {
