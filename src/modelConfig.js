@@ -63,7 +63,7 @@ export const PROVIDERS = {
     durations: [4, 6, 8],
     sampleCounts: [1],
     features: {
-      generateAudio: false,
+      generateAudio: true,
       negativePrompt: false,
       referenceImage: true,
       referenceVideo: false,
