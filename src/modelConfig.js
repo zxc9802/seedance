@@ -19,7 +19,6 @@ export const PROVIDERS = {
       referenceImage: true,
       referenceVideo: true,
       referenceAudio: true,
-      materialLibrary: true,
     },
     generationModes: [
       { value: 't2v', label: '文生视频' },
@@ -47,14 +46,7 @@ export const PROVIDERS = {
       duration: 5,
       sampleCount: 1,
       generateAudio: false,
-      imageMaterialType: 'direct',
     },
-    materialTypes: [
-      { value: 'direct', label: '直接原图' },
-      { value: 'role', label: '人物审核' },
-      { value: 'object', label: '物品审核' },
-      { value: 'scene', label: '场景审核' },
-    ],
   },
   ve31p: {
     id: 've31p',
