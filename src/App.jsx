@@ -428,7 +428,7 @@ async function uploadReferenceBatch(assets, options = {}) {
 
 function resolveImageMaterialType(provider, params) {
   if (provider !== 'veo') return 'direct'
-  return 'role'
+  return params.imageMaterialType || 'role'
 }
 
 function createEmptyVideoReferences() {
