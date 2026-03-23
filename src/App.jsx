@@ -1,5 +1,10 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { PROVIDERS, PROVIDER_ORDER } from './modelConfig'
+import {
+  getLatestSnapshotMeta,
+  loadLatestSnapshot,
+  saveLatestSnapshot,
+} from './snapshotStorage'
 
 const VIDEO_PROVIDERS = new Set(
   PROVIDER_ORDER.filter((key) => PROVIDERS[key].outputType !== 'image')
@@ -16,27 +21,36 @@ import './App.css'
 
 function App() {
   const [provider, setProvider] = useState('veo')
-  const [allParams, setAllParams] = useState(() => {
-    const initial = {}
-    for (const key of PROVIDER_ORDER) initial[key] = { ...PROVIDERS[key].defaults }
-    return initial
-  })
+  const [allParams, setAllParams] = useState(createInitialParams)
   const [prompt, setPrompt] = useState('')
   const [generationMode, setGenerationMode] = useState('t2v')
   const [referenceMedia, setReferenceMedia] = useState([])
   const [videoReferences, setVideoReferences] = useState(createEmptyVideoReferences)
   const [selectedTemplate, setSelectedTemplate] = useState(null)
-  const [providerState, setProviderState] = useState(() => {
-    const state = {}
-    for (const key of PROVIDER_ORDER) {
-      state[key] = { generating: false, progress: 0, videoUrl: null, error: null }
-    }
-    return state
-  })
+  const [providerState, setProviderState] = useState(createInitialProviderState)
+  const [snapshotMeta, setSnapshotMeta] = useState(() => getLatestSnapshotMeta())
+  const [snapshotBusy, setSnapshotBusy] = useState(false)
+  const [snapshotNotice, setSnapshotNotice] = useState(null)
+  const videoReferencesRef = useRef(videoReferences)
+  const providerStateRef = useRef(providerState)
+
+  useEffect(() => {
+    videoReferencesRef.current = videoReferences
+  }, [videoReferences])
+
+  useEffect(() => {
+    providerStateRef.current = providerState
+  }, [providerState])
+
+  useEffect(() => () => {
+    releaseVideoReferences(videoReferencesRef.current)
+    releaseProviderPreviewUrls(providerStateRef.current)
+  }, [])
 
   const params = allParams[provider]
   const config = PROVIDERS[provider]
   const currentState = providerState[provider] || { generating: false, progress: 0, videoUrl: null, error: null }
+  const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
   const maxImages = resolveLimit(config.maxReferenceImages, generationMode)
   const maxVideos = resolveLimit(config.maxReferenceVideos, generationMode)
   const maxAudios = resolveLimit(config.maxReferenceAudios, generationMode)
@@ -51,7 +65,7 @@ function App() {
   const updateProviderState = useCallback((targetProvider, updates) => {
     setProviderState((prev) => ({
       ...prev,
-      [targetProvider]: { ...prev[targetProvider], ...updates },
+      [targetProvider]: mergeProviderRuntimeState(prev[targetProvider], updates),
     }))
   }, [])
 
@@ -69,6 +83,101 @@ function App() {
       return createEmptyVideoReferences()
     })
   }, [])
+
+  const handleSaveSnapshot = useCallback(async () => {
+    setSnapshotBusy(true)
+    setSnapshotNotice({ type: 'info', text: '\u6b63\u5728\u4fdd\u5b58\u5feb\u7167...' })
+
+    try {
+      const savedAt = Date.now()
+      await saveLatestSnapshot({
+        savedAt,
+        version: 1,
+        payload: {
+          provider,
+          allParams,
+          prompt,
+          generationMode,
+          referenceMedia,
+          videoReferences: serializeVideoReferences(videoReferences),
+          selectedTemplate,
+          providerState: serializeProviderState(providerState),
+        },
+      })
+
+      setSnapshotMeta({ savedAt })
+      setSnapshotNotice({ type: 'success', text: `\u5feb\u7167\u5df2\u4fdd\u5b58 ${formatSnapshotTime(savedAt)}` })
+    } catch (error) {
+      setSnapshotNotice({ type: 'error', text: error.message || '\u4fdd\u5b58\u5feb\u7167\u5931\u8d25' })
+    } finally {
+      setSnapshotBusy(false)
+    }
+  }, [
+    allParams,
+    generationMode,
+    prompt,
+    provider,
+    providerState,
+    referenceMedia,
+    selectedTemplate,
+    videoReferences,
+  ])
+
+  const handleLoadSnapshot = useCallback(async () => {
+    if (hasActiveGeneration) {
+      setSnapshotNotice({
+        type: 'error',
+        text: '\u8bf7\u5148\u7b49\u5f53\u524d\u751f\u6210\u4efb\u52a1\u7ed3\u675f\u540e\u518d\u52a0\u8f7d\u5feb\u7167',
+      })
+      return
+    }
+
+    setSnapshotBusy(true)
+    setSnapshotNotice({ type: 'info', text: '\u6b63\u5728\u52a0\u8f7d\u5feb\u7167...' })
+
+    try {
+      const snapshot = await loadLatestSnapshot()
+      if (!snapshot?.payload) {
+        throw new Error('\u6d4f\u89c8\u5668\u91cc\u8fd8\u6ca1\u6709\u53ef\u52a0\u8f7d\u7684\u5feb\u7167')
+      }
+
+      const payload = snapshot.payload
+      const nextProvider = isSupportedProvider(payload.provider) ? payload.provider : 'veo'
+      const nextGenerationMode = getSafeGenerationMode(nextProvider, payload.generationMode)
+      const nextParams = mergeSnapshotParams(payload.allParams)
+      const nextProviderState = mergeSnapshotProviderState(payload.providerState)
+      const nextReferenceMedia = Array.isArray(payload.referenceMedia)
+        ? payload.referenceMedia.filter((item) => typeof item === 'string')
+        : []
+      const nextVideoReferences = hydrateVideoReferences(payload.videoReferences)
+
+      setProvider(nextProvider)
+      setAllParams(nextParams)
+      setPrompt(typeof payload.prompt === 'string' ? payload.prompt : '')
+      setGenerationMode(nextGenerationMode)
+      setReferenceMedia(nextReferenceMedia)
+      setSelectedTemplate(payload.selectedTemplate ?? null)
+      setVideoReferences((prev) => {
+        releaseVideoReferences(prev)
+        return nextVideoReferences
+      })
+      setProviderState((prev) => {
+        releaseProviderPreviewUrls(prev)
+        return nextProviderState
+      })
+
+      const restoredSavedAt = typeof snapshot.savedAt === 'number' ? snapshot.savedAt : Date.now()
+      setSnapshotMeta({ savedAt: restoredSavedAt })
+      setSnapshotNotice({
+        type: 'success',
+        text: `\u5df2\u52a0\u8f7d ${formatSnapshotTime(restoredSavedAt)} \u7684\u5feb\u7167`,
+      })
+    } catch (error) {
+      setSnapshotNotice({ type: 'error', text: error.message || '\u52a0\u8f7d\u5feb\u7167\u5931\u8d25' })
+    } finally {
+      setSnapshotBusy(false)
+    }
+  }, [hasActiveGeneration])
 
   const handleProviderChange = useCallback((nextProvider) => {
     setProvider(nextProvider)
@@ -236,7 +345,15 @@ function App() {
 
   return (
     <div className="app-layout">
-      <Header />
+      <Header
+        onSaveSnapshot={handleSaveSnapshot}
+        onLoadSnapshot={handleLoadSnapshot}
+        snapshotBusy={snapshotBusy}
+        snapshotLoadDisabled={hasActiveGeneration}
+        hasSnapshot={Boolean(snapshotMeta?.savedAt)}
+        lastSavedAt={snapshotMeta?.savedAt ?? null}
+        snapshotNotice={snapshotNotice}
+      />
       <main className="app-main">
         <div className="left-panel">
           <ProviderTabs provider={provider} onChange={handleProviderChange} />
@@ -281,6 +398,170 @@ function App() {
       </main>
     </div>
   )
+}
+
+function createInitialParams() {
+  const initial = {}
+  for (const key of PROVIDER_ORDER) initial[key] = { ...PROVIDERS[key].defaults }
+  return initial
+}
+
+function createProviderRuntimeState() {
+  return { generating: false, progress: 0, videoUrl: null, error: null }
+}
+
+function createInitialProviderState() {
+  const state = {}
+  for (const key of PROVIDER_ORDER) {
+    state[key] = createProviderRuntimeState()
+  }
+  return state
+}
+
+function mergeProviderRuntimeState(currentState, updates) {
+  const previous = currentState || createProviderRuntimeState()
+  const next = { ...previous, ...updates }
+
+  if (
+    Object.prototype.hasOwnProperty.call(updates, 'videoUrl')
+    && previous.videoUrl
+    && previous.videoUrl !== next.videoUrl
+  ) {
+    revokeObjectUrl(previous.videoUrl)
+  }
+
+  return next
+}
+
+function serializeVideoReferences(references) {
+  return {
+    images: serializeVideoAssetList(references?.images),
+    videos: serializeVideoAssetList(references?.videos),
+    audios: serializeVideoAssetList(references?.audios),
+  }
+}
+
+function serializeVideoAssetList(list) {
+  if (!Array.isArray(list)) return []
+
+  return list
+    .filter((asset) => asset?.file)
+    .map((asset) => ({
+      id: asset.id,
+      name: asset.name,
+      size: asset.size,
+      mimeType: asset.mimeType,
+      file: asset.file,
+    }))
+}
+
+function hydrateVideoReferences(references) {
+  return {
+    images: hydrateVideoAssetList(references?.images),
+    videos: hydrateVideoAssetList(references?.videos),
+    audios: hydrateVideoAssetList(references?.audios),
+  }
+}
+
+function hydrateVideoAssetList(list) {
+  if (!Array.isArray(list)) return []
+
+  return list
+    .map((asset) => hydrateVideoAsset(asset))
+    .filter(Boolean)
+}
+
+function hydrateVideoAsset(asset) {
+  if (!asset?.file && !asset?.blob) return null
+
+  const blob = asset.file || asset.blob
+  const file = blob instanceof File
+    ? blob
+    : new File([blob], asset.name || 'snapshot-asset', { type: asset.mimeType || blob.type || '' })
+
+  return {
+    id: asset.id || crypto.randomUUID(),
+    file,
+    name: asset.name || file.name,
+    size: asset.size ?? file.size,
+    mimeType: asset.mimeType || file.type,
+    previewUrl: canPreviewAsset(file.type) ? URL.createObjectURL(file) : '',
+  }
+}
+
+function serializeProviderState(state) {
+  const serialized = {}
+  for (const key of PROVIDER_ORDER) {
+    const current = state?.[key] || createProviderRuntimeState()
+    serialized[key] = {
+      generating: false,
+      progress: 0,
+      error: null,
+      videoUrl: isPersistablePreviewUrl(current.videoUrl) ? current.videoUrl : null,
+    }
+  }
+  return serialized
+}
+
+function mergeSnapshotProviderState(snapshotState) {
+  const initial = createInitialProviderState()
+
+  for (const key of PROVIDER_ORDER) {
+    const current = snapshotState?.[key]
+    if (!current) continue
+
+    initial[key] = {
+      ...initial[key],
+      videoUrl: isPersistablePreviewUrl(current.videoUrl) ? current.videoUrl : null,
+    }
+  }
+
+  return initial
+}
+
+function mergeSnapshotParams(snapshotParams) {
+  const initial = createInitialParams()
+
+  for (const key of PROVIDER_ORDER) {
+    if (snapshotParams?.[key] && typeof snapshotParams[key] === 'object') {
+      initial[key] = {
+        ...initial[key],
+        ...snapshotParams[key],
+      }
+    }
+  }
+
+  return initial
+}
+
+function isSupportedProvider(value) {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(PROVIDERS, value)
+}
+
+function getSafeGenerationMode(provider, mode) {
+  const config = PROVIDERS[provider]
+  const availableModes = config?.generationModes?.map((item) => item.value) || ['t2v']
+  return availableModes.includes(mode) ? mode : availableModes[0]
+}
+
+function canPreviewAsset(mimeType) {
+  return typeof mimeType === 'string'
+    && (mimeType.startsWith('image/') || mimeType.startsWith('video/'))
+}
+
+function isPersistablePreviewUrl(url) {
+  return typeof url === 'string' && url.length > 0 && !url.startsWith('blob:')
+}
+
+function formatSnapshotTime(timestamp) {
+  if (typeof timestamp !== 'number') return ''
+
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(timestamp)
 }
 
 function buildVideoRequest(provider, params, prompt, mode, references) {
@@ -438,10 +719,22 @@ function createEmptyVideoReferences() {
 function releaseVideoReferences(references) {
   for (const key of ['images', 'videos', 'audios']) {
     for (const asset of references[key] || []) {
-      if (asset.previewUrl && asset.previewUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(asset.previewUrl)
-      }
+      revokeObjectUrl(asset.previewUrl)
     }
+  }
+}
+
+function releaseProviderPreviewUrls(state) {
+  if (!state) return
+
+  for (const key of PROVIDER_ORDER) {
+    revokeObjectUrl(state[key]?.videoUrl)
+  }
+}
+
+function revokeObjectUrl(url) {
+  if (typeof url === 'string' && url.startsWith('blob:')) {
+    URL.revokeObjectURL(url)
   }
 }
 
