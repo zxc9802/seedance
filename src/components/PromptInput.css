@@ -140,6 +140,7 @@
 }
 
 .ref-images-body {
+  position: relative;
   display: flex; gap: 10px; flex-wrap: wrap;
   padding: 12px;
   border: 1.5px dashed var(--border-light);
@@ -152,6 +153,29 @@
 .ref-images-body.drag-active {
   border-color: var(--border-focus);
   background: rgba(196,168,130,0.06);
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1.5px dashed var(--border-focus);
+  border-radius: inherit;
+  background: rgba(255,255,255,0.9);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+}
+
+.drop-overlay.bucket {
+  inset: 12px;
 }
 
 .ref-thumb {
@@ -215,12 +239,19 @@
 }
 
 .asset-bucket {
+  position: relative;
   display: grid;
   gap: 6px;
   padding: 12px;
   border: 1px solid var(--border-light);
   border-radius: var(--radius-lg);
   background: rgba(255,255,255,0.72);
+}
+
+.asset-bucket.drag-active {
+  border-color: var(--border-focus);
+  background: rgba(196,168,130,0.08);
+  box-shadow: 0 0 0 3px rgba(196,168,130,0.08);
 }
 
 .asset-bucket-head {
@@ -251,9 +282,11 @@
 }
 
 .asset-bucket-grid {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+  min-height: 96px;
 }
 
 .asset-card {

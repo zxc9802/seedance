@@ -90,6 +90,7 @@ function App() {
 
     try {
       const savedAt = Date.now()
+      const serializedProviderState = await serializeProviderState(providerState)
       await saveLatestSnapshot({
         savedAt,
         version: 1,
@@ -101,7 +102,7 @@ function App() {
           referenceMedia,
           videoReferences: serializeVideoReferences(videoReferences),
           selectedTemplate,
-          providerState: serializeProviderState(providerState),
+          providerState: serializedProviderState,
         },
       })
 
@@ -145,7 +146,7 @@ function App() {
       const nextProvider = isSupportedProvider(payload.provider) ? payload.provider : 'veo'
       const nextGenerationMode = getSafeGenerationMode(nextProvider, payload.generationMode)
       const nextParams = mergeSnapshotParams(payload.allParams)
-      const nextProviderState = mergeSnapshotProviderState(payload.providerState)
+      const nextProviderState = hydrateSnapshotProviderState(payload.providerState)
       const nextReferenceMedia = Array.isArray(payload.referenceMedia)
         ? payload.referenceMedia.filter((item) => typeof item === 'string')
         : []
@@ -489,7 +490,7 @@ function hydrateVideoAsset(asset) {
   }
 }
 
-function serializeProviderState(state) {
+async function serializeProviderState(state) {
   const serialized = {}
   for (const key of PROVIDER_ORDER) {
     const current = state?.[key] || createProviderRuntimeState()
@@ -497,13 +498,13 @@ function serializeProviderState(state) {
       generating: false,
       progress: 0,
       error: null,
-      videoUrl: isPersistablePreviewUrl(current.videoUrl) ? current.videoUrl : null,
+      previewAsset: await serializePreviewAsset(current.videoUrl),
     }
   }
   return serialized
 }
 
-function mergeSnapshotProviderState(snapshotState) {
+function hydrateSnapshotProviderState(snapshotState) {
   const initial = createInitialProviderState()
 
   for (const key of PROVIDER_ORDER) {
@@ -512,7 +513,7 @@ function mergeSnapshotProviderState(snapshotState) {
 
     initial[key] = {
       ...initial[key],
-      videoUrl: isPersistablePreviewUrl(current.videoUrl) ? current.videoUrl : null,
+      videoUrl: hydratePreviewAsset(current.previewAsset) || (isPersistablePreviewUrl(current.videoUrl) ? current.videoUrl : null),
     }
   }
 
@@ -547,6 +548,50 @@ function getSafeGenerationMode(provider, mode) {
 function canPreviewAsset(mimeType) {
   return typeof mimeType === 'string'
     && (mimeType.startsWith('image/') || mimeType.startsWith('video/'))
+}
+
+async function serializePreviewAsset(url) {
+  if (typeof url !== 'string' || url.length === 0) return null
+
+  if (url.startsWith('blob:')) {
+    try {
+      const response = await fetch(url)
+      if (!response.ok) return null
+
+      const blob = await response.blob()
+      return {
+        type: 'blob',
+        blob,
+        mimeType: blob.type || null,
+      }
+    } catch {
+      return null
+    }
+  }
+
+  if (isPersistablePreviewUrl(url)) {
+    return {
+      type: 'url',
+      url,
+    }
+  }
+
+  return null
+}
+
+function hydratePreviewAsset(asset) {
+  if (!asset || typeof asset !== 'object') return null
+
+  if (asset.type === 'url' && typeof asset.url === 'string' && asset.url.length > 0) {
+    return asset.url
+  }
+
+  const blob = asset.blob || asset.file
+  if (asset.type === 'blob' && blob instanceof Blob) {
+    return URL.createObjectURL(blob)
+  }
+
+  return null
 }
 
 function isPersistablePreviewUrl(url) {

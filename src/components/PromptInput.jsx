@@ -41,12 +41,14 @@ export default function PromptInput({
 }) {
   const [showNeg, setShowNeg] = useState(false)
   const [mediaError, setMediaError] = useState(null)
+  const [imageDropActive, setImageDropActive] = useState(false)
   const fileInputRef = useRef(null)
 
   const isImageOutput = providerConfig.outputType === 'image'
   const isVideoProvider = providerConfig.outputType !== 'image' && providerConfig.id !== 'gemini-image'
   const templates = providerConfig.promptTemplates || []
   const modeOptions = providerConfig.generationModes || buildDefaultModes(providerConfig, isImageOutput)
+  const imageAccept = getImageAccept(providerConfig)
 
   const generationDisabled = generating
     || (!prompt.trim() && !selectedTemplate)
@@ -55,6 +57,7 @@ export default function PromptInput({
       : (mode !== 't2v' && mediaList.length === 0))
 
   const processImageFiles = (files) => {
+    setMediaError(null)
     const remaining = maxImages - mediaList.length
     if (remaining <= 0) {
       setMediaError(`最多只能添加 ${maxImages} 张参考图`)
@@ -89,6 +92,11 @@ export default function PromptInput({
     }
   }
 
+  const imageDropHandlers = createFileDropHandlers({
+    onFiles: processImageFiles,
+    onActiveChange: setImageDropActive,
+  })
+
   const addVideoAssets = (kind, files, limit) => {
     if (!files.length) return
 
@@ -103,7 +111,7 @@ export default function PromptInput({
 
       const accepted = []
       for (const file of files.slice(0, remaining)) {
-        const error = validateAssetFile(kind, file)
+        const error = validateAssetFile(kind, file, providerConfig)
         if (error) {
           setMediaError(error)
           continue
@@ -283,7 +291,7 @@ export default function PromptInput({
                     title={mode === 'flf' ? '首尾帧图片' : '参考图片'}
                     subtitle={mode === 'flf' ? '顺序上传：先首帧，再尾帧' : mode === 'fusion' ? '最多 9 张参考图片' : mode === 'ref' ? `最多 ${maxImages} 张参考图片` : '上传 1 张参考图片'}
                     icon={<ImageIcon size={14} />}
-                    accept="image/jpeg,image/png,image/webp"
+                    accept={imageAccept}
                     assets={videoReferences.images}
                     maxItems={maxImages}
                     onAdd={(files) => addVideoAssets('images', files, maxImages)}
@@ -323,7 +331,16 @@ export default function PromptInput({
                 )}
               </div>
             ) : (
-              <div className="ref-images-body">
+              <div
+                className={`ref-images-body ${imageDropActive ? 'drag-active' : ''}`}
+                {...imageDropHandlers}
+              >
+                {imageDropActive && (
+                  <div className="drop-overlay">
+                    <UploadCloud size={18} />
+                    <span>{'\u62d6\u62fd\u5230\u8fd9\u91cc\u4e0a\u4f20\u53c2\u8003\u56fe\u7247'}</span>
+                  </div>
+                )}
                 {mediaList.map((media, index) => (
                   <div key={`${media}-${index}`} className="ref-thumb">
                     <img src={media} alt={`参考图 ${index + 1}`} />
@@ -340,7 +357,7 @@ export default function PromptInput({
                       ref={fileInputRef}
                       type="file"
                       className="hidden-input"
-                      accept="image/jpeg,image/png,image/webp"
+                      accept={imageAccept}
                       multiple
                       onChange={(event) => {
                         if (event.target.files?.length) {
@@ -371,10 +388,18 @@ export default function PromptInput({
 }
 
 function AssetUploadBucket({ title, subtitle, icon, accept, assets, maxItems, onAdd, onRemove, kind }) {
+  const [dragActive, setDragActive] = useState(false)
   const inputRef = useRef(null)
+  const dropHandlers = createFileDropHandlers({
+    onFiles: onAdd,
+    onActiveChange: setDragActive,
+  })
 
   return (
-    <div className="asset-bucket">
+    <div
+      className={`asset-bucket ${dragActive ? 'drag-active' : ''}`}
+      {...dropHandlers}
+    >
       <div className="asset-bucket-head">
         <div className="asset-bucket-title">
           {icon}
@@ -385,6 +410,12 @@ function AssetUploadBucket({ title, subtitle, icon, accept, assets, maxItems, on
       {subtitle && <div className="asset-bucket-subtitle">{subtitle}</div>}
 
       <div className="asset-bucket-grid">
+        {dragActive && (
+          <div className="drop-overlay bucket">
+            <UploadCloud size={18} />
+            <span>{`\u62d6\u62fd\u5230\u8fd9\u91cc\u4e0a\u4f20${bucketLabel(kind)}`}</span>
+          </div>
+        )}
         {assets.map((asset, index) => (
           <div key={asset.id} className={`asset-card ${kind}`}>
             <button className="asset-card-remove" onClick={() => onRemove(asset.id)}>
@@ -494,9 +525,10 @@ function createLocalAsset(file) {
   }
 }
 
-function validateAssetFile(kind, file) {
+function validateAssetFile(kind, file, providerConfig) {
   if (kind === 'images') {
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    const allowedImageMimeTypes = getAllowedImageMimeTypes(providerConfig)
+    if (!allowedImageMimeTypes.includes(file.type)) {
       return '图片仅支持 JPG、PNG、WebP'
     }
     if (file.size > 20 * 1024 * 1024) {
@@ -540,8 +572,60 @@ function bucketLabel(kind) {
   }
 }
 
+function getAllowedImageMimeTypes(providerConfig) {
+  const mimeTypes = providerConfig?.imageMimeTypes
+  return Array.isArray(mimeTypes) && mimeTypes.length > 0
+    ? mimeTypes
+    : ['image/jpeg', 'image/png', 'image/webp']
+}
+
+function getImageAccept(providerConfig) {
+  return getAllowedImageMimeTypes(providerConfig).join(',')
+}
+
 function formatFileSize(size) {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function createFileDropHandlers({ onFiles, onActiveChange }) {
+  const activate = (event) => {
+    if (!hasFilePayload(event)) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'copy'
+    onActiveChange(true)
+  }
+
+  return {
+    onDragEnter: activate,
+    onDragOver: activate,
+    onDragLeave: (event) => {
+      if (!hasFilePayload(event)) return
+
+      event.preventDefault()
+      event.stopPropagation()
+
+      if (event.currentTarget.contains(event.relatedTarget)) return
+      onActiveChange(false)
+    },
+    onDrop: (event) => {
+      if (!hasFilePayload(event)) return
+
+      event.preventDefault()
+      event.stopPropagation()
+      onActiveChange(false)
+
+      const files = Array.from(event.dataTransfer?.files || [])
+      if (files.length > 0) {
+        onFiles(files)
+      }
+    },
+  }
+}
+
+function hasFilePayload(event) {
+  return Array.from(event.dataTransfer?.types || []).includes('Files')
 }
