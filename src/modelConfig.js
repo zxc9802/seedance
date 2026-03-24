@@ -96,6 +96,71 @@ export const PROVIDERS = {
       sampleCount: 1,
     },
   },
+  kling: {
+    id: 'kling',
+    name: '可灵',
+    vendor: '聚合 API',
+    color: '#f97316',
+    models: [
+      { value: 'kling-v3-omni', label: 'Kling 3.1', tag: '已接入' },
+    ],
+    aspectRatios: ['16:9', '9:16', '1:1'],
+    resolutions: {
+      default: ['720p', '1080p'],
+    },
+    durations: [3, 4, 5, 6, 8, 10, 12, 15],
+    sampleCounts: [1],
+    features: {
+      generateAudio: true,
+      negativePrompt: false,
+      referenceImage: true,
+      referenceVideo: true,
+      referenceAudio: false,
+    },
+    generationModes: [
+      { value: 'i2v', label: '首帧' },
+      { value: 'flf', label: '首尾帧' },
+      { value: 'fusion', label: '参考生视频' },
+    ],
+    referenceInputMode: 'url',
+    maxReferenceImages: {
+      i2v: 1,
+      flf: 2,
+      fusion: 7,
+    },
+    maxReferenceVideos: {
+      fusion: 1,
+    },
+    defaults: {
+      model: 'kling-v3-omni',
+      aspectRatio: '16:9',
+      resolution: '720p',
+      duration: 5,
+      sampleCount: 1,
+      generateAudio: true,
+    },
+    imageMimeTypes: ['image/jpeg', 'image/png'],
+    imageMimeTypeLabel: 'JPG/JPEG、PNG',
+    imageMaxSizeMb: 10,
+    imageValidation: {
+      minWidth: 300,
+      minHeight: 300,
+      minAspectRatio: 0.4,
+      maxAspectRatio: 2.5,
+      aspectRatioLabel: '1:2.5 ~ 2.5:1',
+    },
+    videoMimeTypes: ['video/mp4', 'video/quicktime'],
+    videoMimeTypeLabel: 'MP4、MOV',
+    videoMaxSizeMb: 200,
+    videoValidation: {
+      minDurationSec: 3,
+      minWidth: 720,
+      minHeight: 720,
+      maxWidth: 2160,
+      maxHeight: 2160,
+    },
+    referenceHelpText: '参考模式最多上传 7 张图片；如果带参考视频，图片最多 4 张且仅支持无声。参考视频仅支持 1 段 MP4/MOV，时长不少于 3 秒，文件不超过 200MB。',
+  },
   'gemini-image': {
     id: 'gemini-image',
     name: '绘图',
@@ -161,4 +226,4 @@ export const PROVIDERS = {
   },
 }
 
-export const PROVIDER_ORDER = ['veo', 've31p', 'gemini-image']
+export const PROVIDER_ORDER = ['veo', 've31p', 'kling', 'gemini-image']
