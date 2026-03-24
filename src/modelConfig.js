@@ -86,7 +86,7 @@ export const PROVIDERS = {
     maxReferenceImages: {
       i2v: 1,
       flf: 2,
-      ref: 3,
+      ref: 5,
     },
     defaults: {
       model: 'VE3.1P',
@@ -95,6 +95,54 @@ export const PROVIDERS = {
       duration: 6,
       sampleCount: 1,
     },
+    imageMimeTypes: ['image/jpeg', 'image/png'],
+    imageMimeTypeLabel: 'JPG/JPEG、PNG',
+    imageMaxSizeMb: 20,
+    referenceHelpText: 'Veo 3.1 参考图仅支持 JPG/JPEG、PNG，后端会先上传文件并转成公网可访问 URL，再按文档里的 resources 参数提交给模型。',
+  },
+  veo31fast: {
+    id: 'veo31fast',
+    name: 'Veo Fast',
+    vendor: '聚合 API',
+    color: '#e67e22',
+    models: [
+      { value: 'veo-3.1-fast-generate-preview', label: 'Veo 3.1 Fast', tag: '新' },
+    ],
+    aspectRatios: ['16:9', '9:16'],
+    resolutions: {
+      default: ['720p', '1080p'],
+    },
+    durations: [5, 8],
+    sampleCounts: [1],
+    features: {
+      generateAudio: false,
+      negativePrompt: false,
+      referenceImage: true,
+      referenceVideo: false,
+      referenceAudio: false,
+    },
+    generationModes: [
+      { value: 'i2v', label: '首帧' },
+      { value: 'flf', label: '首尾帧' },
+      { value: 'ref', label: '参考图片' },
+    ],
+    referenceInputMode: 'base64',
+    maxReferenceImages: {
+      i2v: 1,
+      flf: 2,
+      ref: 5,
+    },
+    defaults: {
+      model: 'veo-3.1-fast-generate-preview',
+      aspectRatio: '16:9',
+      resolution: '720p',
+      duration: 5,
+      sampleCount: 1,
+    },
+    imageMimeTypes: ['image/jpeg', 'image/png'],
+    imageMimeTypeLabel: 'JPG/JPEG、PNG',
+    imageMaxSizeMb: 20,
+    referenceHelpText: 'Veo Fast 当前这条通道实测输出固定为 16:9。参考图前端会将图片转为 Base64 直接提交：首张图作为主图，其余图片作为参考图，仅支持 JPG/JPEG、PNG。',
   },
   kling: {
     id: 'kling',
@@ -226,4 +274,4 @@ export const PROVIDERS = {
   },
 }
 
-export const PROVIDER_ORDER = ['veo', 've31p', 'kling', 'gemini-image']
+export const PROVIDER_ORDER = ['veo', 've31p', 'veo31fast', 'kling', 'gemini-image']

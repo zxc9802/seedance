@@ -5,6 +5,12 @@ import {
   loadLatestSnapshot,
   saveLatestSnapshot,
 } from './snapshotStorage'
+import Header from './components/Header'
+import ProviderTabs from './components/ProviderTabs'
+import PromptInput from './components/PromptInput'
+import ParameterPanel from './components/ParameterPanel'
+import VideoPreview from './components/VideoPreview'
+import './App.css'
 
 const VIDEO_PROVIDERS = new Set(
   PROVIDER_ORDER.filter((key) => PROVIDERS[key].outputType !== 'image')
@@ -12,17 +18,13 @@ const VIDEO_PROVIDERS = new Set(
 function isVideoProvider(id) {
   return VIDEO_PROVIDERS.has(id)
 }
+function isVeoFastProvider(id) {
+  return id === 'veo31fast'
+}
 
 function isKlingProvider(id) {
   return id === 'kling'
 }
-
-import Header from './components/Header'
-import ProviderTabs from './components/ProviderTabs'
-import PromptInput from './components/PromptInput'
-import ParameterPanel from './components/ParameterPanel'
-import VideoPreview from './components/VideoPreview'
-import './App.css'
 
 function App() {
   const [provider, setProvider] = useState('veo')
@@ -96,6 +98,7 @@ function App() {
     try {
       const savedAt = Date.now()
       const serializedProviderState = await serializeProviderState(providerState)
+
       await saveLatestSnapshot({
         savedAt,
         version: 1,
@@ -208,7 +211,7 @@ function App() {
     if (!finalPrompt) return
 
     if (isVideoProvider(provider)) {
-      const validationError = validateVideoReferenceInput(provider, params, generationMode, videoReferences)
+        const validationError = validateVideoReferenceInput(provider, params, generationMode, videoReferences)
       if (validationError) {
         updateProviderState(provider, { error: validationError })
         return
@@ -228,7 +231,55 @@ function App() {
     }, 900)
 
     try {
-      if (isVideoProvider(provider)) {
+      if (isVeoFastProvider(provider)) {
+        const base64Images = await readVideoReferencesAsBase64(videoReferences)
+        const requestBody = buildVeoFastRequest(params, finalPrompt, generationMode, base64Images)
+        updateProviderState(provider, { progress: 15 })
+
+        const response = await fetch('/api/veo-fast/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+        })
+
+        if (!response.ok) {
+          throw new Error(await formatHttpError(response))
+        }
+
+        const data = await response.json()
+        const taskId = data?.task_id || data?.data?.task_id || data?.taskId
+        if (!taskId) {
+          throw new Error('接口已响应，但没有返回 task_id')
+        }
+
+        updateProviderState(provider, { progress: 25 })
+
+        let finished = false
+        while (!finished) {
+          await sleep(5000)
+          const pollResponse = await fetch(`/api/veo-fast/status/${encodeURIComponent(taskId)}`)
+
+          if (!pollResponse.ok) {
+            throw new Error(await formatHttpError(pollResponse))
+          }
+
+          const pollData = await pollResponse.json()
+          const state = pollData?.state || pollData?.status
+
+          if (state === 'SUCCEEDED' || state === 'completed') {
+            finished = true
+            window.clearInterval(progressTimer)
+            const contentUrl = `/api/veo-fast/content/${encodeURIComponent(taskId)}`
+            const previewUrl = await resolvePreviewUrl(contentUrl)
+            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            return
+          }
+
+          if (state === 'FAILED' || state === 'failed') {
+            throw new Error(pollData?.error || pollData?.message || '视频生成失败')
+          }
+        }
+      } else if (isVideoProvider(provider)) {
         const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
         if (uploadedReferences.requiresPublicBaseUrl) {
           throw new Error('参考素材已经上传到本地后端，但当前后端地址不是公网可访问地址。请部署后端到公网，或设置 PUBLIC_BASE_URL 指向公网域名/隧道。')
@@ -581,6 +632,24 @@ async function serializePreviewAsset(url) {
     }
   }
 
+  if (isKlingProvider(provider) && mode === 'fusion') {
+    if (references.videos.length > 1) {
+      return '可灵参考模式最多上传 1 段参考视频'
+    }
+
+    if (references.videos.length > 0 && references.images.length > 4) {
+      return '可灵带参考视频时，参考图片最多 4 张'
+    }
+
+    if (references.videos.length === 0 && references.images.length > 7) {
+      return '可灵参考模式最多上传 7 张参考图片'
+    }
+
+    if (references.videos.length > 0 && params.generateAudio) {
+      return '可灵带参考视频时仅支持无声，请关闭“生成音频”'
+    }
+  }
+
   return null
 }
 
@@ -620,6 +689,20 @@ function buildVideoRequest(provider, params, prompt, mode, references) {
     ? false
     : Boolean(params.generateAudio)
 
+  const payload = {
+    params: {
+      mode: mapVideoMode(mode),
+      resolution: params.resolution,
+      scale: params.aspectRatio,
+      duration: params.duration,
+      generateAudio,
+    },
+  }
+
+  if (references.images.length > 0) payload.resources = references.images
+  if (references.videos.length > 0) payload.referVideoUrl = references.videos
+  if (references.audios.length > 0) payload.referAudioUrl = references.audios
+
   return {
     url: '/api/veo/generate',
     headers: {
@@ -629,18 +712,7 @@ function buildVideoRequest(provider, params, prompt, mode, references) {
       modelId: params.model,
       abilityType: 'VIDEO',
       prompt,
-      payload: {
-        resources: references.images,
-        referVideoUrl: references.videos,
-        referAudioUrl: references.audios,
-        params: {
-          mode: mapVideoMode(mode),
-          resolution: params.resolution,
-          scale: params.aspectRatio,
-          duration: params.duration,
-          generateAudio,
-        },
-      },
+      payload,
     },
   }
 }
@@ -683,6 +755,68 @@ function mapVideoMode(mode) {
   }
 }
 
+function buildVeoFastRequest(params, prompt, mode, base64Images) {
+  const instance = { prompt }
+
+  if ((mode === 'i2v' || mode === 'flf' || mode === 'ref') && base64Images.length >= 1) {
+    instance.image = {
+      bytesBase64Encoded: base64Images[0].base64,
+      mimeType: base64Images[0].mimeType,
+    }
+  }
+
+  if ((mode === 'flf' || mode === 'ref') && base64Images.length >= 2) {
+    instance.lastFrame = {
+      bytesBase64Encoded: base64Images[1].base64,
+      mimeType: base64Images[1].mimeType,
+    }
+  }
+
+  if (mode === 'ref' && base64Images.length > 2) {
+    instance.referenceImages = base64Images.slice(2).map((img) => ({
+      image: {
+        bytesBase64Encoded: img.base64,
+        mimeType: img.mimeType,
+      },
+    }))
+  }
+
+  return {
+    model: params.model,
+    prompt,
+    instances: [instance],
+    parameters: {
+      aspectRatio: params.aspectRatio,
+      durationSeconds: params.duration,
+      resolution: params.resolution,
+    },
+  }
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = reader.result
+      const base64 = dataUrl.split(',')[1]
+      resolve({ base64, mimeType: file.type || 'image/png' })
+    }
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+async function readVideoReferencesAsBase64(references) {
+  const results = []
+  for (const asset of references.images) {
+    if (asset.file) {
+      const converted = await fileToBase64(asset.file)
+      results.push(converted)
+    }
+  }
+  return results
+}
+
 function resolveLimit(limitConfig, mode) {
   if (typeof limitConfig === 'number') return limitConfig
   if (!limitConfig) return 0
@@ -698,6 +832,7 @@ function resolveImageLimit(config, mode, references) {
 }
 
 function validateVideoReferenceInput(provider, params, mode, references) {
+  const klingValidationError = validateKlingReferenceInput(provider, params, mode, references)
   if (mode === 't2v') return null
   if (mode === 'i2v' && references.images.length !== 1) return '图生视频模式需要 1 张参考图片'
   if (mode === 'flf' && references.images.length !== 2) return '首尾帧模式需要 2 张图片，第一张是首帧，第二张是尾帧'
@@ -718,10 +853,7 @@ function validateVideoReferenceInput(provider, params, mode, references) {
     }
   }
 
-  const klingValidationError = validateKlingReferenceInput(provider, params, mode, references)
-  if (klingValidationError) return klingValidationError
-
-  return null
+  return klingValidationError
 }
 
 function validateKlingReferenceInput(provider, params, mode, references) {

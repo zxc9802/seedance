@@ -280,6 +280,146 @@ app.post('/api/image/chat/completions', async (req, res) => {
   })
 })
 
+const veoFastGenerateUrl = stripTrailingSlash(process.env.VEO_FAST_GENERATE_URL || 'http://pay.verveship.com')
+const veoFastQueryUrl = stripTrailingSlash(process.env.VEO_FAST_QUERY_URL || 'http://pay.verveship.com')
+const veoFastPromptMode = process.env.VEO_FAST_PROMPT_MODE
+  || (veoFastGenerateUrl.includes('pay.verveship.com') ? 'instance' : 'top_level')
+
+function summarizeBase64Field(value) {
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  return {
+    length: value.length,
+    prefix: value.slice(0, 32),
+    hasDataUrlPrefix: /^data:/i.test(value),
+    containsBase64Marker: value.includes(';base64,'),
+  }
+}
+
+app.post('/api/veo-fast/generate', async (req, res) => {
+  const apiKey = process.env.VEO_FAST_API_KEY
+  if (!apiKey) {
+    res.status(500).json({
+      success: false,
+      message: 'Missing backend config: VEO_FAST_API_KEY',
+    })
+    return
+  }
+
+  const normalizedBody = normalizeVeoFastRequest(req.body, veoFastPromptMode)
+  const debugBody = {
+    model: normalizedBody?.model,
+    hasInstances: Array.isArray(normalizedBody?.instances),
+    instanceKeys: normalizedBody?.instances?.[0] ? Object.keys(normalizedBody.instances[0]) : [],
+    topLevelPrompt: normalizedBody?.prompt ?? null,
+    instancePrompt: normalizedBody?.instances?.[0]?.prompt ?? null,
+    promptMode: veoFastPromptMode,
+    parameters: normalizedBody?.parameters,
+    bodySize: JSON.stringify(normalizedBody).length,
+    imageBase64: summarizeBase64Field(
+      normalizedBody?.instances?.[0]?.image?.bytesBase64Encoded,
+    ),
+    lastFrameBase64: summarizeBase64Field(
+      normalizedBody?.instances?.[0]?.lastFrame?.bytesBase64Encoded,
+    ),
+    referenceImageBase64: Array.isArray(normalizedBody?.instances?.[0]?.referenceImages)
+      ? normalizedBody.instances[0].referenceImages.slice(0, 3).map((item) => summarizeBase64Field(
+        item?.image?.bytesBase64Encoded,
+      ))
+      : [],
+  }
+  console.log('[veo-fast] request debug:', JSON.stringify(debugBody, null, 2))
+
+  await proxyJsonWithBody(req, res, `${veoFastGenerateUrl}/v1/video/generations`, normalizedBody, {
+    Authorization: `Bearer ${apiKey}`,
+  })
+})
+
+app.get('/api/veo-fast/status/:taskId', async (req, res) => {
+  const apiKey = process.env.VEO_FAST_API_KEY
+  if (!apiKey) {
+    res.status(500).json({
+      success: false,
+      message: 'Missing backend config: VEO_FAST_API_KEY',
+    })
+    return
+  }
+
+  try {
+    const response = await fetch(`${veoFastQueryUrl}/v1/videos/${encodeURIComponent(req.params.taskId)}`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    })
+
+    res.status(response.status)
+    response.headers.forEach((value, key) => {
+      const lowered = key.toLowerCase()
+      if (
+        lowered === 'content-length'
+        || lowered === 'transfer-encoding'
+        || lowered === 'connection'
+        || lowered === 'content-encoding'
+      ) {
+        return
+      }
+      res.setHeader(key, value)
+    })
+
+    const buffer = Buffer.from(await response.arrayBuffer())
+    res.end(buffer)
+  } catch (error) {
+    res.status(502).json({
+      success: false,
+      message: error.message || 'Upstream request failed',
+    })
+  }
+})
+
+app.get('/api/veo-fast/content/:taskId', async (req, res) => {
+  const apiKey = process.env.VEO_FAST_API_KEY
+  if (!apiKey) {
+    res.status(500).json({
+      success: false,
+      message: 'Missing backend config: VEO_FAST_API_KEY',
+    })
+    return
+  }
+
+  try {
+    const response = await fetch(`${veoFastQueryUrl}/v1/videos/${encodeURIComponent(req.params.taskId)}/content`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    })
+
+    res.status(response.status)
+    response.headers.forEach((value, key) => {
+      const lowered = key.toLowerCase()
+      if (
+        lowered === 'transfer-encoding'
+        || lowered === 'connection'
+        || lowered === 'content-encoding'
+      ) {
+        return
+      }
+      res.setHeader(key, value)
+    })
+
+    const buffer = Buffer.from(await response.arrayBuffer())
+    res.end(buffer)
+  } catch (error) {
+    res.status(502).json({
+      success: false,
+      message: error.message || 'Upstream request failed',
+    })
+  }
+})
+
 const cleanupTimer = setInterval(() => {
   cleanupExpiredUploads().catch((error) => {
     console.error('[cleanup]', error)
@@ -322,6 +462,10 @@ httpServer.listen(port, () => {
 })
 
 async function proxyJson(req, res, url, extraHeaders = {}) {
+  return proxyJsonWithBody(req, res, url, req.body, extraHeaders)
+}
+
+async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}) {
   try {
     const response = await fetch(url, {
       method: req.method,
@@ -329,7 +473,7 @@ async function proxyJson(req, res, url, extraHeaders = {}) {
         'Content-Type': 'application/json',
         ...extraHeaders,
       },
-      body: JSON.stringify(req.body),
+      body: JSON.stringify(body),
     })
 
     res.status(response.status)
@@ -354,6 +498,38 @@ async function proxyJson(req, res, url, extraHeaders = {}) {
       message: error.message || 'Upstream request failed',
     })
   }
+}
+
+function normalizeVeoFastRequest(body, promptMode) {
+  const normalized = JSON.parse(JSON.stringify(body || {}))
+  const firstInstance = Array.isArray(normalized.instances) ? normalized.instances[0] : null
+  if (!firstInstance) return normalized
+
+  if (promptMode === 'instance') {
+    if (!firstInstance.prompt && normalized.prompt) {
+      firstInstance.prompt = normalized.prompt
+    }
+    delete normalized.prompt
+    return normalized
+  }
+
+  if (promptMode === 'top_level') {
+    if (!normalized.prompt && firstInstance.prompt) {
+      normalized.prompt = firstInstance.prompt
+    }
+    return normalized
+  }
+
+  if (promptMode === 'both') {
+    if (!normalized.prompt && firstInstance.prompt) {
+      normalized.prompt = firstInstance.prompt
+    }
+    if (!firstInstance.prompt && normalized.prompt) {
+      firstInstance.prompt = normalized.prompt
+    }
+  }
+
+  return normalized
 }
 
 async function createMaterialReference({ name, originalUrl, type }) {

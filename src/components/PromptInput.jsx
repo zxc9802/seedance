@@ -66,6 +66,8 @@ export default function PromptInput({
     }
 
     const nextFiles = files.slice(0, remaining)
+    const accepted = []
+
     for (const file of nextFiles) {
       const error = await validateAssetFile('images', file, providerConfig)
       if (error) {
@@ -73,15 +75,15 @@ export default function PromptInput({
         continue
       }
 
-      const reader = new FileReader()
-      reader.onload = (event) => {
-        onMediaListChange((prev) => {
-          if (prev.length >= maxImages) return prev
-          return [...prev, event.target.result]
-        })
+      try {
+        accepted.push(await readFileAsDataUrl(file))
+      } catch {
+        setMediaError('读取图片失败')
       }
-      reader.onerror = () => setMediaError('读取图片失败')
-      reader.readAsDataURL(file)
+    }
+
+    if (accepted.length > 0) {
+      onMediaListChange((prev) => [...prev, ...accepted].slice(0, maxImages))
     }
 
     if (files.length > remaining) {
@@ -98,10 +100,20 @@ export default function PromptInput({
     if (!files.length) return
 
     setMediaError(null)
-    const current = videoReferences[kind]
-    const remaining = limit - current.length
+    const currentAssets = videoReferences[kind]
+    const remaining = limit - currentAssets.length
     if (remaining <= 0) {
       setMediaError(`最多只能添加 ${limit} 个${bucketLabel(kind)}`)
+      return
+    }
+
+    if (
+      providerConfig.id === 'kling'
+      && kind === 'videos'
+      && mode === 'fusion'
+      && videoReferences.images.length > 4
+    ) {
+      setMediaError('可灵带参考视频时，参考图片最多保留 4 张，请先删减图片')
       return
     }
 
@@ -120,6 +132,10 @@ export default function PromptInput({
         ...prev,
         [kind]: [...prev[kind], ...accepted].slice(0, limit),
       }))
+    }
+
+    if (files.length > remaining) {
+      setMediaError(`最多只能添加 ${limit} 个${bucketLabel(kind)}，超出的已忽略`)
     }
   }
 
@@ -297,8 +313,6 @@ export default function PromptInput({
                   />
                 )}
 
-                {(mode === 'fusion' || mode === 'ref') ? null : null}
-
                 {mode === 'fusion' && maxVideos > 0 && (
                   <AssetUploadBucket
                     title="参考视频"
@@ -316,7 +330,7 @@ export default function PromptInput({
                 {mode === 'fusion' && maxAudios > 0 && (
                   <AssetUploadBucket
                     title="参考音频"
-                    subtitle="支持 mp3、wav，最多 3 段音频。音频不能单独作为参考。"
+                    subtitle="支持 mp3、wav，最多 3 段。音频不能单独作为参考。"
                     icon={<Music4 size={14} />}
                     accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/wave"
                     assets={videoReferences.audios}
@@ -335,7 +349,7 @@ export default function PromptInput({
                 {imageDropActive && (
                   <div className="drop-overlay">
                     <UploadCloud size={18} />
-                    <span>{'\u62d6\u62fd\u5230\u8fd9\u91cc\u4e0a\u4f20\u53c2\u8003\u56fe\u7247'}</span>
+                    <span>{'拖拽到这里上传参考图片'}</span>
                   </div>
                 )}
                 {mediaList.map((media, index) => (
@@ -372,7 +386,11 @@ export default function PromptInput({
 
             {isVideoProvider && (
               <div className="ref-url-note">
-                本地文件会先上传到项目后端的临时目录，再转成素材 URL 提交给模型。若要在本机开发环境使用参考素材，需要把后端部署到公网，或设置 `PUBLIC_BASE_URL` 指向公网域名/隧道。
+                本地文件会先上传到项目后端的临时目录，再转成素材 URL 提交给模型。若要在本机开发环境使用参考素材，需要把后端部署到公网，或设置
+                {' '}
+                <code>PUBLIC_BASE_URL</code>
+                {' '}
+                指向公网域名/隧道。
                 {providerConfig.referenceHelpText && (
                   <>
                     {' '}
@@ -416,7 +434,7 @@ function AssetUploadBucket({ title, subtitle, icon, accept, assets, maxItems, on
         {dragActive && (
           <div className="drop-overlay bucket">
             <UploadCloud size={18} />
-            <span>{`\u62d6\u62fd\u5230\u8fd9\u91cc\u4e0a\u4f20${bucketLabel(kind)}`}</span>
+            <span>{`拖拽到这里上传${bucketLabel(kind)}`}</span>
           </div>
         )}
         {assets.map((asset, index) => (
@@ -477,7 +495,7 @@ function buildDefaultModes(providerConfig, isImageOutput) {
   }
 
   if (providerConfig.features.referenceVideo) {
-    modes.push({ value: 'v2v', label: '视频生成视频' })
+    modes.push({ value: 'v2v', label: '视频生视频' })
   }
 
   return modes
@@ -524,7 +542,7 @@ function getVideoBucketSubtitle(providerConfig, maxVideos) {
     return '支持 MP4、MOV，最多 1 段，时长不少于 3 秒'
   }
 
-  return `支持 mp4、mov，最多 ${maxVideos} 段视频`
+  return `支持 mp4、mov，最多 ${maxVideos} 段参考视频`
 }
 
 function hasRequiredVideoAssets(mode, references) {
@@ -560,22 +578,17 @@ async function validateAssetFile(kind, file, providerConfig) {
   if (kind === 'images') {
     const allowedImageMimeTypes = getAllowedImageMimeTypes(providerConfig)
     if (!allowedImageMimeTypes.includes(file.type)) {
-      return `图片仅支持 ${providerConfig?.imageMimeTypeLabel || 'JPG/JPEG、PNG、WebP'}`
+      return `图片仅支持 ${getMimeTypeLabel(providerConfig, 'images')}`
     }
 
-    const imageMaxSizeMb = Number(providerConfig?.imageMaxSizeMb || 20)
+    const imageMaxSizeMb = getFileSizeLimitMb(providerConfig, 'images')
     if (file.size > imageMaxSizeMb * 1024 * 1024) {
-      return `单张图片不能超过 ${imageMaxSizeMb}MB`
+      return `单张参考图不能超过 ${imageMaxSizeMb}MB`
     }
 
     const imageValidation = providerConfig?.imageValidation
     if (imageValidation) {
-      let metadata
-      try {
-        metadata = await readImageMetadata(file)
-      } catch {
-        return '读取图片元数据失败'
-      }
+      const metadata = await readImageMetadata(file)
       if (metadata.width < imageValidation.minWidth || metadata.height < imageValidation.minHeight) {
         return `图片宽高不能小于 ${imageValidation.minWidth}px`
       }
@@ -594,22 +607,17 @@ async function validateAssetFile(kind, file, providerConfig) {
   if (kind === 'videos') {
     const allowedVideoMimeTypes = getAllowedVideoMimeTypes(providerConfig)
     if (!allowedVideoMimeTypes.includes(file.type)) {
-      return `参考视频仅支持 ${providerConfig?.videoMimeTypeLabel || 'MP4、MOV'}`
+      return `参考视频仅支持 ${getMimeTypeLabel(providerConfig, 'videos')}`
     }
 
-    const videoMaxSizeMb = Number(providerConfig?.videoMaxSizeMb || 50)
+    const videoMaxSizeMb = getFileSizeLimitMb(providerConfig, 'videos')
     if (file.size > videoMaxSizeMb * 1024 * 1024) {
       return `单个参考视频不能超过 ${videoMaxSizeMb}MB`
     }
 
     const videoValidation = providerConfig?.videoValidation
     if (videoValidation) {
-      let metadata
-      try {
-        metadata = await readVideoMetadata(file)
-      } catch {
-        return '读取视频元数据失败'
-      }
+      const metadata = await readVideoMetadata(file)
       if (videoValidation.minDurationSec && metadata.duration < videoValidation.minDurationSec) {
         return `参考视频时长不能少于 ${videoValidation.minDurationSec} 秒`
       }
@@ -631,12 +639,64 @@ async function validateAssetFile(kind, file, providerConfig) {
     if (!['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave'].includes(file.type)) {
       return '参考音频仅支持 mp3、wav'
     }
-    if (file.size > 15 * 1024 * 1024) {
-      return '单个参考音频不能超过 15MB'
+
+    const audioMaxSizeMb = getFileSizeLimitMb(providerConfig, 'audios')
+    if (file.size > audioMaxSizeMb * 1024 * 1024) {
+      return `单个参考音频不能超过 ${audioMaxSizeMb}MB`
     }
   }
 
   return null
+}
+
+function getAllowedImageMimeTypes(providerConfig) {
+  const mimeTypes = providerConfig?.imageMimeTypes
+  return Array.isArray(mimeTypes) && mimeTypes.length > 0
+    ? mimeTypes
+    : ['image/jpeg', 'image/png', 'image/webp']
+}
+
+function getAllowedVideoMimeTypes(providerConfig) {
+  const mimeTypes = providerConfig?.videoMimeTypes
+  return Array.isArray(mimeTypes) && mimeTypes.length > 0
+    ? mimeTypes
+    : ['video/mp4', 'video/quicktime']
+}
+
+function getImageAccept(providerConfig) {
+  return getAllowedImageMimeTypes(providerConfig).join(',')
+}
+
+function getVideoAccept(providerConfig) {
+  return getAllowedVideoMimeTypes(providerConfig).join(',')
+}
+
+function getFileSizeLimitMb(providerConfig, kind) {
+  if (kind === 'images') {
+    return Number(providerConfig?.imageMaxSizeMb || 20)
+  }
+
+  if (kind === 'videos') {
+    return Number(providerConfig?.videoMaxSizeMb || 50)
+  }
+
+  if (kind === 'audios') {
+    return Number(providerConfig?.audioMaxSizeMb || 15)
+  }
+
+  return 20
+}
+
+function getMimeTypeLabel(providerConfig, kind) {
+  if (kind === 'images') {
+    return providerConfig?.imageMimeTypeLabel || 'JPG/JPEG、PNG、WebP'
+  }
+
+  if (kind === 'videos') {
+    return providerConfig?.videoMimeTypeLabel || 'MP4、MOV'
+  }
+
+  return 'mp3、wav'
 }
 
 function bucketLabel(kind) {
@@ -652,32 +712,59 @@ function bucketLabel(kind) {
   }
 }
 
-function getAllowedImageMimeTypes(providerConfig) {
-  const mimeTypes = providerConfig?.imageMimeTypes
-  return Array.isArray(mimeTypes) && mimeTypes.length > 0
-    ? mimeTypes
-    : ['image/jpeg', 'image/png', 'image/webp']
-}
-
-function getImageAccept(providerConfig) {
-  return getAllowedImageMimeTypes(providerConfig).join(',')
-}
-
-function getAllowedVideoMimeTypes(providerConfig) {
-  const mimeTypes = providerConfig?.videoMimeTypes
-  return Array.isArray(mimeTypes) && mimeTypes.length > 0
-    ? mimeTypes
-    : ['video/mp4', 'video/quicktime']
-}
-
-function getVideoAccept(providerConfig) {
-  return getAllowedVideoMimeTypes(providerConfig).join(',')
-}
-
 function formatFileSize(size) {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (event) => resolve(event.target?.result)
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+function readImageMetadata(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file)
+    const image = new Image()
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl)
+      resolve({
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+      })
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      reject(new Error('Failed to read image metadata'))
+    }
+    image.src = objectUrl
+  })
+}
+
+function readVideoMetadata(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file)
+    const video = document.createElement('video')
+    video.preload = 'metadata'
+    video.onloadedmetadata = () => {
+      URL.revokeObjectURL(objectUrl)
+      resolve({
+        width: video.videoWidth,
+        height: video.videoHeight,
+        duration: video.duration,
+      })
+    }
+    video.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      reject(new Error('Failed to read video metadata'))
+    }
+    video.src = objectUrl
+  })
 }
 
 function createFileDropHandlers({ onFiles, onActiveChange }) {
@@ -719,44 +806,4 @@ function createFileDropHandlers({ onFiles, onActiveChange }) {
 
 function hasFilePayload(event) {
   return Array.from(event.dataTransfer?.types || []).includes('Files')
-}
-
-function readImageMetadata(file) {
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(file)
-    const image = new Image()
-    image.onload = () => {
-      URL.revokeObjectURL(objectUrl)
-      resolve({
-        width: image.naturalWidth,
-        height: image.naturalHeight,
-      })
-    }
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl)
-      reject(new Error('Failed to read image metadata'))
-    }
-    image.src = objectUrl
-  })
-}
-
-function readVideoMetadata(file) {
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(file)
-    const video = document.createElement('video')
-    video.preload = 'metadata'
-    video.onloadedmetadata = () => {
-      URL.revokeObjectURL(objectUrl)
-      resolve({
-        width: video.videoWidth,
-        height: video.videoHeight,
-        duration: video.duration,
-      })
-    }
-    video.onerror = () => {
-      URL.revokeObjectURL(objectUrl)
-      reject(new Error('Failed to read video metadata'))
-    }
-    video.src = objectUrl
-  })
 }
