@@ -7,6 +7,11 @@ const VIDEO_PROVIDERS = new Set(
 function isVideoProvider(id) {
   return VIDEO_PROVIDERS.has(id)
 }
+
+function isKlingProvider(id) {
+  return id === 'kling'
+}
+
 import Header from './components/Header'
 import ProviderTabs from './components/ProviderTabs'
 import PromptInput from './components/PromptInput'
@@ -37,7 +42,7 @@ function App() {
   const params = allParams[provider]
   const config = PROVIDERS[provider]
   const currentState = providerState[provider] || { generating: false, progress: 0, videoUrl: null, error: null }
-  const maxImages = resolveLimit(config.maxReferenceImages, generationMode)
+  const maxImages = resolveImageLimit(config, generationMode, videoReferences)
   const maxVideos = resolveLimit(config.maxReferenceVideos, generationMode)
   const maxAudios = resolveLimit(config.maxReferenceAudios, generationMode)
 
@@ -93,7 +98,7 @@ function App() {
     if (!finalPrompt) return
 
     if (isVideoProvider(provider)) {
-      const validationError = validateVideoReferenceInput(generationMode, videoReferences)
+      const validationError = validateVideoReferenceInput(provider, params, generationMode, videoReferences)
       if (validationError) {
         updateProviderState(provider, { error: validationError })
         return
@@ -285,6 +290,9 @@ function App() {
 
 function buildVideoRequest(provider, params, prompt, mode, references) {
   if (!isVideoProvider(provider)) throw new Error(`Unsupported provider: ${provider}`)
+  const generateAudio = isKlingProvider(provider) && references.videos.length > 0
+    ? false
+    : Boolean(params.generateAudio)
 
   return {
     url: '/api/veo/generate',
@@ -304,7 +312,7 @@ function buildVideoRequest(provider, params, prompt, mode, references) {
           resolution: params.resolution,
           scale: params.aspectRatio,
           duration: params.duration,
-          generateAudio: Boolean(params.generateAudio),
+          generateAudio,
         },
       },
     },
@@ -355,7 +363,15 @@ function resolveLimit(limitConfig, mode) {
   return limitConfig[mode] ?? 0
 }
 
-function validateVideoReferenceInput(mode, references) {
+function resolveImageLimit(config, mode, references) {
+  const baseLimit = resolveLimit(config?.maxReferenceImages, mode)
+  if (config?.id === 'kling' && mode === 'fusion' && references?.videos?.length > 0) {
+    return Math.min(baseLimit, 4)
+  }
+  return baseLimit
+}
+
+function validateVideoReferenceInput(provider, params, mode, references) {
   if (mode === 't2v') return null
   if (mode === 'i2v' && references.images.length !== 1) return '图生视频模式需要 1 张参考图片'
   if (mode === 'flf' && references.images.length !== 2) return '首尾帧模式需要 2 张图片，第一张是首帧，第二张是尾帧'
@@ -374,6 +390,31 @@ function validateVideoReferenceInput(mode, references) {
     if (imageCount + videoCount === 0) {
       return '音频不能单独作为参考，至少还需要 1 张图片或 1 段视频'
     }
+  }
+
+  const klingValidationError = validateKlingReferenceInput(provider, params, mode, references)
+  if (klingValidationError) return klingValidationError
+
+  return null
+}
+
+function validateKlingReferenceInput(provider, params, mode, references) {
+  if (!isKlingProvider(provider) || mode !== 'fusion') return null
+
+  if (references.videos.length > 1) {
+    return '可灵参考模式最多上传 1 段参考视频'
+  }
+
+  if (references.videos.length > 0 && references.images.length > 4) {
+    return '可灵带参考视频时，参考图片最多 4 张'
+  }
+
+  if (references.videos.length === 0 && references.images.length > 7) {
+    return '可灵参考模式最多上传 7 张参考图片'
+  }
+
+  if (references.videos.length > 0 && params.generateAudio) {
+    return '可灵带参考视频时仅支持无声，请关闭“生成音频”'
   }
 
   return null
