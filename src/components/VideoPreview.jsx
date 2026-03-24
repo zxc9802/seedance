@@ -70,7 +70,16 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
                 style={{ cursor: 'pointer' }}
               />
             ) : (
-              <video src={videoUrl} controls autoPlay loop className="preview-video" />
+              <video
+                src={videoUrl}
+                controls
+                autoPlay
+                muted
+                playsInline
+                preload="metadata"
+                loop
+                className="preview-video"
+              />
             )
           ) : generating ? (
             <div className="preview-generating">
@@ -134,7 +143,16 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
               {isImageOutput ? (
                 <img src={videoUrl} className="fullscreen-image" alt="Preview" />
               ) : (
-                <video src={videoUrl} controls autoPlay loop className="fullscreen-video" />
+                <video
+                  src={videoUrl}
+                  controls
+                  autoPlay
+                  muted
+                  playsInline
+                  preload="metadata"
+                  loop
+                  className="fullscreen-video"
+                />
               )}
               <div className="fullscreen-toolbar">
                 <button className="fs-btn" onClick={handleDownload}>
