@@ -54,7 +54,11 @@ function App() {
     releaseProviderPreviewUrls(providerStateRef.current)
   }, [])
 
-  const params = allParams[provider]
+  useEffect(() => {
+    setAllParams((prev) => normalizeAllParams(prev))
+  }, [])
+
+  const params = normalizeParamsForProvider(provider, allParams[provider])
   const config = PROVIDERS[provider]
   const currentState = providerState[provider] || { generating: false, progress: 0, videoUrl: null, error: null }
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
@@ -65,7 +69,7 @@ function App() {
   const updateParam = useCallback((key, value) => {
     setAllParams((prev) => ({
       ...prev,
-      [provider]: { ...prev[provider], [key]: value },
+      [provider]: normalizeParamsForProvider(provider, { ...prev[provider], [key]: value }),
     }))
   }, [provider])
 
@@ -104,7 +108,7 @@ function App() {
         version: 1,
         payload: {
           provider,
-          allParams,
+          allParams: normalizeAllParams(allParams),
           prompt,
           generationMode,
           referenceMedia,
@@ -588,7 +592,38 @@ function mergeSnapshotParams(snapshotParams) {
     }
   }
 
-  return initial
+  return normalizeAllParams(initial)
+}
+
+function normalizeAllParams(allParams) {
+  let changed = false
+  const next = { ...allParams }
+
+  for (const key of PROVIDER_ORDER) {
+    const normalized = normalizeParamsForProvider(key, next[key])
+    if (normalized !== next[key]) {
+      next[key] = normalized
+      changed = true
+    }
+  }
+
+  return changed ? next : allParams
+}
+
+function normalizeParamsForProvider(provider, params) {
+  const config = PROVIDERS[provider]
+  if (!config) return params
+
+  const resolutionOptions = config.resolutions?.[params.model] || config.resolutions?.default || []
+
+  if (resolutionOptions.length > 0 && !resolutionOptions.includes(params.resolution)) {
+    return {
+      ...params,
+      resolution: resolutionOptions[0],
+    }
+  }
+
+  return params
 }
 
 function isSupportedProvider(value) {
