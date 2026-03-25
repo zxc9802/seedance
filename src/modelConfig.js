@@ -12,7 +12,7 @@ export const PROVIDERS = {
     ],
     aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {
-      default: ['720p'],
+      default: ['480p'],
     },
     durations: [4, 5, 6, 8, 10, 12, 15],
     sampleCounts: [1],
@@ -46,7 +46,7 @@ export const PROVIDERS = {
     defaults: {
       model: 'doubao-seedance-2-0-260128',
       aspectRatio: '9:16',
-      resolution: '720p',
+      resolution: '480p',
       duration: 5,
       sampleCount: 1,
       generateAudio: false,
