@@ -1,6 +1,9 @@
 export const PROVIDERS = {
   veo: {
     id: 'veo',
+    typeId: 'seedance',
+    typeLabel: 'Seedance',
+    selectorLabel: 'seedance1',
     name: 'Seedance 2.0',
     vendor: '聚合 API',
     color: '#2563eb',
@@ -9,7 +12,7 @@ export const PROVIDERS = {
     ],
     aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {
-      default: ['480p'],
+      default: ['720p'],
     },
     durations: [4, 5, 6, 8, 10, 12, 15],
     sampleCounts: [1],
@@ -43,7 +46,7 @@ export const PROVIDERS = {
     defaults: {
       model: 'doubao-seedance-2-0-260128',
       aspectRatio: '9:16',
-      resolution: '480p',
+      resolution: '720p',
       duration: 5,
       sampleCount: 1,
       generateAudio: false,
@@ -58,6 +61,9 @@ export const PROVIDERS = {
   },
   ve31p: {
     id: 've31p',
+    typeId: 'veo',
+    typeLabel: 'Veo',
+    selectorLabel: 'veo1',
     name: 'Veo',
     vendor: '聚合 API',
     color: '#7c3aed',
@@ -66,7 +72,7 @@ export const PROVIDERS = {
     ],
     aspectRatios: ['16:9', '9:16'],
     resolutions: {
-      default: ['720p', '1080p'],
+      default: ['720p'],
     },
     durations: [4, 6, 8],
     sampleCounts: [1],
@@ -102,6 +108,9 @@ export const PROVIDERS = {
   },
   veo31fast: {
     id: 'veo31fast',
+    typeId: 'veo',
+    typeLabel: 'Veo',
+    selectorLabel: 'veo2',
     name: 'Veo Fast',
     vendor: '聚合 API',
     color: '#e67e22',
@@ -110,7 +119,7 @@ export const PROVIDERS = {
     ],
     aspectRatios: ['16:9', '9:16'],
     resolutions: {
-      default: ['720p', '1080p'],
+      default: ['720p'],
     },
     durations: [5, 8],
     sampleCounts: [1],
@@ -146,6 +155,9 @@ export const PROVIDERS = {
   },
   kling: {
     id: 'kling',
+    typeId: 'kling',
+    typeLabel: 'Kling',
+    selectorLabel: 'kling1',
     name: '可灵',
     vendor: '聚合 API',
     color: '#f97316',
@@ -154,7 +166,7 @@ export const PROVIDERS = {
     ],
     aspectRatios: ['16:9', '9:16', '1:1'],
     resolutions: {
-      default: ['720p', '1080p'],
+      default: ['720p'],
     },
     durations: [3, 4, 5, 6, 8, 10, 12, 15],
     sampleCounts: [1],
@@ -211,6 +223,9 @@ export const PROVIDERS = {
   },
   'gemini-image': {
     id: 'gemini-image',
+    typeId: 'image',
+    typeLabel: '绘图',
+    selectorLabel: 'nanobanana',
     name: '绘图',
     vendor: 'Google',
     color: '#10a37f',
@@ -275,3 +290,22 @@ export const PROVIDERS = {
 }
 
 export const PROVIDER_ORDER = ['veo', 've31p', 'veo31fast', 'kling', 'gemini-image']
+
+export const MODEL_TYPES = PROVIDER_ORDER.reduce((acc, providerId) => {
+  const config = PROVIDERS[providerId]
+  const typeId = config.typeId || providerId
+
+  if (!acc[typeId]) {
+    acc[typeId] = {
+      id: typeId,
+      label: config.typeLabel || config.name,
+      outputType: config.outputType || 'video',
+      providers: [],
+    }
+  }
+
+  acc[typeId].providers.push(providerId)
+  return acc
+}, {})
+
+export const MODEL_TYPE_ORDER = Object.keys(MODEL_TYPES)
