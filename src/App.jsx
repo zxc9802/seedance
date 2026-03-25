@@ -400,7 +400,7 @@ function App() {
           return
         }
 
-        throw new Error('图片生成已完成，但没有在响应中找到图片数据')
+        throw new Error(buildImageResponseParseError(data))
       }
     } catch (error) {
       updateProviderState(provider, { error: error.message || '生成失败' })
@@ -1241,6 +1241,98 @@ function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
+function buildImageResponseParseError(data) {
+  const summary = summarizeImageResponseShape(data)
+  if (!summary) {
+    return '图片生成已完成，但没有在响应中找到图片数据'
+  }
+
+  return `图片生成已完成，但没有在响应中找到图片数据（响应字段: ${summary}）`
+}
+
+function summarizeImageResponseShape(data) {
+  if (!data || typeof data !== 'object') {
+    return null
+  }
+
+  const fields = []
+  const topLevelKeys = Object.keys(data).slice(0, 8)
+  if (topLevelKeys.length) {
+    fields.push(topLevelKeys.join(', '))
+  }
+
+  if (Array.isArray(data?.choices)) {
+    const choice = data.choices[0]
+    if (choice?.message?.content !== undefined) {
+      fields.push(`choices[0].message.content:${Array.isArray(choice.message.content) ? 'array' : typeof choice.message.content}`)
+    }
+    if (Array.isArray(choice?.message?.parts)) {
+      fields.push(`choices[0].message.parts:${choice.message.parts.length}`)
+    }
+  }
+
+  if (Array.isArray(data?.candidates)) {
+    fields.push(`candidates:${data.candidates.length}`)
+    const parts = data.candidates[0]?.content?.parts
+    if (Array.isArray(parts)) {
+      fields.push(`candidates[0].content.parts:${parts.length}`)
+    }
+  }
+
+  if (Array.isArray(data?.data)) {
+    fields.push(`data:${data.data.length}`)
+  }
+
+  if (Array.isArray(data?.images)) {
+    fields.push(`images:${data.images.length}`)
+  }
+
+  if (Array.isArray(data?.output)) {
+    fields.push(`output:${data.output.length}`)
+  }
+
+  return fields.filter(Boolean).join(' | ') || null
+}
+
+function parseInlineImagePayload(payload, fallbackPrompt) {
+  if (!payload || typeof payload !== 'object') {
+    return null
+  }
+
+  const rawData = typeof payload.data === 'string' ? payload.data : null
+  if (!rawData) {
+    return null
+  }
+
+  const mimeType = payload.mime_type || payload.mimeType || 'image/png'
+  return {
+    url: `data:${mimeType};base64,${rawData.replace(/\s/g, '')}`,
+    revised_prompt: fallbackPrompt,
+  }
+}
+
+function parseImageParts(parts, fallbackPrompt) {
+  if (!Array.isArray(parts)) {
+    return null
+  }
+
+  for (const part of parts) {
+    const inlineImage = parseInlineImagePayload(part?.inline_data || part?.inlineData, fallbackPrompt)
+    if (inlineImage) {
+      return inlineImage
+    }
+
+    if (typeof part?.text === 'string') {
+      const textResult = parseImageChatResponse({ choices: [{ message: { content: part.text } }] }, fallbackPrompt)
+      if (textResult) {
+        return textResult
+      }
+    }
+  }
+
+  return null
+}
+
 function parseImageRecord(record, fallbackPrompt) {
   if (!record || typeof record !== 'object') {
     return null
@@ -1350,10 +1442,17 @@ function parseImageChatResponse(data, fallbackPrompt) {
 
   const parts = data?.choices?.[0]?.message?.parts
   if (parts) {
-    const imagePart = parts.find((part) => part.inline_data)
-    if (imagePart) {
-      const mimeType = imagePart.inline_data.mime_type || 'image/png'
-      return { url: `data:${mimeType};base64,${imagePart.inline_data.data}`, revised_prompt: fallbackPrompt }
+    const partResult = parseImageParts(parts, fallbackPrompt)
+    if (partResult) {
+      return partResult
+    }
+  }
+
+  const candidates = Array.isArray(data?.candidates) ? data.candidates : []
+  for (const candidate of candidates) {
+    const partResult = parseImageParts(candidate?.content?.parts, fallbackPrompt)
+    if (partResult) {
+      return partResult
     }
   }
 
