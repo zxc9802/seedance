@@ -6,7 +6,7 @@ import {
   saveLatestSnapshot,
 } from './snapshotStorage'
 import Header from './components/Header'
-import ProviderTabs from './components/ProviderTabs'
+import ModelSelector from './components/ModelSelector'
 import PromptInput from './components/PromptInput'
 import ParameterPanel from './components/ParameterPanel'
 import VideoPreview from './components/VideoPreview'
@@ -268,19 +268,34 @@ function App() {
           }
 
           const pollData = await pollResponse.json()
-          const state = pollData?.state || pollData?.status
+          const pollPayload = pollData?.data || pollData
+          const state = normalizeTaskState(
+            pollPayload?.state || pollPayload?.status || pollData?.state || pollData?.status,
+          )
+          const directUrl = extractVeoFastVideoUrl(pollData)
 
-          if (state === 'SUCCEEDED' || state === 'completed') {
+          if (
+            state === 'succeeded'
+            || state === 'completed'
+            || ((pollPayload?.success === true || pollData?.success === true) && directUrl)
+          ) {
             finished = true
             window.clearInterval(progressTimer)
-            const contentUrl = `/api/veo-fast/content/${encodeURIComponent(taskId)}`
-            const previewUrl = await resolvePreviewUrl(contentUrl)
+            const previewUrl = directUrl
+              ? await resolvePreviewUrl(directUrl)
+              : await resolveVeoFastPreviewUrl(taskId)
             updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
             return
           }
 
-          if (state === 'FAILED' || state === 'failed') {
-            throw new Error(pollData?.error || pollData?.message || '视频生成失败')
+          if (state === 'failed') {
+            throw new Error(
+              pollPayload?.error
+                || pollPayload?.message
+                || pollData?.error
+                || pollData?.message
+                || '视频生成失败',
+            )
           }
         }
       } else if (isVideoProvider(provider)) {
@@ -417,7 +432,7 @@ function App() {
       />
       <main className="app-main">
         <div className="left-panel">
-          <ProviderTabs provider={provider} onChange={handleProviderChange} />
+          <ModelSelector provider={provider} onChange={handleProviderChange} />
           <PromptInput
             prompt={prompt}
             onPromptChange={setPrompt}
@@ -756,9 +771,14 @@ function buildImageRequest(params, prompt, mode, mediaList) {
   const content = [{ type: 'text', text: prompt }]
   if (mode === 'i2v') {
     for (const media of mediaList) {
+      const rawBase64 = extractImageBase64Payload(media)
+      if (!rawBase64) {
+        throw new Error('参考图片格式无效，图生图仅支持 Base64 图片输入')
+      }
+
       content.push({
-        type: 'image_url',
-        image_url: { url: media },
+        type: 'image_base64',
+        image_base64: rawBase64,
       })
     }
   }
@@ -773,6 +793,22 @@ function buildImageRequest(params, prompt, mode, mediaList) {
       messages: [{ role: 'user', content }],
     },
   }
+}
+
+function extractImageBase64Payload(media) {
+  if (typeof media !== 'string') return null
+
+  const dataUrlMatch = media.match(/^data:image\/[a-zA-Z0-9.+-]+;base64,([A-Za-z0-9+/=\s]+)$/i)
+  if (dataUrlMatch) {
+    return dataUrlMatch[1].replace(/\s/g, '')
+  }
+
+  const normalized = media.replace(/\s/g, '')
+  if (/^[A-Za-z0-9+/=]+$/.test(normalized) && normalized.length > 100) {
+    return normalized
+  }
+
+  return null
 }
 
 function mapVideoMode(mode) {
@@ -994,14 +1030,124 @@ function revokeObjectUrl(url) {
 async function resolvePreviewUrl(url) {
   if (!url || url.startsWith('blob:') || url.startsWith('data:')) return url
 
-  try {
-    const response = await fetch(url)
-    if (!response.ok) return url
-    const blob = await response.blob()
-    return URL.createObjectURL(blob)
-  } catch {
-    return url
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(await formatHttpError(response))
   }
+
+  const contentType = (response.headers.get('content-type') || '').toLowerCase()
+  if (contentType.includes('application/json')) {
+    const payload = await response.json()
+    throw new Error(payload?.message || payload?.error?.message || '预览内容不是视频文件')
+  }
+
+  if (
+    contentType
+    && !contentType.startsWith('video/')
+    && !contentType.startsWith('image/')
+    && !contentType.includes('application/octet-stream')
+  ) {
+    const body = await response.text()
+    throw new Error(`预览内容类型异常: ${contentType || 'unknown'}${body ? `，返回内容：${body.slice(0, 120)}` : ''}`)
+  }
+
+  const blob = await response.blob()
+  if (!blob.size) {
+    throw new Error('预览文件为空，无法播放')
+  }
+
+  if (
+    blob.type
+    && !blob.type.startsWith('video/')
+    && !blob.type.startsWith('image/')
+    && !blob.type.includes('application/octet-stream')
+  ) {
+    throw new Error(`预览文件类型异常: ${blob.type}`)
+  }
+
+  return URL.createObjectURL(blob)
+}
+
+function normalizeTaskState(value) {
+  if (typeof value !== 'string') return ''
+
+  const normalized = value.trim().toLowerCase()
+  switch (normalized) {
+    case 'succeeded':
+    case 'success':
+      return 'succeeded'
+    case 'completed':
+    case 'complete':
+      return 'completed'
+    case 'failed':
+    case 'failure':
+    case 'error':
+      return 'failed'
+    default:
+      return normalized
+  }
+}
+
+function extractVeoFastVideoUrl(payload) {
+  const candidates = [
+    payload?.data?.videos?.[0]?.url,
+    payload?.data?.videos?.[0]?.videoUrl,
+    payload?.data?.video?.url,
+    payload?.data?.videoUrl,
+    payload?.data?.video_url,
+    payload?.data?.downloadUrl,
+    payload?.data?.download_url,
+    payload?.data?.contentUrl,
+    payload?.data?.content_url,
+    payload?.data?.result?.videos?.[0]?.url,
+    payload?.data?.result?.video?.url,
+    payload?.data?.result?.videoUrl,
+    payload?.data?.result?.video_url,
+    payload?.data?.result?.downloadUrl,
+    payload?.data?.result?.download_url,
+    payload?.videos?.[0]?.url,
+    payload?.video?.url,
+    payload?.videoUrl,
+    payload?.video_url,
+    payload?.downloadUrl,
+    payload?.download_url,
+    payload?.contentUrl,
+    payload?.content_url,
+    payload?.content,
+    payload?.url,
+  ]
+
+  return (
+    candidates.find((value) => typeof value === 'string' && /^https?:\/\//i.test(value))
+    || null
+  )
+}
+
+async function resolveVeoFastPreviewUrl(taskId, attempts = 6) {
+  const contentUrl = `/api/veo-fast/content/${encodeURIComponent(taskId)}`
+  let lastError = null
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await resolvePreviewUrl(contentUrl)
+    } catch (error) {
+      lastError = error
+      const message = error?.message || ''
+      const canRetry = (
+        message.includes('Failed to resolve Gemini video URL')
+        || message.includes('解析Gemini视频URL失败')
+        || message.includes('Task not found')
+      )
+
+      if (!canRetry || attempt === attempts - 1) {
+        throw error
+      }
+
+      await sleep(5000)
+    }
+  }
+
+  throw lastError || new Error('获取视频预览失败')
 }
 
 async function formatHttpError(response) {
@@ -1009,6 +1155,18 @@ async function formatHttpError(response) {
   if (contentType.includes('application/json')) {
     const payload = await response.json()
     const message = payload?.message || payload?.error?.message || JSON.stringify(payload)
+    const newApiVersion = response.headers.get('x-new-api-version')
+    const requestId = response.headers.get('x-oneapi-request-id')
+
+    if (
+      newApiVersion
+      && payload?.error?.type === 'upstream_error'
+      && typeof message === 'string'
+      && message.includes('API Key not found. Please pass a valid API key.')
+    ) {
+      const suffix = requestId ? `（request id: ${requestId}）` : ''
+      return `API 错误 (${response.status}): 当前 new-api 网关已收到请求，但它连接的上游模型渠道返回“API Key not found”。这通常表示网关侧没有为该模型配置可用的供应商密钥，或当前令牌未绑定到可用渠道${suffix}`
+    }
 
     if (response.status === 401 && payload?.redirectUrl && typeof window !== 'undefined') {
       window.location.href = payload.redirectUrl
@@ -1053,6 +1211,15 @@ function parseImageChatResponse(data, fallbackPrompt) {
     const imageItem = content.find((item) => item?.type === 'image_url' && item?.image_url?.url)
     if (imageItem) {
       return { url: imageItem.image_url.url, revised_prompt: fallbackPrompt }
+    }
+
+    const base64Item = content.find((item) => item?.type === 'image_base64' && typeof item?.image_base64 === 'string')
+    if (base64Item) {
+      const mimeType = typeof base64Item.mime_type === 'string' ? base64Item.mime_type : 'image/png'
+      return {
+        url: `data:${mimeType};base64,${base64Item.image_base64.replace(/\s/g, '')}`,
+        revised_prompt: fallbackPrompt,
+      }
     }
   }
 

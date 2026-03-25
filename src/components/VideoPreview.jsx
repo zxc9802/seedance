@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Copy, Download, Loader2, Maximize2, MonitorPlay, X } from 'lucide-react'
 import { PROVIDERS } from '../modelConfig'
@@ -7,7 +7,13 @@ import './VideoPreview.css'
 export default function VideoPreview({ videoUrl, generating, progress, error, params, provider }) {
   const cfg = PROVIDERS[provider]
   const isImageOutput = cfg.outputType === 'image'
+  const displayModelName = cfg.selectorLabel || cfg.name
   const [showFullscreen, setShowFullscreen] = useState(false)
+  const [playbackError, setPlaybackError] = useState(null)
+
+  useEffect(() => {
+    setPlaybackError(null)
+  }, [videoUrl, provider])
 
   const frameClass = (() => {
     switch (params.aspectRatio) {
@@ -60,7 +66,7 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
           transition={{ duration: 0.3 }}
           key={params.aspectRatio}
         >
-          {videoUrl ? (
+          {videoUrl && !playbackError ? (
             isImageOutput ? (
               <img
                 src={videoUrl}
@@ -79,6 +85,7 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
                 preload="metadata"
                 loop
                 className="preview-video"
+                onError={() => setPlaybackError('视频已返回，但浏览器无法播放该文件。请先下载检查文件内容或稍后重试。')}
               />
             )
           ) : generating ? (
@@ -87,7 +94,7 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
                 <Loader2 size={28} className="spin" style={{ color: cfg.color }} />
               </div>
               <div className="gen-info">
-                <span className="gen-label">正在使用 {cfg.name} 生成{isImageOutput ? '图片' : '视频'}...</span>
+                <span className="gen-label">正在使用 {displayModelName} 生成{isImageOutput ? '图片' : '视频'}...</span>
                 <div className="gen-progress-bar">
                   <motion.div
                     className="gen-progress-fill"
@@ -100,9 +107,9 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
                 <span className="gen-percent">{progress}%</span>
               </div>
             </div>
-          ) : error ? (
+          ) : (error || playbackError) ? (
             <div className="preview-msg">
-              <p className="preview-error">{error}</p>
+              <p className="preview-error">{playbackError || error}</p>
             </div>
           ) : (
             <div className="preview-empty">
@@ -116,7 +123,7 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
         </motion.div>
 
         <div className="preview-meta">
-          <MetaTag label="模型" value={params.model} color={cfg.color} />
+          <MetaTag label="模型" value={displayModelName} color={cfg.color} />
           <MetaTag label="比例" value={params.aspectRatio} />
           {params.duration != null && <MetaTag label="时长" value={`${params.duration}秒`} />}
           {params.resolution && <MetaTag label="分辨率" value={params.resolution} />}
@@ -124,7 +131,7 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
       </div>
 
       <AnimatePresence>
-        {showFullscreen && videoUrl && (
+        {showFullscreen && videoUrl && !playbackError && (
           <motion.div
             className="fullscreen-overlay"
             initial={{ opacity: 0 }}
@@ -152,6 +159,10 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
                   preload="metadata"
                   loop
                   className="fullscreen-video"
+                  onError={() => {
+                    setPlaybackError('视频已返回，但浏览器无法播放该文件。请先下载检查文件内容或稍后重试。')
+                    setShowFullscreen(false)
+                  }}
                 />
               )}
               <div className="fullscreen-toolbar">

@@ -298,8 +298,41 @@ function summarizeBase64Field(value) {
   }
 }
 
+function summarizeVeoFastResponse(contentType, buffer) {
+  if (!buffer?.length) {
+    return { empty: true }
+  }
+
+  const normalizedType = (contentType || '').toLowerCase()
+  if (
+    normalizedType.includes('application/json')
+    || normalizedType.startsWith('text/')
+  ) {
+    const text = buffer.toString('utf8')
+    try {
+      return JSON.parse(text)
+    } catch {
+      return text.slice(0, 800)
+    }
+  }
+
+  return {
+    binary: true,
+    size: buffer.length,
+    contentType: contentType || 'unknown',
+  }
+}
+
+function logVeoFastUpstream(route, taskId, response, buffer) {
+  const contentType = response.headers.get('content-type') || ''
+  console.log(
+    `[veo-fast] ${route} ${taskId} -> ${response.status} ${contentType || 'unknown'}`,
+    JSON.stringify(summarizeVeoFastResponse(contentType, buffer), null, 2),
+  )
+}
+
 app.post('/api/veo-fast/generate', async (req, res) => {
-  const apiKey = process.env.VEO_FAST_API_KEY
+  const apiKey = process.env.VEO_FAST_API_KEY?.trim()
   if (!apiKey) {
     res.status(500).json({
       success: false,
@@ -338,7 +371,7 @@ app.post('/api/veo-fast/generate', async (req, res) => {
 })
 
 app.get('/api/veo-fast/status/:taskId', async (req, res) => {
-  const apiKey = process.env.VEO_FAST_API_KEY
+  const apiKey = process.env.VEO_FAST_API_KEY?.trim()
   if (!apiKey) {
     res.status(500).json({
       success: false,
@@ -370,6 +403,7 @@ app.get('/api/veo-fast/status/:taskId', async (req, res) => {
     })
 
     const buffer = Buffer.from(await response.arrayBuffer())
+    logVeoFastUpstream('status', req.params.taskId, response, buffer)
     res.end(buffer)
   } catch (error) {
     res.status(502).json({
@@ -380,7 +414,7 @@ app.get('/api/veo-fast/status/:taskId', async (req, res) => {
 })
 
 app.get('/api/veo-fast/content/:taskId', async (req, res) => {
-  const apiKey = process.env.VEO_FAST_API_KEY
+  const apiKey = process.env.VEO_FAST_API_KEY?.trim()
   if (!apiKey) {
     res.status(500).json({
       success: false,
@@ -411,6 +445,7 @@ app.get('/api/veo-fast/content/:taskId', async (req, res) => {
     })
 
     const buffer = Buffer.from(await response.arrayBuffer())
+    logVeoFastUpstream('content', req.params.taskId, response, buffer)
     res.end(buffer)
   } catch (error) {
     res.status(502).json({
