@@ -1156,7 +1156,7 @@ async function formatHttpError(response) {
     const payload = await response.json()
     const message = payload?.message || payload?.error?.message || JSON.stringify(payload)
     const newApiVersion = response.headers.get('x-new-api-version')
-    const requestId = response.headers.get('x-oneapi-request-id')
+    const requestId = resolveResponseRequestId(response, payload)
 
     if (
       newApiVersion
@@ -1164,8 +1164,10 @@ async function formatHttpError(response) {
       && typeof message === 'string'
       && message.includes('API Key not found. Please pass a valid API key.')
     ) {
-      const suffix = requestId ? `（request id: ${requestId}）` : ''
-      return `API 错误 (${response.status}): 当前 new-api 网关已收到请求，但它连接的上游模型渠道返回“API Key not found”。这通常表示网关侧没有为该模型配置可用的供应商密钥，或当前令牌未绑定到可用渠道${suffix}`
+      return appendRequestId(
+        `API 错误 (${response.status}): 当前 new-api 网关已收到请求，但它连接的上游模型渠道返回“API Key not found”。这通常表示网关侧没有为该模型配置可用的供应商密钥，或当前令牌未绑定到可用渠道`,
+        requestId,
+      )
     }
 
     if (response.status === 401 && payload?.redirectUrl && typeof window !== 'undefined') {
@@ -1173,14 +1175,108 @@ async function formatHttpError(response) {
       return message || '登录已失效，正在返回主站...'
     }
 
-    return `API 错误 (${response.status}): ${message}`
+    return appendRequestId(`API 错误 (${response.status}): ${message}`, requestId)
   }
   const body = await response.text()
-  return `API 错误 (${response.status}): ${body}`
+  return appendRequestId(
+    `API 错误 (${response.status}): ${body}`,
+    resolveResponseRequestId(response),
+  )
+}
+
+function resolveResponseRequestId(response, payload = null) {
+  return readFirstTraceValue(
+    extractRequestIdFromPayload(payload),
+    response.headers.get('x-upstream-request-id'),
+    response.headers.get('x-oneapi-request-id'),
+    response.headers.get('x-request-id'),
+    response.headers.get('request-id'),
+    response.headers.get('x-upstream-trace-id'),
+    response.headers.get('trace-id'),
+    response.headers.get('x-trace-id'),
+    response.headers.get('cf-ray'),
+  )
+}
+
+function extractRequestIdFromPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null
+  }
+
+  return readFirstTraceValue(
+    payload.requestId,
+    payload.request_id,
+    payload.RequestId,
+    payload.traceId,
+    payload.trace_id,
+    payload.TraceId,
+    payload.data?.requestId,
+    payload.data?.request_id,
+    payload.data?.RequestId,
+    payload.data?.traceId,
+    payload.data?.trace_id,
+    payload.data?.TraceId,
+    payload.error?.requestId,
+    payload.error?.request_id,
+    payload.error?.RequestId,
+    payload.error?.traceId,
+    payload.error?.trace_id,
+    payload.error?.TraceId,
+  )
+}
+
+function readFirstTraceValue(...values) {
+  return values.find((value) => typeof value === 'string' && value.trim())?.trim() || null
+}
+
+function appendRequestId(message, requestId) {
+  if (!requestId || typeof message !== 'string' || message.includes(requestId)) {
+    return message
+  }
+
+  return `${message}（requestId: ${requestId}）`
 }
 
 function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+function parseImageRecord(record, fallbackPrompt) {
+  if (!record || typeof record !== 'object') {
+    return null
+  }
+
+  if (typeof record.url === 'string' && record.url) {
+    return {
+      url: record.url,
+      revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
+    }
+  }
+
+  if (record.image_url?.url) {
+    return {
+      url: record.image_url.url,
+      revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
+    }
+  }
+
+  if (typeof record.b64_json === 'string' && record.b64_json) {
+    const mimeType = typeof record.mime_type === 'string' ? record.mime_type : 'image/png'
+    return {
+      url: `data:${mimeType};base64,${record.b64_json.replace(/\s/g, '')}`,
+      revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
+    }
+  }
+
+  if (typeof record.image_base64 === 'string' && record.image_base64) {
+    const mimeType = typeof record.mime_type === 'string' ? record.mime_type : 'image/png'
+    return {
+      url: `data:${mimeType};base64,${record.image_base64.replace(/\s/g, '')}`,
+      revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
+    }
+  }
+
+  return null
 }
 
 function parseImageChatResponse(data, fallbackPrompt) {
@@ -1219,6 +1315,35 @@ function parseImageChatResponse(data, fallbackPrompt) {
       return {
         url: `data:${mimeType};base64,${base64Item.image_base64.replace(/\s/g, '')}`,
         revised_prompt: fallbackPrompt,
+      }
+    }
+  }
+
+  const topLevelCollections = [data?.data, data?.images]
+  for (const collection of topLevelCollections) {
+    if (!Array.isArray(collection)) continue
+
+    for (const record of collection) {
+      const parsedRecord = parseImageRecord(record, fallbackPrompt)
+      if (parsedRecord) {
+        return parsedRecord
+      }
+    }
+  }
+
+  const outputEntries = Array.isArray(data?.output) ? data.output : []
+  for (const entry of outputEntries) {
+    const directRecord = parseImageRecord(entry, fallbackPrompt)
+    if (directRecord) {
+      return directRecord
+    }
+
+    if (!Array.isArray(entry?.content)) continue
+
+    for (const contentItem of entry.content) {
+      const parsedRecord = parseImageRecord(contentItem, fallbackPrompt)
+      if (parsedRecord) {
+        return parsedRecord
       }
     }
   }
