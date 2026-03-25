@@ -27,7 +27,7 @@ const cleanupIntervalMinutes = Number(process.env.UPLOAD_CLEANUP_INTERVAL_MINUTE
 const publicBaseUrl = stripTrailingSlash(process.env.PUBLIC_BASE_URL || '')
 const videoApiBaseUrl = stripTrailingSlash(process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
-const imageApiBaseUrl = stripTrailingSlash(process.env.IMAGE_API_BASE_URL || 'http://47.77.198.47:3001/v1')
+const imageApiBaseUrl = normalizeOpenAiBaseUrl(process.env.IMAGE_API_BASE_URL || 'http://47.77.198.47:3001/v1')
 const materialThirdChannel = Number(process.env.MATERIAL_THIRD_CHANNEL || 1)
 const materialPollIntervalMs = Math.max(1000, Number(process.env.MATERIAL_POLL_INTERVAL_MS || 3000))
 const materialPollTimeoutMs = Math.max(materialPollIntervalMs, Number(process.env.MATERIAL_POLL_TIMEOUT_MS || 180000))
@@ -39,6 +39,8 @@ const videoSiteSessionCookieName = process.env.VIDEO_SITE_SESSION_COOKIE_NAME?.t
 const videoSiteSessionTtlMinutes = Math.max(5, Number(process.env.VIDEO_SITE_SESSION_TTL_MINUTES || 720))
 const videoSiteSessionTtlMs = videoSiteSessionTtlMinutes * 60 * 1000
 const videoSiteSessionSecret = resolveVideoSiteSessionSecret()
+const UPSTREAM_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'request-id']
+const UPSTREAM_TRACE_ID_HEADERS = ['trace-id', 'x-trace-id', 'cf-ray']
 
 fs.mkdirSync(uploadDir, { recursive: true })
 
@@ -223,9 +225,12 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
     })
   } catch (error) {
     const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
     res.status(statusCode).json({
       success: false,
       message: error.message || 'Upload failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
     })
   }
 })
@@ -389,18 +394,8 @@ app.get('/api/veo-fast/status/:taskId', async (req, res) => {
     })
 
     res.status(response.status)
-    response.headers.forEach((value, key) => {
-      const lowered = key.toLowerCase()
-      if (
-        lowered === 'content-length'
-        || lowered === 'transfer-encoding'
-        || lowered === 'connection'
-        || lowered === 'content-encoding'
-      ) {
-        return
-      }
-      res.setHeader(key, value)
-    })
+    copyUpstreamResponseHeaders(res, response.headers)
+    applyUpstreamTraceHeaders(res, extractUpstreamTraceMetadata(response))
 
     const buffer = Buffer.from(await response.arrayBuffer())
     logVeoFastUpstream('status', req.params.taskId, response, buffer)
@@ -432,17 +427,8 @@ app.get('/api/veo-fast/content/:taskId', async (req, res) => {
     })
 
     res.status(response.status)
-    response.headers.forEach((value, key) => {
-      const lowered = key.toLowerCase()
-      if (
-        lowered === 'transfer-encoding'
-        || lowered === 'connection'
-        || lowered === 'content-encoding'
-      ) {
-        return
-      }
-      res.setHeader(key, value)
-    })
+    copyUpstreamResponseHeaders(res, response.headers)
+    applyUpstreamTraceHeaders(res, extractUpstreamTraceMetadata(response))
 
     const buffer = Buffer.from(await response.arrayBuffer())
     logVeoFastUpstream('content', req.params.taskId, response, buffer)
@@ -511,28 +497,177 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}) {
       body: JSON.stringify(body),
     })
 
-    res.status(response.status)
-    response.headers.forEach((value, key) => {
-      const lowered = key.toLowerCase()
-      if (
-        lowered === 'content-length'
-        || lowered === 'transfer-encoding'
-        || lowered === 'connection'
-        || lowered === 'content-encoding'
-      ) {
-        return
-      }
-      res.setHeader(key, value)
-    })
-
     const buffer = Buffer.from(await response.arrayBuffer())
+    const contentType = response.headers.get('content-type') || ''
+    const parsedPayload = tryParseJsonBuffer(buffer, contentType)
+    const traceMetadata = extractUpstreamTraceMetadata(response, parsedPayload)
+    const tracedPayload = injectUpstreamTraceMetadata(parsedPayload, traceMetadata)
+
+    res.status(response.status)
+    copyUpstreamResponseHeaders(res, response.headers)
+    applyUpstreamTraceHeaders(res, traceMetadata)
+
+    if (tracedPayload !== null) {
+      if (!res.getHeader('Content-Type')) {
+        res.setHeader('Content-Type', contentType || 'application/json; charset=utf-8')
+      }
+      res.send(JSON.stringify(tracedPayload))
+      return
+    }
+
     res.end(buffer)
   } catch (error) {
+    applyUpstreamTraceHeaders(res, error)
     res.status(502).json({
       success: false,
       message: error.message || 'Upstream request failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
     })
   }
+}
+
+function copyUpstreamResponseHeaders(res, headers) {
+  headers.forEach((value, key) => {
+    const lowered = key.toLowerCase()
+    if (
+      lowered === 'content-length'
+      || lowered === 'transfer-encoding'
+      || lowered === 'connection'
+      || lowered === 'content-encoding'
+    ) {
+      return
+    }
+    res.setHeader(key, value)
+  })
+}
+
+function applyUpstreamTraceHeaders(res, metadata) {
+  if (metadata?.requestId && !res.getHeader('x-upstream-request-id')) {
+    res.setHeader('x-upstream-request-id', metadata.requestId)
+  }
+
+  if (metadata?.traceId && !res.getHeader('x-upstream-trace-id')) {
+    res.setHeader('x-upstream-trace-id', metadata.traceId)
+  }
+}
+
+function tryParseJsonBuffer(buffer, contentType = '') {
+  if (!isJsonContentType(contentType)) {
+    return null
+  }
+
+  try {
+    return JSON.parse(buffer.toString('utf8'))
+  } catch {
+    return null
+  }
+}
+
+function isJsonContentType(contentType = '') {
+  const normalized = contentType.toLowerCase()
+  return normalized.includes('application/json') || normalized.includes('+json')
+}
+
+function injectUpstreamTraceMetadata(payload, metadata) {
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
+    return payload
+  }
+
+  const nextPayload = { ...payload }
+
+  if (metadata?.requestId && !readFirstString(nextPayload.requestId, nextPayload.request_id, nextPayload.RequestId)) {
+    nextPayload.requestId = metadata.requestId
+  }
+
+  if (metadata?.traceId && !readFirstString(nextPayload.traceId, nextPayload.trace_id, nextPayload.TraceId)) {
+    nextPayload.traceId = metadata.traceId
+  }
+
+  if (nextPayload.data && !Array.isArray(nextPayload.data) && typeof nextPayload.data === 'object') {
+    nextPayload.data = { ...nextPayload.data }
+
+    if (metadata?.requestId && !readFirstString(
+      nextPayload.data.requestId,
+      nextPayload.data.request_id,
+      nextPayload.data.RequestId,
+    )) {
+      nextPayload.data.requestId = metadata.requestId
+    }
+
+    if (metadata?.traceId && !readFirstString(
+      nextPayload.data.traceId,
+      nextPayload.data.trace_id,
+      nextPayload.data.TraceId,
+    )) {
+      nextPayload.data.traceId = metadata.traceId
+    }
+  }
+
+  return nextPayload
+}
+
+function extractUpstreamTraceMetadata(responseOrHeaders, payload = null) {
+  const headers = responseOrHeaders?.headers || responseOrHeaders
+  const payloadTrace = extractTraceMetadataFromPayload(payload)
+  const requestId = payloadTrace.requestId || readHeaderValue(headers, UPSTREAM_REQUEST_ID_HEADERS)
+  const traceId = payloadTrace.traceId || readHeaderValue(headers, UPSTREAM_TRACE_ID_HEADERS)
+  return { requestId, traceId }
+}
+
+function extractTraceMetadataFromPayload(payload) {
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
+    return { requestId: null, traceId: null }
+  }
+
+  const requestId = readFirstString(
+    payload.requestId,
+    payload.request_id,
+    payload.RequestId,
+    payload.data?.requestId,
+    payload.data?.request_id,
+    payload.data?.RequestId,
+    payload.error?.requestId,
+    payload.error?.request_id,
+    payload.error?.RequestId,
+  )
+
+  const traceId = readFirstString(
+    payload.traceId,
+    payload.trace_id,
+    payload.TraceId,
+    payload.data?.traceId,
+    payload.data?.trace_id,
+    payload.data?.TraceId,
+    payload.error?.traceId,
+    payload.error?.trace_id,
+    payload.error?.TraceId,
+  )
+
+  return { requestId, traceId }
+}
+
+function readHeaderValue(headers, headerNames) {
+  if (!headers) return null
+
+  for (const headerName of headerNames) {
+    const value = headers.get?.(headerName)
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+
+  return null
+}
+
+function readFirstString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+
+  return null
 }
 
 function normalizeVeoFastRequest(body, promptMode) {
@@ -577,7 +712,11 @@ async function createMaterialReference({ name, originalUrl, type }) {
   })
 
   if (!createPayload?.success) {
-    throw createHttpError(400, createPayload?.msg || createPayload?.message || 'Material creation failed.')
+    throw createHttpError(
+      400,
+      createPayload?.msg || createPayload?.message || 'Material creation failed.',
+      extractTraceMetadataFromPayload(createPayload),
+    )
   }
 
   const materialId = createPayload?.data?.materialId
@@ -598,7 +737,11 @@ async function createMaterialReference({ name, originalUrl, type }) {
     })
 
     if (!listPayload?.success) {
-      throw createHttpError(502, listPayload?.msg || listPayload?.message || 'Material status query failed.')
+      throw createHttpError(
+        502,
+        listPayload?.msg || listPayload?.message || 'Material status query failed.',
+        extractTraceMetadataFromPayload(listPayload),
+      )
     }
 
     const records = Array.isArray(listPayload?.data?.records) ? listPayload.data.records : []
@@ -647,20 +790,27 @@ async function requestJson(baseUrl, endpoint, headers, body) {
   const payload = contentType.includes('application/json')
     ? await response.json()
     : await response.text()
+  const traceMetadata = extractUpstreamTraceMetadata(response, payload)
 
   if (!response.ok) {
     const message = typeof payload === 'string'
       ? payload
       : payload?.msg || payload?.message || payload?.error?.message || JSON.stringify(payload)
-    throw createHttpError(response.status, message || 'Upstream request failed.')
+    throw createHttpError(response.status, message || 'Upstream request failed.', traceMetadata)
   }
 
-  return payload
+  return injectUpstreamTraceMetadata(payload, traceMetadata)
 }
 
-function createHttpError(statusCode, message) {
+function createHttpError(statusCode, message, metadata = {}) {
   const error = new Error(message)
   error.statusCode = statusCode
+  if (metadata.requestId) {
+    error.requestId = metadata.requestId
+  }
+  if (metadata.traceId) {
+    error.traceId = metadata.traceId
+  }
   return error
 }
 
@@ -705,6 +855,22 @@ async function cleanupExpiredUploads() {
 
 function stripTrailingSlash(value) {
   return value.replace(/\/+$/, '')
+}
+
+function normalizeOpenAiBaseUrl(value) {
+  const normalized = stripTrailingSlash(value)
+
+  try {
+    const url = new URL(normalized)
+    if (url.pathname === '' || url.pathname === '/') {
+      url.pathname = '/v1'
+      return stripTrailingSlash(url.toString())
+    }
+  } catch {
+    return normalized
+  }
+
+  return normalized
 }
 
 function inferExtension(mimeType = '') {
