@@ -252,7 +252,11 @@ app.post('/api/veo/generate', async (req, res) => {
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
   }, ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) return
-    const taskId = payload?.data?.taskId || payload?.taskId || payload?.data?.id
+    const taskId = payload?.result?.taskId
+      || payload?.data?.result?.taskId
+      || payload?.data?.taskId
+      || payload?.taskId
+      || payload?.data?.id
     insertUsageLog({
       session: req.videoSiteSession,
       channel: 'aggregation',
@@ -480,7 +484,12 @@ app.post('/api/veo-fast/generate', async (req, res) => {
     Authorization: `Bearer ${apiKey}`,
   }, ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) return
-    const taskId = payload?.name || payload?.task_id || payload?.id
+    const taskId = payload?.task_id
+      || payload?.data?.task_id
+      || payload?.taskId
+      || payload?.data?.taskId
+      || payload?.name
+      || payload?.id
     insertUsageLog({
       session: req.videoSiteSession,
       channel: 'veo_fast',
