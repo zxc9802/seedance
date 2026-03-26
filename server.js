@@ -1197,6 +1197,13 @@ function isAdminUser(user) {
     return true
   }
 
+  if (
+    identities.roles.some(isBuiltInAdminIdentity)
+    || identities.groups.some(isBuiltInAdminIdentity)
+  ) {
+    return true
+  }
+
   if (hasExplicitAdminAllowlist) {
     return false
   }
