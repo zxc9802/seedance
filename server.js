@@ -44,6 +44,7 @@ const videoSiteSessionTtlMs = videoSiteSessionTtlMinutes * 60 * 1000
 const videoSiteSessionSecret = resolveVideoSiteSessionSecret()
 const UPSTREAM_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'request-id']
 const UPSTREAM_TRACE_ID_HEADERS = ['trace-id', 'x-trace-id', 'cf-ray']
+const uploadedReferenceMetadata = new Map()
 
 fs.mkdirSync(uploadDir, { recursive: true })
 
@@ -215,6 +216,8 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
         item.resourceRef = material.resourceRef
       }
 
+      registerUploadedReference(item.url, file.size, expiresAtMs)
+      registerUploadedReference(item.resourceRef, file.size, expiresAtMs)
       payload.push(item)
     }
 
@@ -246,18 +249,14 @@ app.post('/api/veo/generate', async (req, res) => {
   }
 
   const body = req.body || {}
-  const mediaSummary = parseUsageMediaSummaryHeader(req)
+  const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
   }, ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) return
-    const taskId = payload?.result?.taskId
-      || payload?.data?.result?.taskId
-      || payload?.data?.taskId
-      || payload?.taskId
-      || payload?.data?.id
+    const taskId = extractAggregationTaskId(payload)
     insertUsageLog({
       session: req.videoSiteSession,
       channel: 'aggregation',
@@ -293,17 +292,13 @@ app.post('/api/veo/queryResult', async (req, res) => {
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
   }, ({ payload, traceMetadata }) => {
-    const data = payload?.data || payload
-    const taskId = req.body?.taskId || data?.taskId
-    const rawStatus = data?.status ?? data?.state
-    if (!taskId || rawStatus === undefined) return
-    const isFinal = rawStatus === 2 || rawStatus === 3 || rawStatus === 'succeeded' || rawStatus === 'failed'
-    if (!isFinal) return
-    const succeeded = rawStatus === 2 || rawStatus === 'succeeded'
+    const taskId = extractAggregationTaskId(payload) || normalizeTaskIdValue(req.body?.taskId)
+    const finalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
+    if (!taskId || !finalStatus) return
     updateUsageLogByTaskId(taskId, {
-      status: succeeded ? 'succeeded' : 'failed',
-      videoUrl: data?.videoUrl || data?.video_url || data?.resultUrl || null,
-      errorMessage: succeeded ? null : (data?.message || data?.errorMessage || null),
+      status: finalStatus,
+      videoUrl: finalStatus === 'succeeded' ? extractAggregationVideoUrl(payload) : null,
+      errorMessage: finalStatus === 'failed' ? extractAggregationMessage(payload) : null,
       completedAt: new Date().toISOString(),
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
@@ -436,6 +431,187 @@ function attachUsageMediaSummary(requestParams, mediaSummary) {
     ...(requestParams && typeof requestParams === 'object' ? requestParams : {}),
     mediaSummary,
   }
+}
+
+function resolveUsageMediaSummary(requestParams, headerSummary) {
+  if (headerSummary) {
+    return headerSummary
+  }
+
+  const references = requestParams?.references
+  if (!references || typeof references !== 'object') {
+    return null
+  }
+
+  return {
+    images: buildUploadedReferenceMetric(references.images),
+    videos: buildUploadedReferenceMetric(references.videos),
+    audios: buildUploadedReferenceMetric(references.audios),
+  }
+}
+
+function buildUploadedReferenceMetric(items) {
+  const refs = Array.isArray(items) ? items : []
+  return {
+    count: refs.length,
+    bytes: refs.reduce((total, item) => total + resolveUploadedReferenceBytes(item), 0),
+  }
+}
+
+function registerUploadedReference(reference, bytes, expiresAtMs) {
+  const key = normalizeUploadedReferenceKey(reference)
+  if (!key) return
+
+  uploadedReferenceMetadata.set(key, {
+    bytes: Math.max(0, Number(bytes) || 0),
+    expiresAtMs: Math.max(Date.now(), Number(expiresAtMs) || Date.now()),
+  })
+}
+
+function resolveUploadedReferenceBytes(reference) {
+  const key = normalizeUploadedReferenceKey(reference)
+  if (!key) return 0
+
+  const metadata = uploadedReferenceMetadata.get(key)
+  if (!metadata) return 0
+
+  if (metadata.expiresAtMs <= Date.now()) {
+    uploadedReferenceMetadata.delete(key)
+    return 0
+  }
+
+  return metadata.bytes
+}
+
+function normalizeUploadedReferenceKey(reference) {
+  return typeof reference === 'string' ? reference.trim() : ''
+}
+
+function normalizeTaskIdValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.trunc(value))
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim()
+  }
+
+  return null
+}
+
+function extractAggregationTaskId(payload) {
+  return normalizeTaskIdValue(findFirstPathValue(payload, [
+    'taskId',
+    'task_id',
+    'id',
+    'data.taskId',
+    'data.task_id',
+    'data.id',
+    'data.result.taskId',
+    'data.result.task_id',
+    'data.result.id',
+    'result.taskId',
+    'result.task_id',
+    'result.id',
+  ]))
+}
+
+function extractAggregationStatus(payload) {
+  return findFirstPathValue(payload, [
+    'status',
+    'state',
+    'task_status',
+    'data.status',
+    'data.state',
+    'data.task_status',
+    'data.result.status',
+    'data.result.state',
+    'data.result.task_status',
+    'result.status',
+    'result.state',
+    'result.task_status',
+  ])
+}
+
+function normalizeAggregationFinalStatus(value) {
+  if (value === null || value === undefined) return null
+
+  const normalized = String(value).trim().toLowerCase()
+  if (!normalized) return null
+
+  if (
+    normalized === '2'
+    || normalized === 'succeeded'
+    || normalized === 'success'
+    || normalized === 'completed'
+    || normalized === 'done'
+  ) {
+    return 'succeeded'
+  }
+
+  if (
+    normalized === '3'
+    || normalized === '4'
+    || normalized === 'failed'
+    || normalized === 'failure'
+    || normalized === 'error'
+    || normalized === 'cancelled'
+    || normalized === 'canceled'
+  ) {
+    return 'failed'
+  }
+
+  return null
+}
+
+function extractAggregationVideoUrl(payload) {
+  return readFirstString(findFirstPathValue(payload, [
+    'videoUrl',
+    'video_url',
+    'resultUrl',
+    'url',
+    'content',
+    'message',
+    'data.videoUrl',
+    'data.video_url',
+    'data.resultUrl',
+    'data.url',
+    'data.content',
+    'data.message',
+    'data.result.videoUrl',
+    'data.result.video_url',
+    'data.result.resultUrl',
+    'data.result.url',
+    'data.result.content',
+    'data.result.message',
+    'result.videoUrl',
+    'result.video_url',
+    'result.resultUrl',
+    'result.url',
+    'result.content',
+    'result.message',
+  ]))
+}
+
+function extractAggregationMessage(payload) {
+  return readFirstString(findFirstPathValue(payload, [
+    'message',
+    'msg',
+    'error',
+    'errorMessage',
+    'data.message',
+    'data.msg',
+    'data.error',
+    'data.errorMessage',
+    'data.result.message',
+    'data.result.msg',
+    'data.result.error',
+    'data.result.errorMessage',
+    'result.message',
+    'result.msg',
+    'result.error',
+    'result.errorMessage',
+  ]))
 }
 
 function extractVeoFastReferenceCounts(normalizedBody) {
@@ -1039,6 +1215,7 @@ function resolveBaseUrl(req) {
 }
 
 async function cleanupExpiredUploads() {
+  cleanupUploadedReferenceMetadata()
   const entries = await fsp.readdir(uploadDir, { withFileTypes: true })
   const expiration = Date.now() - uploadTtlMinutes * 60 * 1000
 
@@ -1050,6 +1227,15 @@ async function cleanupExpiredUploads() {
       await fsp.unlink(absolutePath)
     }
   }))
+}
+
+function cleanupUploadedReferenceMetadata() {
+  const now = Date.now()
+  for (const [key, metadata] of uploadedReferenceMetadata.entries()) {
+    if (!metadata || metadata.expiresAtMs <= now) {
+      uploadedReferenceMetadata.delete(key)
+    }
+  }
 }
 
 function stripTrailingSlash(value) {
