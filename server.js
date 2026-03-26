@@ -246,6 +246,7 @@ app.post('/api/veo/generate', async (req, res) => {
   }
 
   const body = req.body || {}
+  const mediaSummary = parseUsageMediaSummaryHeader(req)
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
@@ -268,7 +269,7 @@ app.post('/api/veo/generate', async (req, res) => {
       resolution: body.params?.resolution || null,
       duration: body.params?.duration || null,
       sampleCount: body.sampleCount || 1,
-      requestParams: body,
+      requestParams: attachUsageMediaSummary(body, mediaSummary),
       engineTaskId: taskId || null,
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
@@ -322,6 +323,7 @@ app.post('/api/image/chat/completions', async (req, res) => {
   }
 
   const body = req.body || {}
+  const mediaSummary = parseUsageMediaSummaryHeader(req)
   await proxyJson(req, res, `${imageApiBaseUrl}/chat/completions`, {
     Authorization: `Bearer ${process.env.IMAGE_API_KEY}`,
   }, ({ payload, traceMetadata, status, url }) => {
@@ -333,10 +335,10 @@ app.post('/api/image/chat/completions', async (req, res) => {
       model: body.model || null,
       generationMode: 'image',
       prompt: extractImagePromptText(body) || null,
-      requestParams: {
+      requestParams: attachUsageMediaSummary({
         model: body.model,
         mediaCounts: extractImageMediaCounts(body),
-      },
+      }, mediaSummary),
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
       upstreamUrl: url,
@@ -395,6 +397,45 @@ function extractImageMediaCounts(body) {
   )).length
 
   return { images: imageCount, videos: 0, audios: 0 }
+}
+
+const USAGE_MEDIA_SUMMARY_HEADER = 'x-usage-media-summary'
+
+function normalizeUsageMediaMetric(metric) {
+  return {
+    count: Math.max(0, Number(metric?.count) || 0),
+    bytes: Math.max(0, Number(metric?.bytes) || 0),
+  }
+}
+
+function normalizeUsageMediaSummary(summary) {
+  if (!summary || typeof summary !== 'object') return null
+
+  return {
+    images: normalizeUsageMediaMetric(summary.images),
+    videos: normalizeUsageMediaMetric(summary.videos),
+    audios: normalizeUsageMediaMetric(summary.audios),
+  }
+}
+
+function parseUsageMediaSummaryHeader(req) {
+  const rawValue = req.get(USAGE_MEDIA_SUMMARY_HEADER)
+  if (!rawValue) return null
+
+  try {
+    const parsed = JSON.parse(decodeURIComponent(rawValue))
+    return normalizeUsageMediaSummary(parsed)
+  } catch {
+    return null
+  }
+}
+
+function attachUsageMediaSummary(requestParams, mediaSummary) {
+  if (!mediaSummary) return requestParams
+  return {
+    ...(requestParams && typeof requestParams === 'object' ? requestParams : {}),
+    mediaSummary,
+  }
 }
 
 function extractVeoFastReferenceCounts(normalizedBody) {
@@ -480,6 +521,7 @@ app.post('/api/veo-fast/generate', async (req, res) => {
   console.log('[veo-fast] request debug:', JSON.stringify(debugBody, null, 2))
 
   const body = req.body || {}
+  const mediaSummary = parseUsageMediaSummaryHeader(req)
   await proxyJsonWithBody(req, res, `${veoFastGenerateUrl}/v1/video/generations`, normalizedBody, {
     Authorization: `Bearer ${apiKey}`,
   }, ({ payload, traceMetadata, status, url }) => {
@@ -500,11 +542,11 @@ app.post('/api/veo-fast/generate', async (req, res) => {
       aspectRatio: body.params?.aspectRatio || null,
       resolution: body.params?.resolution || null,
       duration: body.params?.duration || null,
-      requestParams: {
+      requestParams: attachUsageMediaSummary({
         model: normalizedBody?.model,
         parameters: normalizedBody?.parameters,
         referenceCounts: extractVeoFastReferenceCounts(normalizedBody),
-      },
+      }, mediaSummary),
       engineTaskId: taskId || null,
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,

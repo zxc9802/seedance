@@ -85,7 +85,7 @@
   <div id="tab-detail" style="display:none">
     <div class="card mb-4">
       <div class="flex flex-wrap gap-3 items-end">
-        <div><label class="text-xs text-gray-400">通道</label><select id="f-channel" class="block mt-1"><option value="">全部</option><option>aggregation</option><option>veo_fast</option><option>image</option></select></div>
+        <div><label class="text-xs text-gray-400">通道</label><select id="f-channel" class="block mt-1"><option value="">全部</option><option value="aggregation">国达丰</option><option value="zhouzong">周总</option></select></div>
         <div><label class="text-xs text-gray-400">模型</label><input id="f-model" class="block mt-1" placeholder="模型名"></div>
         <div><label class="text-xs text-gray-400">状态</label><select id="f-status" class="block mt-1"><option value="">全部</option><option value="submitted">已提交</option><option value="processing">处理中</option><option value="succeeded">成功</option><option value="failed">失败</option></select></div>
         <div><label class="text-xs text-gray-400">用户</label><select id="f-user" class="block mt-1"><option value="">全部</option></select></div>
@@ -97,7 +97,7 @@
     </div>
     <div class="card table-wrap">
       <table>
-        <thead><tr><th>时间</th><th>用户</th><th>通道</th><th>provider_id</th><th>模型</th><th>模式</th><th>提示词</th><th>图片</th><th>视频</th><th>音频</th><th>状态</th><th>engine_task_id</th><th>upstream_request_id</th><th>upstream_trace_id</th><th>upstream_url</th><th>费用</th></tr></thead>
+        <thead><tr><th>时间</th><th>用户</th><th>通道</th><th>模型</th><th>模式</th><th>提示词</th><th>图片(数量/大小)</th><th>视频(数量/大小)</th><th>音频(数量/大小)</th><th>状态</th><th>engine_task_id</th><th>upstream_url</th><th>费用</th></tr></thead>
         <tbody id="task-tbody"></tbody>
       </table>
       <div class="flex items-center justify-between mt-4 text-sm text-gray-400">
@@ -121,7 +121,7 @@
       <h3 class="text-lg font-bold mb-3" id="user-detail-title">用户明细</h3>
       <div class="card table-wrap">
         <table>
-          <thead><tr><th>时间</th><th>通道</th><th>provider_id</th><th>模型</th><th>模式</th><th>提示词</th><th>图片</th><th>视频</th><th>音频</th><th>状态</th><th>engine_task_id</th><th>upstream_request_id</th><th>upstream_trace_id</th><th>upstream_url</th><th>费用</th></tr></thead>
+          <thead><tr><th>时间</th><th>通道</th><th>模型</th><th>模式</th><th>提示词</th><th>图片(数量/大小)</th><th>视频(数量/大小)</th><th>音频(数量/大小)</th><th>状态</th><th>engine_task_id</th><th>upstream_url</th><th>费用</th></tr></thead>
           <tbody id="user-detail-tbody"></tbody>
         </table>
       </div>
@@ -135,6 +135,7 @@ let currentTaskPage = 1
 let currentTaskData = []
 let charts = {}
 
+const CHANNEL_LABELS = { aggregation: '国达丰', veo_fast: '周总', image: '周总' }
 const STATUS_LABELS = { submitted: '已提交', processing: '处理中', succeeded: '成功', failed: '失败', pending: '待处理', queued: '排队中', running: '处理中', cancelled: '已取消' }
 const COLORS = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16','#f97316','#6366f1']
 
@@ -219,11 +220,24 @@ function renderTrendChart(data) {
   })
 }
 
+function formatChannel(channel) { return CHANNEL_LABELS[channel] || channel || '-' }
+
+function mergeChannelRows(data) {
+  const merged = new Map()
+  data.forEach((item) => {
+    const label = formatChannel(item.channel)
+    if (!merged.has(label)) merged.set(label, { channel: label, requests: 0 })
+    merged.get(label).requests += Number(item.requests) || 0
+  })
+  return Array.from(merged.values()).sort((left, right) => right.requests - left.requests)
+}
+
 function renderChannelChart(data) {
   destroyChart('channel')
+  const mergedData = mergeChannelRows(data)
   charts.channel = new Chart(document.getElementById('channelChart'), {
     type: 'doughnut',
-    data: { labels: data.map((item) => item.channel), datasets: [{ data: data.map((item) => item.requests), backgroundColor: COLORS }] },
+    data: { labels: mergedData.map((item) => item.channel), datasets: [{ data: mergedData.map((item) => item.requests), backgroundColor: COLORS }] },
     options: { responsive: true, plugins: { title: { display: true, text: '通道用量分布', color: '#e2e8f0' }, legend: { labels: { color: '#94a3b8' } } } },
   })
 }
@@ -249,6 +263,8 @@ function renderUserRankChart(data) {
 
 function formatStatus(status) { return STATUS_LABELS[status] || status || '-' }
 function formatMoney(value) { return value === null || value === undefined || value === '' ? '-' : `¥${Number(value).toFixed(2)}` }
+function formatBytes(bytes) { const value = Math.max(0, Number(bytes) || 0); if (!value) return ''; if (value >= 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`; if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`; if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`; return `${value} B` }
+function formatMediaMetric(count, bytes) { const safeCount = Math.max(0, Number(count) || 0); const sizeLabel = formatBytes(bytes); return sizeLabel ? `${safeCount} (${sizeLabel})` : String(safeCount) }
 
 async function loadTasks(page) {
   if (page !== undefined) currentTaskPage = page
@@ -273,18 +289,15 @@ async function loadTasks(page) {
       <tr>
         <td>${fmtTime(task.created_at)}</td>
         <td>${esc(task.user_nickname || task.user_email || task.user_id || '-')}</td>
-        <td>${esc(task.channel || '-')}</td>
-        <td>${esc(task.provider_id || '-')}</td>
+        <td>${esc(formatChannel(task.channel))}</td>
         <td>${esc(task.model || '-')}</td>
         <td>${esc(task.generation_mode || '-')}</td>
         <td>${esc(task.promptText || '-')}</td>
-        <td>${task.imageCount ?? 0}</td>
-        <td>${task.videoCount ?? 0}</td>
-        <td>${task.audioCount ?? 0}</td>
+        <td>${esc(formatMediaMetric(task.imageCount, task.imageBytes))}</td>
+        <td>${esc(formatMediaMetric(task.videoCount, task.videoBytes))}</td>
+        <td>${esc(formatMediaMetric(task.audioCount, task.audioBytes))}</td>
         <td class="status-${task.status || 'unknown'}">${esc(formatStatus(task.status))}</td>
         <td>${esc(task.engine_task_id || '-')}</td>
-        <td>${esc(task.upstream_request_id || '-')}</td>
-        <td>${esc(task.upstream_trace_id || '-')}</td>
         <td>${esc(task.upstream_url || '-')}</td>
         <td>${formatMoney(task.estimated_cost)}</td>
       </tr>
@@ -299,8 +312,8 @@ function taskPage(delta) { loadTasks(Math.max(1, currentTaskPage + delta)) }
 
 function exportCSV() {
   if (!currentTaskData.length) return alert('暂无数据可导出')
-  const headers = ['时间','用户','邮箱','通道','provider_id','模型','模式','提示词','图片数','视频数','音频数','状态','engine_task_id','upstream_request_id','upstream_trace_id','upstream_url','费用']
-  const rows = currentTaskData.map((task) => [task.created_at, task.user_nickname || '', task.user_email || '', task.channel || '', task.provider_id || '', task.model || '', task.generation_mode || '', (task.promptText || '').replace(/[\n\r,]/g, ' '), task.imageCount ?? 0, task.videoCount ?? 0, task.audioCount ?? 0, formatStatus(task.status), task.engine_task_id || '', task.upstream_request_id || '', task.upstream_trace_id || '', task.upstream_url || '', task.estimated_cost || ''])
+  const headers = ['时间','用户','邮箱','通道','模型','模式','提示词','图片(数量/大小)','视频(数量/大小)','音频(数量/大小)','状态','engine_task_id','upstream_url','费用']
+  const rows = currentTaskData.map((task) => [task.created_at, task.user_nickname || '', task.user_email || '', formatChannel(task.channel), task.model || '', task.generation_mode || '', (task.promptText || '').replace(/[\n\r,]/g, ' '), formatMediaMetric(task.imageCount, task.imageBytes), formatMediaMetric(task.videoCount, task.videoBytes), formatMediaMetric(task.audioCount, task.audioBytes), formatStatus(task.status), task.engine_task_id || '', task.upstream_url || '', task.estimated_cost || ''])
   const csv = '\uFEFF' + [headers, ...rows].map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n')
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const link = document.createElement('a')
@@ -335,18 +348,15 @@ async function showUserDetail(userId, userName) {
     document.getElementById('user-detail-tbody').innerHTML = data.map((task) => `
       <tr>
         <td>${fmtTime(task.created_at)}</td>
-        <td>${esc(task.channel || '-')}</td>
-        <td>${esc(task.provider_id || '-')}</td>
+        <td>${esc(formatChannel(task.channel))}</td>
         <td>${esc(task.model || '-')}</td>
         <td>${esc(task.generation_mode || '-')}</td>
         <td>${esc(task.promptText || '-')}</td>
-        <td>${task.imageCount ?? 0}</td>
-        <td>${task.videoCount ?? 0}</td>
-        <td>${task.audioCount ?? 0}</td>
+        <td>${esc(formatMediaMetric(task.imageCount, task.imageBytes))}</td>
+        <td>${esc(formatMediaMetric(task.videoCount, task.videoBytes))}</td>
+        <td>${esc(formatMediaMetric(task.audioCount, task.audioBytes))}</td>
         <td class="status-${task.status || 'unknown'}">${esc(formatStatus(task.status))}</td>
         <td>${esc(task.engine_task_id || '-')}</td>
-        <td>${esc(task.upstream_request_id || '-')}</td>
-        <td>${esc(task.upstream_trace_id || '-')}</td>
         <td>${esc(task.upstream_url || '-')}</td>
         <td>${formatMoney(task.estimated_cost)}</td>
       </tr>

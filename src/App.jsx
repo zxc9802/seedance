@@ -211,6 +211,9 @@ function App() {
     const finalPrompt = selectedTemplate
       ? (prompt.trim() ? `${selectedTemplate.prompt}. Additional requirements: ${prompt.trim()}` : selectedTemplate.prompt)
       : prompt.trim()
+    const usageMediaSummary = isVideoProvider(provider)
+      ? buildUsageMediaSummaryFromVideoReferences(videoReferences)
+      : buildUsageMediaSummaryFromImageMedia(referenceMedia)
 
     if (!finalPrompt) return
 
@@ -242,7 +245,7 @@ function App() {
 
         const response = await fetch('/api/veo-fast/generate', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: withUsageMediaSummaryHeaders({ 'Content-Type': 'application/json' }, usageMediaSummary),
           body: JSON.stringify(requestBody),
         })
 
@@ -309,7 +312,7 @@ function App() {
 
         const response = await fetch(requestInfo.url, {
           method: 'POST',
-          headers: requestInfo.headers,
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
           body: JSON.stringify(requestInfo.body),
         })
 
@@ -382,7 +385,7 @@ function App() {
         const requestInfo = buildImageRequest(params, finalPrompt, generationMode, referenceMedia)
         const response = await fetch(requestInfo.url, {
           method: 'POST',
-          headers: requestInfo.headers,
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
           body: JSON.stringify(requestInfo.body),
         })
 
@@ -529,6 +532,67 @@ function serializeVideoAssetList(list) {
       mimeType: asset.mimeType,
       file: asset.file,
     }))
+}
+
+const USAGE_MEDIA_SUMMARY_HEADER = 'X-Usage-Media-Summary'
+
+function createEmptyUsageMediaSummary() {
+  return {
+    images: { count: 0, bytes: 0 },
+    videos: { count: 0, bytes: 0 },
+    audios: { count: 0, bytes: 0 },
+  }
+}
+
+function normalizeUsageMediaMetric(items) {
+  return {
+    count: items.length,
+    bytes: items.reduce((total, item) => total + Math.max(0, Number(item?.size) || 0), 0),
+  }
+}
+
+function buildUsageMediaSummaryFromVideoReferences(references) {
+  return {
+    images: normalizeUsageMediaMetric(Array.isArray(references?.images) ? references.images : []),
+    videos: normalizeUsageMediaMetric(Array.isArray(references?.videos) ? references.videos : []),
+    audios: normalizeUsageMediaMetric(Array.isArray(references?.audios) ? references.audios : []),
+  }
+}
+
+function estimateBase64Bytes(base64) {
+  if (typeof base64 !== 'string' || !base64.trim()) return 0
+  const normalized = base64.replace(/\s/g, '')
+  const paddingLength = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((normalized.length * 3) / 4) - paddingLength)
+}
+
+function buildUsageMediaSummaryFromImageMedia(mediaList) {
+  const images = Array.isArray(mediaList) ? mediaList : []
+  return {
+    ...createEmptyUsageMediaSummary(),
+    images: {
+      count: images.length,
+      bytes: images.reduce((total, media) => total + estimateBase64Bytes(extractImageBase64Payload(media)), 0),
+    },
+  }
+}
+
+function encodeUsageMediaSummary(summary) {
+  try {
+    return encodeURIComponent(JSON.stringify(summary))
+  } catch {
+    return ''
+  }
+}
+
+function withUsageMediaSummaryHeaders(headers, summary) {
+  const encoded = encodeUsageMediaSummary(summary)
+  if (!encoded) return headers
+
+  return {
+    ...headers,
+    [USAGE_MEDIA_SUMMARY_HEADER]: encoded,
+  }
 }
 
 function hydrateVideoReferences(references) {

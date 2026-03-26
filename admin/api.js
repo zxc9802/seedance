@@ -47,8 +47,38 @@ function normalizeMediaCounts(counts) {
   }
 }
 
+function normalizeMediaSummary(summary) {
+  if (!summary || typeof summary !== 'object') {
+    return null
+  }
+
+  return {
+    images: {
+      count: Math.max(0, Number(summary?.images?.count) || 0),
+      bytes: Math.max(0, Number(summary?.images?.bytes) || 0),
+    },
+    videos: {
+      count: Math.max(0, Number(summary?.videos?.count) || 0),
+      bytes: Math.max(0, Number(summary?.videos?.bytes) || 0),
+    },
+    audios: {
+      count: Math.max(0, Number(summary?.audios?.count) || 0),
+      bytes: Math.max(0, Number(summary?.audios?.bytes) || 0),
+    },
+  }
+}
+
 function extractMediaCounts(log) {
   const requestParams = log?.request_params || {}
+  const mediaSummary = normalizeMediaSummary(requestParams.mediaSummary)
+  if (mediaSummary) {
+    return {
+      images: mediaSummary.images.count,
+      videos: mediaSummary.videos.count,
+      audios: mediaSummary.audios.count,
+    }
+  }
+
   if (requestParams.mediaCounts || requestParams.referenceCounts) {
     return normalizeMediaCounts(requestParams.mediaCounts || requestParams.referenceCounts)
   }
@@ -94,6 +124,20 @@ function extractMediaCounts(log) {
   return { images: 0, videos: 0, audios: 0 }
 }
 
+function extractMediaSizes(log) {
+  const requestParams = log?.request_params || {}
+  const mediaSummary = normalizeMediaSummary(requestParams.mediaSummary)
+  if (mediaSummary) {
+    return {
+      images: mediaSummary.images.bytes,
+      videos: mediaSummary.videos.bytes,
+      audios: mediaSummary.audios.bytes,
+    }
+  }
+
+  return { images: 0, videos: 0, audios: 0 }
+}
+
 function enhanceUsageLog(log) {
   const requestParams = log?.request_params || {}
   const promptText = normalizeText(requestParams.rawPrompt)
@@ -102,6 +146,7 @@ function enhanceUsageLog(log) {
     || extractPromptFromContent(asArray(requestParams.messages).at(-1)?.content)
 
   const mediaCounts = extractMediaCounts(log)
+  const mediaSizes = extractMediaSizes(log)
 
   return {
     ...log,
@@ -109,6 +154,9 @@ function enhanceUsageLog(log) {
     imageCount: mediaCounts.images,
     videoCount: mediaCounts.videos,
     audioCount: mediaCounts.audios,
+    imageBytes: mediaSizes.images,
+    videoBytes: mediaSizes.videos,
+    audioBytes: mediaSizes.audios,
   }
 }
 
@@ -293,7 +341,10 @@ router.get('/tasks', async (req, res) => {
     conditions.push(`user_id = $${paramIdx++}`)
     params.push(req.query.userId)
   }
-  if (req.query.channel) {
+  if (req.query.channel === 'zhouzong') {
+    conditions.push(`channel = ANY($${paramIdx++})`)
+    params.push(['veo_fast', 'image'])
+  } else if (req.query.channel) {
     conditions.push(`channel = $${paramIdx++}`)
     params.push(req.query.channel)
   }
