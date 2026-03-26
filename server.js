@@ -539,6 +539,41 @@ function normalizeUploadedReferenceKey(reference) {
   return typeof reference === 'string' ? reference.trim() : ''
 }
 
+function findFirstPathValue(target, paths) {
+  for (const pathExpression of paths) {
+    const value = getPathValue(target, pathExpression)
+    if (value !== undefined && value !== null && value !== '') {
+      return value
+    }
+  }
+
+  return null
+}
+
+function getPathValue(target, pathExpression) {
+  if (!target || typeof target !== 'object') {
+    return undefined
+  }
+
+  const segments = String(pathExpression || '').split('.').filter(Boolean)
+  let current = target
+
+  for (const segment of segments) {
+    if (current === null || current === undefined) {
+      return undefined
+    }
+
+    if (/^\d+$/.test(segment)) {
+      current = current[Number(segment)]
+      continue
+    }
+
+    current = current[segment]
+  }
+
+  return current
+}
+
 function normalizeTaskIdValue(value) {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return String(Math.trunc(value))
