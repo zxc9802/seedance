@@ -1197,23 +1197,11 @@ function isAdminUser(user) {
     return true
   }
 
-  if (
-    identities.roles.some(isAdminRoleValue)
-    || identities.groups.some(isAdminRoleValue)
-  ) {
-    return true
-  }
-
   if (hasExplicitAdminAllowlist) {
     return false
   }
 
-  return (
-    identities.ids.some(isBuiltInAdminIdentity)
-    || identities.accounts.some(isBuiltInAdminIdentity)
-    || identities.emails.some(isBuiltInAdminIdentity)
-    || identities.names.some(isBuiltInAdminIdentity)
-  )
+  return identities.accounts.some(isBuiltInAdminIdentity)
 }
 
 function collectUserIdentities(user) {
@@ -1266,19 +1254,6 @@ function matchesAllowlist(allowlist, candidates) {
 
 function isBuiltInAdminIdentity(value) {
   return value === 'admin' || value === 'administrator'
-}
-
-function isAdminRoleValue(value) {
-  return (
-    value === 'admin'
-    || value === 'administrator'
-    || value === 'superadmin'
-    || value === 'super-admin'
-    || value === 'root'
-    || value.includes('管理')
-    || value.includes('administrator')
-    || value.includes('superadmin')
-  )
 }
 
 function requireAdminApiAccess(req, res, next) {
