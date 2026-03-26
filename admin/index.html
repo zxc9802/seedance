@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VEO Studio - 用量监控</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+  }
+  .card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
+  .stat-value { font-size: 2rem; font-weight: 700; }
+  .tab-active { background: #3b82f6; color: white; }
+  .tab-inactive { background: #1e293b; color: #94a3b8; }
+  .tab-inactive:hover { background: #334155; }
+  table { width: max-content; min-width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 10px 12px; border-bottom: 1px solid #334155; color: #94a3b8; font-weight: 500; font-size: 0.85rem; white-space: nowrap; }
+  td { padding: 10px 12px; border-bottom: 1px solid #1e293b; font-size: 0.85rem; white-space: nowrap; vertical-align: middle; }
+  tr:hover td { background: #1e293b; }
+  input, select { background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 6px 10px; border-radius: 6px; font-size: 0.85rem; }
+  input:focus, select:focus { outline: none; border-color: #3b82f6; }
+  .btn { padding: 6px 14px; border-radius: 6px; font-size: 0.85rem; cursor: pointer; border: none; }
+  .btn-primary { background: #3b82f6; color: white; }
+  .btn-primary:hover { background: #2563eb; }
+  .btn-secondary { background: #334155; color: #e2e8f0; }
+  .btn-secondary:hover { background: #475569; }
+  .status-succeeded { color: #4ade80; }
+  .status-failed { color: #f87171; }
+  .status-submitted, .status-processing, .status-pending, .status-queued, .status-running { color: #facc15; }
+  .status-cancelled { color: #94a3b8; }
+  .login-box { max-width: 360px; margin: 120px auto; }
+  .table-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<div id="login" class="login-box" style="display:none">
+  <div class="card text-center">
+    <h2 class="text-xl font-bold mb-4">管理员登录</h2>
+    <input id="pwd" type="password" placeholder="输入管理员密码" class="w-full mb-3" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="btn btn-primary w-full" onclick="doLogin()">登录</button>
+  </div>
+</div>
+
+<div id="app" style="display:none" class="max-w-7xl mx-auto px-4 py-6">
+  <div class="flex items-center justify-between mb-6">
+    <h1 class="text-2xl font-bold">VEO Studio 用量监控</h1>
+    <div class="flex gap-2">
+      <select id="dayRange" onchange="refreshAll()" class="text-sm">
+        <option value="7">最近 7 天</option>
+        <option value="30" selected>最近 30 天</option>
+        <option value="90">最近 90 天</option>
+      </select>
+      <button class="btn btn-secondary text-sm" onclick="refreshAll()">刷新</button>
+    </div>
+  </div>
+
+  <div class="flex gap-2 mb-6">
+    <button class="tab-active px-4 py-2 rounded-lg text-sm font-medium" onclick="switchTab('overview', this)">概览看板</button>
+    <button class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium" onclick="switchTab('detail', this)">对账明细</button>
+    <button class="tab-inactive px-4 py-2 rounded-lg text-sm font-medium" onclick="switchTab('users', this)">用户分析</button>
+  </div>
+
+  <div id="tab-overview">
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+      <div class="card"><div class="text-sm text-gray-400 mb-1">今日请求</div><div class="stat-value text-blue-400" id="s-today">-</div></div>
+      <div class="card"><div class="text-sm text-gray-400 mb-1">总请求数</div><div class="stat-value text-white" id="s-total">-</div></div>
+      <div class="card"><div class="text-sm text-gray-400 mb-1">成功率</div><div class="stat-value text-green-400" id="s-rate">-</div></div>
+      <div class="card"><div class="text-sm text-gray-400 mb-1">预估费用</div><div class="stat-value text-yellow-400" id="s-cost">-</div></div>
+      <div class="card"><div class="text-sm text-gray-400 mb-1">活跃用户</div><div class="stat-value text-purple-400" id="s-users">-</div></div>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+      <div class="card"><canvas id="trendChart" height="200"></canvas></div>
+      <div class="card"><canvas id="channelChart" height="200"></canvas></div>
+    </div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="card"><canvas id="modelChart" height="200"></canvas></div>
+      <div class="card"><canvas id="userRankChart" height="200"></canvas></div>
+    </div>
+  </div>
+
+  <div id="tab-detail" style="display:none">
+    <div class="card mb-4">
+      <div class="flex flex-wrap gap-3 items-end">
+        <div><label class="text-xs text-gray-400">通道</label><select id="f-channel" class="block mt-1"><option value="">全部</option><option>aggregation</option><option>veo_fast</option><option>image</option></select></div>
+        <div><label class="text-xs text-gray-400">模型</label><input id="f-model" class="block mt-1" placeholder="模型名"></div>
+        <div><label class="text-xs text-gray-400">状态</label><select id="f-status" class="block mt-1"><option value="">全部</option><option value="submitted">已提交</option><option value="processing">处理中</option><option value="succeeded">成功</option><option value="failed">失败</option></select></div>
+        <div><label class="text-xs text-gray-400">用户</label><select id="f-user" class="block mt-1"><option value="">全部</option></select></div>
+        <div><label class="text-xs text-gray-400">开始日期</label><input id="f-from" type="date" class="block mt-1"></div>
+        <div><label class="text-xs text-gray-400">结束日期</label><input id="f-to" type="date" class="block mt-1"></div>
+        <button class="btn btn-primary mt-auto" onclick="loadTasks()">查询</button>
+        <button class="btn btn-secondary mt-auto" onclick="exportCSV()">导出 CSV</button>
+      </div>
+    </div>
+    <div class="card table-wrap">
+      <table>
+        <thead><tr><th>时间</th><th>用户</th><th>通道</th><th>provider_id</th><th>模型</th><th>模式</th><th>提示词</th><th>图片</th><th>视频</th><th>音频</th><th>状态</th><th>engine_task_id</th><th>upstream_request_id</th><th>upstream_trace_id</th><th>upstream_url</th><th>费用</th></tr></thead>
+        <tbody id="task-tbody"></tbody>
+      </table>
+      <div class="flex items-center justify-between mt-4 text-sm text-gray-400">
+        <span id="task-info">-</span>
+        <div class="flex gap-2">
+          <button class="btn btn-secondary" id="prev-btn" onclick="taskPage(-1)">上一页</button>
+          <button class="btn btn-secondary" id="next-btn" onclick="taskPage(1)">下一页</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tab-users" style="display:none">
+    <div class="card mb-4 table-wrap">
+      <table>
+        <thead><tr><th>用户</th><th>邮箱</th><th>分组</th><th>请求数</th><th>成功</th><th>失败</th><th>预估费用</th><th>操作</th></tr></thead>
+        <tbody id="user-tbody"></tbody>
+      </table>
+    </div>
+    <div id="user-detail-section" style="display:none">
+      <h3 class="text-lg font-bold mb-3" id="user-detail-title">用户明细</h3>
+      <div class="card table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>通道</th><th>provider_id</th><th>模型</th><th>模式</th><th>提示词</th><th>图片</th><th>视频</th><th>音频</th><th>状态</th><th>engine_task_id</th><th>upstream_request_id</th><th>upstream_trace_id</th><th>upstream_url</th><th>费用</th></tr></thead>
+          <tbody id="user-detail-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let TOKEN = localStorage.getItem('admin_token') || ''
+let currentTaskPage = 1
+let currentTaskData = []
+let charts = {}
+
+const STATUS_LABELS = { submitted: '已提交', processing: '处理中', succeeded: '成功', failed: '失败', pending: '待处理', queued: '排队中', running: '处理中', cancelled: '已取消' }
+const COLORS = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16','#f97316','#6366f1']
+
+function api(path, opts = {}) {
+  const days = document.getElementById('dayRange')?.value || 30
+  const sep = path.includes('?') ? '&' : '?'
+  return fetch(`/api/admin${path}${sep}days=${days}`, {
+    ...opts,
+    headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+  }).then(async (response) => {
+    if (response.status === 401) {
+      showLogin()
+      throw new Error('Unauthorized')
+    }
+    return response.json()
+  })
+}
+
+function showLogin() {
+  document.getElementById('login').style.display = 'block'
+  document.getElementById('app').style.display = 'none'
+}
+
+function doLogin() {
+  TOKEN = document.getElementById('pwd').value
+  localStorage.setItem('admin_token', TOKEN)
+  api('/overview').then(() => {
+    document.getElementById('login').style.display = 'none'
+    document.getElementById('app').style.display = 'block'
+    refreshAll()
+  }).catch(() => alert('密码错误'))
+}
+
+function switchTab(name, btn) {
+  document.querySelectorAll('[id^="tab-"]').forEach((element) => { element.style.display = 'none' })
+  document.getElementById(`tab-${name}`).style.display = 'block'
+  btn.parentElement.querySelectorAll('button').forEach((button) => {
+    button.className = button === btn ? 'tab-active px-4 py-2 rounded-lg text-sm font-medium' : 'tab-inactive px-4 py-2 rounded-lg text-sm font-medium'
+  })
+  if (name === 'detail') loadTasks()
+  if (name === 'users') loadUsers()
+}
+
+async function refreshAll() {
+  try {
+    const [overview, trend, models, channels, users] = await Promise.all([api('/overview'), api('/trend'), api('/by-model'), api('/by-channel'), api('/by-user?limit=20')])
+    document.getElementById('s-today').textContent = overview.todayRequests ?? 0
+    document.getElementById('s-total').textContent = overview.totalRequests ?? 0
+    document.getElementById('s-rate').textContent = `${overview.successRate ?? 0}%`
+    document.getElementById('s-cost').textContent = `¥${Number(overview.totalCost ?? 0).toFixed(2)}`
+    document.getElementById('s-users').textContent = overview.activeUsers ?? 0
+    renderTrendChart(trend)
+    renderChannelChart(channels)
+    renderModelChart(models)
+    renderUserRankChart(users)
+    const userSelect = document.getElementById('f-user')
+    const currentValue = userSelect.value
+    userSelect.innerHTML = '<option value="">全部</option>'
+    users.forEach((user) => {
+      const option = document.createElement('option')
+      option.value = user.user_id
+      option.textContent = user.user_name
+      userSelect.appendChild(option)
+    })
+    userSelect.value = currentValue
+  } catch (error) { console.error(error) }
+}
+
+function destroyChart(id) {
+  if (charts[id]) {
+    charts[id].destroy()
+    delete charts[id]
+  }
+}
+
+function renderTrendChart(data) {
+  destroyChart('trend')
+  charts.trend = new Chart(document.getElementById('trendChart'), {
+    type: 'line',
+    data: { labels: data.map((item) => item.date?.slice(5)), datasets: [{ label: '请求数', data: data.map((item) => item.requests), borderColor: '#3b82f6', tension: 0.3, fill: false }, { label: '成功', data: data.map((item) => item.succeeded), borderColor: '#10b981', tension: 0.3, fill: false }, { label: '失败', data: data.map((item) => item.failed), borderColor: '#ef4444', tension: 0.3, fill: false }] },
+    options: { responsive: true, plugins: { title: { display: true, text: '每日请求趋势', color: '#e2e8f0' }, legend: { labels: { color: '#94a3b8' } } }, scales: { x: { ticks: { color: '#64748b' } }, y: { ticks: { color: '#64748b' }, beginAtZero: true } } },
+  })
+}
+
+function renderChannelChart(data) {
+  destroyChart('channel')
+  charts.channel = new Chart(document.getElementById('channelChart'), {
+    type: 'doughnut',
+    data: { labels: data.map((item) => item.channel), datasets: [{ data: data.map((item) => item.requests), backgroundColor: COLORS }] },
+    options: { responsive: true, plugins: { title: { display: true, text: '通道用量分布', color: '#e2e8f0' }, legend: { labels: { color: '#94a3b8' } } } },
+  })
+}
+
+function renderModelChart(data) {
+  destroyChart('model')
+  const top10 = data.slice(0, 10)
+  charts.model = new Chart(document.getElementById('modelChart'), {
+    type: 'bar',
+    data: { labels: top10.map((item) => (item.model || 'unknown').slice(0, 20)), datasets: [{ label: '请求数', data: top10.map((item) => item.requests), backgroundColor: '#3b82f6' }] },
+    options: { indexAxis: 'y', responsive: true, plugins: { title: { display: true, text: '模型用量 Top 10', color: '#e2e8f0' }, legend: { display: false } }, scales: { x: { ticks: { color: '#64748b' }, beginAtZero: true }, y: { ticks: { color: '#94a3b8' } } } },
+  })
+}
+
+function renderUserRankChart(data) {
+  destroyChart('userRank')
+  charts.userRank = new Chart(document.getElementById('userRankChart'), {
+    type: 'bar',
+    data: { labels: data.map((item) => item.user_name?.slice(0, 12)), datasets: [{ label: '请求数', data: data.map((item) => item.requests), backgroundColor: '#8b5cf6' }] },
+    options: { indexAxis: 'y', responsive: true, plugins: { title: { display: true, text: '用户用量排名', color: '#e2e8f0' }, legend: { display: false } }, scales: { x: { ticks: { color: '#64748b' }, beginAtZero: true }, y: { ticks: { color: '#94a3b8' } } } },
+  })
+}
+
+function formatStatus(status) { return STATUS_LABELS[status] || status || '-' }
+function formatMoney(value) { return value === null || value === undefined || value === '' ? '-' : `¥${Number(value).toFixed(2)}` }
+
+async function loadTasks(page) {
+  if (page !== undefined) currentTaskPage = page
+  const params = new URLSearchParams({ page: currentTaskPage, pageSize: 50 })
+  const channel = document.getElementById('f-channel').value
+  const model = document.getElementById('f-model').value
+  const status = document.getElementById('f-status').value
+  const userId = document.getElementById('f-user').value
+  const from = document.getElementById('f-from').value
+  const to = document.getElementById('f-to').value
+  if (channel) params.set('channel', channel)
+  if (model) params.set('model', model)
+  if (status) params.set('status', status)
+  if (userId) params.set('userId', userId)
+  if (from) params.set('dateFrom', from)
+  if (to) params.set('dateTo', `${to}T23:59:59Z`)
+
+  try {
+    const result = await api(`/tasks?${params.toString()}`)
+    currentTaskData = result.items || []
+    document.getElementById('task-tbody').innerHTML = currentTaskData.map((task) => `
+      <tr>
+        <td>${fmtTime(task.created_at)}</td>
+        <td>${esc(task.user_nickname || task.user_email || task.user_id || '-')}</td>
+        <td>${esc(task.channel || '-')}</td>
+        <td>${esc(task.provider_id || '-')}</td>
+        <td>${esc(task.model || '-')}</td>
+        <td>${esc(task.generation_mode || '-')}</td>
+        <td>${esc(task.promptText || '-')}</td>
+        <td>${task.imageCount ?? 0}</td>
+        <td>${task.videoCount ?? 0}</td>
+        <td>${task.audioCount ?? 0}</td>
+        <td class="status-${task.status || 'unknown'}">${esc(formatStatus(task.status))}</td>
+        <td>${esc(task.engine_task_id || '-')}</td>
+        <td>${esc(task.upstream_request_id || '-')}</td>
+        <td>${esc(task.upstream_trace_id || '-')}</td>
+        <td>${esc(task.upstream_url || '-')}</td>
+        <td>${formatMoney(task.estimated_cost)}</td>
+      </tr>
+    `).join('')
+    document.getElementById('task-info').textContent = `共 ${result.total} 条，第 ${result.page} 页`
+    document.getElementById('prev-btn').disabled = currentTaskPage <= 1
+    document.getElementById('next-btn').disabled = currentTaskData.length < 50
+  } catch (error) { console.error(error) }
+}
+
+function taskPage(delta) { loadTasks(Math.max(1, currentTaskPage + delta)) }
+
+function exportCSV() {
+  if (!currentTaskData.length) return alert('暂无数据可导出')
+  const headers = ['时间','用户','邮箱','通道','provider_id','模型','模式','提示词','图片数','视频数','音频数','状态','engine_task_id','upstream_request_id','upstream_trace_id','upstream_url','费用']
+  const rows = currentTaskData.map((task) => [task.created_at, task.user_nickname || '', task.user_email || '', task.channel || '', task.provider_id || '', task.model || '', task.generation_mode || '', (task.promptText || '').replace(/[\n\r,]/g, ' '), task.imageCount ?? 0, task.videoCount ?? 0, task.audioCount ?? 0, formatStatus(task.status), task.engine_task_id || '', task.upstream_request_id || '', task.upstream_trace_id || '', task.upstream_url || '', task.estimated_cost || ''])
+  const csv = '\uFEFF' + [headers, ...rows].map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = `usage_${new Date().toISOString().slice(0, 10)}.csv`
+  link.click()
+}
+
+async function loadUsers() {
+  try {
+    const data = await api('/by-user?limit=100')
+    document.getElementById('user-tbody').innerHTML = data.map((user) => `
+      <tr>
+        <td>${esc(user.user_name)}</td>
+        <td>${esc(user.user_email || '-')}</td>
+        <td>${esc(user.user_group || '-')}</td>
+        <td>${user.requests}</td>
+        <td class="status-succeeded">${user.succeeded}</td>
+        <td class="status-failed">${user.failed}</td>
+        <td>${formatMoney(user.estimated_cost)}</td>
+        <td><button class="btn btn-secondary text-xs" data-user-id="${escAttr(encodeURIComponent(user.user_id || ''))}" data-user-name="${escAttr(encodeURIComponent(user.user_name || ''))}" onclick="showUserDetail(decodeURIComponent(this.dataset.userId), decodeURIComponent(this.dataset.userName))">查看明细</button></td>
+      </tr>
+    `).join('')
+  } catch (error) { console.error(error) }
+}
+
+async function showUserDetail(userId, userName) {
+  document.getElementById('user-detail-section').style.display = 'block'
+  document.getElementById('user-detail-title').textContent = `${userName} 的使用明细`
+  try {
+    const data = await api(`/user-detail?userId=${encodeURIComponent(userId)}`)
+    document.getElementById('user-detail-tbody').innerHTML = data.map((task) => `
+      <tr>
+        <td>${fmtTime(task.created_at)}</td>
+        <td>${esc(task.channel || '-')}</td>
+        <td>${esc(task.provider_id || '-')}</td>
+        <td>${esc(task.model || '-')}</td>
+        <td>${esc(task.generation_mode || '-')}</td>
+        <td>${esc(task.promptText || '-')}</td>
+        <td>${task.imageCount ?? 0}</td>
+        <td>${task.videoCount ?? 0}</td>
+        <td>${task.audioCount ?? 0}</td>
+        <td class="status-${task.status || 'unknown'}">${esc(formatStatus(task.status))}</td>
+        <td>${esc(task.engine_task_id || '-')}</td>
+        <td>${esc(task.upstream_request_id || '-')}</td>
+        <td>${esc(task.upstream_trace_id || '-')}</td>
+        <td>${esc(task.upstream_url || '-')}</td>
+        <td>${formatMoney(task.estimated_cost)}</td>
+      </tr>
+    `).join('')
+  } catch (error) { console.error(error) }
+}
+
+function fmtTime(value) {
+  if (!value) return '-'
+  const date = new Date(value)
+  return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function esc(value) {
+  return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+function escAttr(value) { return esc(value).replace(/'/g, '&#39;') }
+
+if (TOKEN) {
+  api('/overview').then(() => {
+    document.getElementById('app').style.display = 'block'
+    refreshAll()
+  }).catch(() => showLogin())
+} else {
+  showLogin()
+}
+</script>
+</body>
+</html>

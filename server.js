@@ -7,6 +7,9 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createViteServer, loadEnv } from 'vite'
+import { initDatabase, closePool } from './db/postgres.js'
+import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
+import adminRouter from './admin/api.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -39,6 +42,8 @@ const videoSiteSessionCookieName = process.env.VIDEO_SITE_SESSION_COOKIE_NAME?.t
 const videoSiteSessionTtlMinutes = Math.max(5, Number(process.env.VIDEO_SITE_SESSION_TTL_MINUTES || 720))
 const videoSiteSessionTtlMs = videoSiteSessionTtlMinutes * 60 * 1000
 const videoSiteSessionSecret = resolveVideoSiteSessionSecret()
+const UPSTREAM_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'request-id']
+const UPSTREAM_TRACE_ID_HEADERS = ['trace-id', 'x-trace-id', 'cf-ray']
 
 fs.mkdirSync(uploadDir, { recursive: true })
 
@@ -240,10 +245,31 @@ app.post('/api/veo/generate', async (req, res) => {
     return
   }
 
+  const body = req.body || {}
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
+  }, ({ payload, traceMetadata, status, url }) => {
+    if (status >= 400) return
+    const taskId = payload?.data?.taskId || payload?.taskId || payload?.data?.id
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'aggregation',
+      providerId: body.providerId || null,
+      model: body.modelId || body.model || null,
+      generationMode: body.mode || 't2v',
+      prompt: body.prompt || null,
+      aspectRatio: body.params?.aspectRatio || body.aspectRatio || null,
+      resolution: body.params?.resolution || null,
+      duration: body.params?.duration || null,
+      sampleCount: body.sampleCount || 1,
+      requestParams: body,
+      engineTaskId: taskId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: url,
+    }).catch(() => {})
   })
 })
 
@@ -261,6 +287,22 @@ app.post('/api/veo/queryResult', async (req, res) => {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
+  }, ({ payload, traceMetadata }) => {
+    const data = payload?.data || payload
+    const taskId = req.body?.taskId || data?.taskId
+    const rawStatus = data?.status ?? data?.state
+    if (!taskId || rawStatus === undefined) return
+    const isFinal = rawStatus === 2 || rawStatus === 3 || rawStatus === 'succeeded' || rawStatus === 'failed'
+    if (!isFinal) return
+    const succeeded = rawStatus === 2 || rawStatus === 'succeeded'
+    updateUsageLogByTaskId(taskId, {
+      status: succeeded ? 'succeeded' : 'failed',
+      videoUrl: data?.videoUrl || data?.video_url || data?.resultUrl || null,
+      errorMessage: succeeded ? null : (data?.message || data?.errorMessage || null),
+      completedAt: new Date().toISOString(),
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+    }).catch(() => {})
   })
 })
 
@@ -275,8 +317,28 @@ app.post('/api/image/chat/completions', async (req, res) => {
     return
   }
 
+  const body = req.body || {}
   await proxyJson(req, res, `${imageApiBaseUrl}/chat/completions`, {
     Authorization: `Bearer ${process.env.IMAGE_API_KEY}`,
+  }, ({ payload, traceMetadata, status, url }) => {
+    const succeeded = status < 400
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'image',
+      providerId: body.providerId || 'gemini-image',
+      model: body.model || null,
+      generationMode: 'image',
+      prompt: extractImagePromptText(body) || null,
+      requestParams: {
+        model: body.model,
+        mediaCounts: extractImageMediaCounts(body),
+      },
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: url,
+      status: succeeded ? 'succeeded' : 'failed',
+      errorMessage: succeeded ? null : (payload?.error?.message || null),
+    }).catch(() => {})
   })
 })
 
@@ -296,6 +358,54 @@ function summarizeBase64Field(value) {
     hasDataUrlPrefix: /^data:/i.test(value),
     containsBase64Marker: value.includes(';base64,'),
   }
+}
+
+function extractImagePromptText(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : []
+  const content = messages[messages.length - 1]?.content
+
+  if (typeof content === 'string') {
+    return content.trim()
+  }
+
+  if (!Array.isArray(content)) {
+    return ''
+  }
+
+  return content
+    .filter((item) => item?.type === 'text' && typeof item.text === 'string')
+    .map((item) => item.text.trim())
+    .filter(Boolean)
+    .join('\n')
+}
+
+function extractImageMediaCounts(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : []
+  const content = messages[messages.length - 1]?.content
+  if (!Array.isArray(content)) {
+    return { images: 0, videos: 0, audios: 0 }
+  }
+
+  const imageCount = content.filter((item) => (
+    item?.type === 'image_base64' || item?.type === 'image_url'
+  )).length
+
+  return { images: imageCount, videos: 0, audios: 0 }
+}
+
+function extractVeoFastReferenceCounts(normalizedBody) {
+  const firstInstance = Array.isArray(normalizedBody?.instances) ? normalizedBody.instances[0] : null
+  if (!firstInstance) {
+    return { images: 0, videos: 0, audios: 0 }
+  }
+
+  const imageCount = [
+    firstInstance.image,
+    firstInstance.lastFrame,
+    ...(Array.isArray(firstInstance.referenceImages) ? normalizedBody.instances[0].referenceImages.map((item) => item?.image) : []),
+  ].filter(Boolean).length
+
+  return { images: imageCount, videos: 0, audios: 0 }
 }
 
 function summarizeVeoFastResponse(contentType, buffer) {
@@ -365,8 +475,32 @@ app.post('/api/veo-fast/generate', async (req, res) => {
   }
   console.log('[veo-fast] request debug:', JSON.stringify(debugBody, null, 2))
 
+  const body = req.body || {}
   await proxyJsonWithBody(req, res, `${veoFastGenerateUrl}/v1/video/generations`, normalizedBody, {
     Authorization: `Bearer ${apiKey}`,
+  }, ({ payload, traceMetadata, status, url }) => {
+    if (status >= 400) return
+    const taskId = payload?.name || payload?.task_id || payload?.id
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'veo_fast',
+      providerId: body.providerId || 'veo31fast',
+      model: normalizedBody?.model || body.model || null,
+      generationMode: body.mode || 't2v',
+      prompt: normalizedBody?.instances?.[0]?.prompt || normalizedBody?.prompt || body.prompt || null,
+      aspectRatio: body.params?.aspectRatio || null,
+      resolution: body.params?.resolution || null,
+      duration: body.params?.duration || null,
+      requestParams: {
+        model: normalizedBody?.model,
+        parameters: normalizedBody?.parameters,
+        referenceCounts: extractVeoFastReferenceCounts(normalizedBody),
+      },
+      engineTaskId: taskId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: url,
+    }).catch(() => {})
   })
 })
 
@@ -388,22 +522,32 @@ app.get('/api/veo-fast/status/:taskId', async (req, res) => {
       },
     })
 
+    const traceMetadata = extractUpstreamTraceMetadata(response)
     res.status(response.status)
-    response.headers.forEach((value, key) => {
-      const lowered = key.toLowerCase()
-      if (
-        lowered === 'content-length'
-        || lowered === 'transfer-encoding'
-        || lowered === 'connection'
-        || lowered === 'content-encoding'
-      ) {
-        return
-      }
-      res.setHeader(key, value)
-    })
+    copyUpstreamResponseHeaders(res, response.headers)
+    applyUpstreamTraceHeaders(res, traceMetadata)
 
     const buffer = Buffer.from(await response.arrayBuffer())
     logVeoFastUpstream('status', req.params.taskId, response, buffer)
+
+    try {
+      const contentType = response.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        const parsed = JSON.parse(buffer.toString('utf8'))
+        const state = parsed?.state || parsed?.status
+        if (state === 'succeeded' || state === 'failed' || state === 'SUCCEEDED' || state === 'FAILED') {
+          updateUsageLogByTaskId(req.params.taskId, {
+            status: state.toLowerCase() === 'succeeded' ? 'succeeded' : 'failed',
+            videoUrl: parsed?.video_url || parsed?.videoUrl || null,
+            errorMessage: state.toLowerCase() === 'failed' ? (parsed?.error?.message || parsed?.message || null) : null,
+            completedAt: new Date().toISOString(),
+            upstreamRequestId: traceMetadata?.requestId || null,
+            upstreamTraceId: traceMetadata?.traceId || null,
+          }).catch(() => {})
+        }
+      }
+    } catch (_) {}
+
     res.end(buffer)
   } catch (error) {
     res.status(502).json({
@@ -432,17 +576,8 @@ app.get('/api/veo-fast/content/:taskId', async (req, res) => {
     })
 
     res.status(response.status)
-    response.headers.forEach((value, key) => {
-      const lowered = key.toLowerCase()
-      if (
-        lowered === 'transfer-encoding'
-        || lowered === 'connection'
-        || lowered === 'content-encoding'
-      ) {
-        return
-      }
-      res.setHeader(key, value)
-    })
+    copyUpstreamResponseHeaders(res, response.headers)
+    applyUpstreamTraceHeaders(res, extractUpstreamTraceMetadata(response))
 
     const buffer = Buffer.from(await response.arrayBuffer())
     logVeoFastUpstream('content', req.params.taskId, response, buffer)
@@ -463,6 +598,11 @@ const cleanupTimer = setInterval(() => {
 cleanupTimer.unref()
 cleanupExpiredUploads().catch((error) => {
   console.error('[cleanup]', error)
+})
+
+app.use('/api/admin', adminRouter)
+app.get('/admin', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin', 'index.html'))
 })
 
 const httpServer = createHttpServer(app)
@@ -492,15 +632,16 @@ if (!isProduction) {
   })
 }
 
-httpServer.listen(port, () => {
+httpServer.listen(port, async () => {
   console.log(`[server] ${mode} listening on http://localhost:${port}`)
+  await initDatabase()
 })
 
-async function proxyJson(req, res, url, extraHeaders = {}) {
-  return proxyJsonWithBody(req, res, url, req.body, extraHeaders)
+async function proxyJson(req, res, url, extraHeaders = {}, onResponse = null) {
+  return proxyJsonWithBody(req, res, url, req.body, extraHeaders, onResponse)
 }
 
-async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}) {
+async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onResponse = null) {
   try {
     const response = await fetch(url, {
       method: req.method,
@@ -511,21 +652,26 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}) {
       body: JSON.stringify(body),
     })
 
-    res.status(response.status)
-    response.headers.forEach((value, key) => {
-      const lowered = key.toLowerCase()
-      if (
-        lowered === 'content-length'
-        || lowered === 'transfer-encoding'
-        || lowered === 'connection'
-        || lowered === 'content-encoding'
-      ) {
-        return
-      }
-      res.setHeader(key, value)
-    })
-
     const buffer = Buffer.from(await response.arrayBuffer())
+    const contentType = response.headers.get('content-type') || ''
+    const parsedPayload = tryParseJsonBuffer(buffer, contentType)
+    const traceMetadata = extractUpstreamTraceMetadata(response, parsedPayload)
+    const tracedPayload = injectUpstreamTraceMetadata(parsedPayload, traceMetadata)
+
+    if (onResponse) {
+      try { onResponse({ payload: parsedPayload, traceMetadata, status: response.status, url }) } catch (_) {}
+    }
+
+    res.status(response.status)
+    copyUpstreamResponseHeaders(res, response.headers)
+    applyUpstreamTraceHeaders(res, traceMetadata)
+
+    if (tracedPayload !== null) {
+      res.type('application/json')
+      res.end(JSON.stringify(tracedPayload))
+      return
+    }
+
     res.end(buffer)
   } catch (error) {
     res.status(502).json({
@@ -533,6 +679,149 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}) {
       message: error.message || 'Upstream request failed',
     })
   }
+}
+
+function copyUpstreamResponseHeaders(res, headers) {
+  headers.forEach((value, key) => {
+    const lowered = key.toLowerCase()
+    if (
+      lowered === 'content-length'
+      || lowered === 'transfer-encoding'
+      || lowered === 'connection'
+      || lowered === 'content-encoding'
+    ) {
+      return
+    }
+    res.setHeader(key, value)
+  })
+}
+
+function applyUpstreamTraceHeaders(res, metadata) {
+  if (metadata?.requestId && !res.getHeader('x-upstream-request-id')) {
+    res.setHeader('x-upstream-request-id', metadata.requestId)
+  }
+
+  if (metadata?.traceId && !res.getHeader('x-upstream-trace-id')) {
+    res.setHeader('x-upstream-trace-id', metadata.traceId)
+  }
+}
+
+function tryParseJsonBuffer(buffer, contentType = '') {
+  if (!isJsonContentType(contentType)) {
+    return null
+  }
+
+  try {
+    return JSON.parse(buffer.toString('utf8'))
+  } catch {
+    return null
+  }
+}
+
+function isJsonContentType(contentType = '') {
+  const normalized = contentType.toLowerCase()
+  return normalized.includes('application/json') || normalized.includes('+json')
+}
+
+function injectUpstreamTraceMetadata(payload, metadata) {
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
+    return payload
+  }
+
+  const nextPayload = { ...payload }
+
+  if (metadata?.requestId && !readFirstString(nextPayload.requestId, nextPayload.request_id, nextPayload.RequestId)) {
+    nextPayload.requestId = metadata.requestId
+  }
+
+  if (metadata?.traceId && !readFirstString(nextPayload.traceId, nextPayload.trace_id, nextPayload.TraceId)) {
+    nextPayload.traceId = metadata.traceId
+  }
+
+  if (nextPayload.data && !Array.isArray(nextPayload.data) && typeof nextPayload.data === 'object') {
+    nextPayload.data = { ...nextPayload.data }
+
+    if (metadata?.requestId && !readFirstString(
+      nextPayload.data.requestId,
+      nextPayload.data.request_id,
+      nextPayload.data.RequestId,
+    )) {
+      nextPayload.data.requestId = metadata.requestId
+    }
+
+    if (metadata?.traceId && !readFirstString(
+      nextPayload.data.traceId,
+      nextPayload.data.trace_id,
+      nextPayload.data.TraceId,
+    )) {
+      nextPayload.data.traceId = metadata.traceId
+    }
+  }
+
+  return nextPayload
+}
+
+function extractUpstreamTraceMetadata(responseOrHeaders, payload = null) {
+  const headers = responseOrHeaders?.headers || responseOrHeaders
+  const payloadTrace = extractTraceMetadataFromPayload(payload)
+  const requestId = payloadTrace.requestId || readHeaderValue(headers, UPSTREAM_REQUEST_ID_HEADERS)
+  const traceId = payloadTrace.traceId || readHeaderValue(headers, UPSTREAM_TRACE_ID_HEADERS)
+  return { requestId, traceId }
+}
+
+function extractTraceMetadataFromPayload(payload) {
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
+    return { requestId: null, traceId: null }
+  }
+
+  const requestId = readFirstString(
+    payload.requestId,
+    payload.request_id,
+    payload.RequestId,
+    payload.data?.requestId,
+    payload.data?.request_id,
+    payload.data?.RequestId,
+    payload.error?.requestId,
+    payload.error?.request_id,
+    payload.error?.RequestId,
+  )
+
+  const traceId = readFirstString(
+    payload.traceId,
+    payload.trace_id,
+    payload.TraceId,
+    payload.data?.traceId,
+    payload.data?.trace_id,
+    payload.data?.TraceId,
+    payload.error?.traceId,
+    payload.error?.trace_id,
+    payload.error?.TraceId,
+  )
+
+  return { requestId, traceId }
+}
+
+function readHeaderValue(headers, headerNames) {
+  if (!headers) return null
+
+  for (const headerName of headerNames) {
+    const value = headers.get?.(headerName)
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+
+  return null
+}
+
+function readFirstString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+
+  return null
 }
 
 function normalizeVeoFastRequest(body, promptMode) {
