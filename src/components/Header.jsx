@@ -1,8 +1,9 @@
 import { motion } from 'framer-motion'
-import { Film, History, Loader2, Save } from 'lucide-react'
+import { Film, History, Loader2, Save, ShieldCheck } from 'lucide-react'
 import './Header.css'
 
 export default function Header({
+  onOpenAdmin,
   onSaveSnapshot,
   onLoadSnapshot,
   snapshotBusy,
@@ -10,6 +11,7 @@ export default function Header({
   hasSnapshot,
   lastSavedAt,
   snapshotNotice,
+  showAdminEntry,
 }) {
   const noticeType = snapshotNotice?.type || 'neutral'
   const noticeText = snapshotNotice?.text || `\u6700\u8fd1\u4fdd\u5b58 ${lastSavedAt ? formatSnapshotTime(lastSavedAt) : '\u672a\u4fdd\u5b58'}`
@@ -27,6 +29,13 @@ export default function Header({
       </div>
 
       <div className="header-actions">
+        {showAdminEntry ? (
+          <button className="header-action-btn admin-entry-btn" onClick={onOpenAdmin}>
+            <ShieldCheck size={14} />
+            <span>后台管理</span>
+          </button>
+        ) : null}
+
         <div className={`snapshot-meta ${noticeType}`}>
           <span className="snapshot-meta-label">Snapshot</span>
           <span className="snapshot-meta-value">{noticeText}</span>

@@ -42,6 +42,16 @@ const videoSiteSessionCookieName = process.env.VIDEO_SITE_SESSION_COOKIE_NAME?.t
 const videoSiteSessionTtlMinutes = Math.max(5, Number(process.env.VIDEO_SITE_SESSION_TTL_MINUTES || 720))
 const videoSiteSessionTtlMs = videoSiteSessionTtlMinutes * 60 * 1000
 const videoSiteSessionSecret = resolveVideoSiteSessionSecret()
+const adminUserIdAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_IDS)
+const adminUserAccountAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_ACCOUNTS)
+const adminUserEmailAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_EMAILS)
+const adminUserNameAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_NAMES)
+const hasExplicitAdminAllowlist = [
+  adminUserIdAllowlist,
+  adminUserAccountAllowlist,
+  adminUserEmailAllowlist,
+  adminUserNameAllowlist,
+].some((set) => set.size > 0)
 const UPSTREAM_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'request-id']
 const UPSTREAM_TRACE_ID_HEADERS = ['trace-id', 'x-trace-id', 'cf-ray']
 const uploadedReferenceMetadata = new Map()
@@ -104,6 +114,7 @@ app.get('/api/session', (req, res) => {
     success: true,
     data: {
       user: session.user,
+      isAdmin: isAdminUser(session.user),
       mainAppUrl: session.mainAppUrl,
       expiresAt: new Date(session.expiresAt).toISOString(),
     },
@@ -929,8 +940,8 @@ cleanupExpiredUploads().catch((error) => {
   console.error('[cleanup]', error)
 })
 
-app.use('/api/admin', adminRouter)
-app.get('/admin', (req, res) => {
+app.use('/api/admin', requireAdminApiAccess, adminRouter)
+app.get('/admin', requireAdminPageAccess, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'index.html'))
 })
 
@@ -1151,6 +1162,186 @@ function readFirstString(...values) {
   }
 
   return null
+}
+
+function parseIdentityAllowlist(value) {
+  return new Set(uniqueNormalizedValues([value]))
+}
+
+function normalizeIdentityValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value).trim().toLowerCase()
+  }
+
+  if (typeof value !== 'string') {
+    return ''
+  }
+
+  return String(value).trim().toLowerCase()
+}
+
+function isAdminUser(user) {
+  if (!user || typeof user !== 'object') return false
+
+  if (user.isAdmin === true || user.is_admin === true) {
+    return true
+  }
+
+  const identities = collectUserIdentities(user)
+  if (
+    matchesAllowlist(adminUserIdAllowlist, identities.ids)
+    || matchesAllowlist(adminUserAccountAllowlist, identities.accounts)
+    || matchesAllowlist(adminUserEmailAllowlist, identities.emails)
+    || matchesAllowlist(adminUserNameAllowlist, identities.names)
+  ) {
+    return true
+  }
+
+  if (
+    identities.roles.some(isAdminRoleValue)
+    || identities.groups.some(isAdminRoleValue)
+  ) {
+    return true
+  }
+
+  if (hasExplicitAdminAllowlist) {
+    return false
+  }
+
+  return (
+    identities.ids.some(isBuiltInAdminIdentity)
+    || identities.accounts.some(isBuiltInAdminIdentity)
+    || identities.emails.some(isBuiltInAdminIdentity)
+    || identities.names.some(isBuiltInAdminIdentity)
+  )
+}
+
+function collectUserIdentities(user) {
+  return {
+    ids: uniqueNormalizedValues([user.id, user.userId, user.uid]),
+    accounts: uniqueNormalizedValues([user.account, user.username, user.userName, user.login]),
+    emails: uniqueNormalizedValues([user.email]),
+    names: uniqueNormalizedValues([user.name, user.nickname, user.displayName, user.realName]),
+    roles: uniqueNormalizedValues([
+      user.role,
+      user.roles,
+      user.permission,
+      user.permissions,
+    ]),
+    groups: uniqueNormalizedValues([
+      user.group,
+      user.groupName,
+      user.groups,
+      user.groupNames,
+    ]),
+  }
+}
+
+function uniqueNormalizedValues(values) {
+  const normalized = []
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      normalized.push(...uniqueNormalizedValues(value))
+      continue
+    }
+
+    if (typeof value === 'string' && /[,;|]/.test(value)) {
+      normalized.push(...value.split(/[,;|]/).map((item) => normalizeIdentityValue(item)).filter(Boolean))
+      continue
+    }
+
+    const nextValue = normalizeIdentityValue(value)
+    if (nextValue) {
+      normalized.push(nextValue)
+    }
+  }
+
+  return [...new Set(normalized)]
+}
+
+function matchesAllowlist(allowlist, candidates) {
+  if (!allowlist.size) return false
+  return candidates.some((candidate) => allowlist.has(candidate))
+}
+
+function isBuiltInAdminIdentity(value) {
+  return value === 'admin' || value === 'administrator'
+}
+
+function isAdminRoleValue(value) {
+  return (
+    value === 'admin'
+    || value === 'administrator'
+    || value === 'superadmin'
+    || value === 'super-admin'
+    || value === 'root'
+    || value.includes('管理')
+    || value.includes('administrator')
+    || value.includes('superadmin')
+  )
+}
+
+function requireAdminApiAccess(req, res, next) {
+  if (!requireMainAppSso) {
+    next()
+    return
+  }
+
+  const session = req.videoSiteSession
+  if (!session) {
+    res.status(401).json({
+      success: false,
+      message: 'Please launch VEO Studio from the main site first.',
+      redirectUrl: buildMainAppVideoEntryUrl(resolveRequestedMainAppUrl(req)),
+    })
+    return
+  }
+
+  if (!isAdminUser(session.user)) {
+    res.status(403).json({
+      success: false,
+      message: 'Admin access only.',
+    })
+    return
+  }
+
+  next()
+}
+
+function requireAdminPageAccess(req, res, next) {
+  if (!requireMainAppSso) {
+    next()
+    return
+  }
+
+  if (!isAdminUser(req.videoSiteSession?.user)) {
+    res
+      .status(403)
+      .type('html')
+      .send(`<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>无权访问</title>
+    <style>
+      body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f172a; color: #e2e8f0; display: grid; place-items: center; min-height: 100vh; }
+      .card { width: min(92vw, 460px); padding: 32px; border-radius: 20px; background: rgba(15, 23, 42, 0.9); border: 1px solid rgba(148, 163, 184, 0.24); box-shadow: 0 20px 60px rgba(15, 23, 42, 0.35); }
+      h1 { margin: 0 0 10px; font-size: 26px; }
+      p { margin: 0; line-height: 1.7; color: #cbd5e1; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>无权访问</h1>
+      <p>当前账号不是管理员，不能进入后台管理页面。</p>
+    </div>
+  </body>
+</html>`)
+    return
+  }
+
+  next()
 }
 
 function normalizeVeoFastRequest(body, promptMode) {

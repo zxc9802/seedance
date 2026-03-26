@@ -99,6 +99,18 @@
   background: rgba(255,255,255,0.7);
 }
 
+.header-action-btn.admin-entry-btn {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border-medium));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, white), color-mix(in srgb, var(--accent-dark) 20%, white));
+  color: var(--accent-dark);
+}
+
+.header-action-btn.admin-entry-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent-dark) 52%, var(--border-focus));
+  color: var(--accent-dark);
+  box-shadow: 0 10px 24px rgba(180, 83, 9, 0.12);
+}
+
 .header-action-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;

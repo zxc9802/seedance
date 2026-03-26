@@ -38,6 +38,7 @@ function App() {
   const [snapshotMeta, setSnapshotMeta] = useState(() => getLatestSnapshotMeta())
   const [snapshotBusy, setSnapshotBusy] = useState(false)
   const [snapshotNotice, setSnapshotNotice] = useState(null)
+  const [showAdminEntry, setShowAdminEntry] = useState(false)
   const videoReferencesRef = useRef(videoReferences)
   const providerStateRef = useRef(providerState)
 
@@ -56,6 +57,26 @@ function App() {
 
   useEffect(() => {
     setAllParams((prev) => normalizeAllParams(prev))
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    fetch('/api/session')
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null)
+        if (cancelled) return
+        setShowAdminEntry(response.ok && payload?.data?.isAdmin === true)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setShowAdminEntry(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const params = normalizeParamsForProvider(provider, allParams[provider])
@@ -206,6 +227,10 @@ function App() {
     setGenerationMode(nextMode)
     resetReferences()
   }, [resetReferences])
+
+  const handleOpenAdmin = useCallback(() => {
+    window.open('/admin', '_blank', 'noopener')
+  }, [])
 
   const handleGenerate = useCallback(async () => {
     const finalPrompt = selectedTemplate
@@ -425,6 +450,7 @@ function App() {
   return (
     <div className="app-layout">
       <Header
+        onOpenAdmin={handleOpenAdmin}
         onSaveSnapshot={handleSaveSnapshot}
         onLoadSnapshot={handleLoadSnapshot}
         snapshotBusy={snapshotBusy}
@@ -432,6 +458,7 @@ function App() {
         hasSnapshot={Boolean(snapshotMeta?.savedAt)}
         lastSavedAt={snapshotMeta?.savedAt ?? null}
         snapshotNotice={snapshotNotice}
+        showAdminEntry={showAdminEntry}
       />
       <main className="app-main">
         <div className="left-panel">
