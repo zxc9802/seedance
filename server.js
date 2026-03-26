@@ -179,7 +179,8 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
   try {
     const baseUrl = resolveBaseUrl(req)
     const publiclyReachable = isLikelyPublicBaseUrl(baseUrl)
-    const expiresAt = new Date(Date.now() + uploadTtlMinutes * 60 * 1000).toISOString()
+    const expiresAtMs = Date.now() + uploadTtlMinutes * 60 * 1000
+    const expiresAt = new Date(expiresAtMs).toISOString()
     const materialType = parseMaterialType(req.body?.materialType)
     const payload = []
 
@@ -231,6 +232,20 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
     })
   } catch (error) {
     const statusCode = Number(error.statusCode) || 502
+    console.error('[upload] Request failed:', {
+      statusCode,
+      message: error?.message || null,
+      stack: error?.stack || null,
+      fileCount: files.length,
+      files: files.map((file) => ({
+        name: file.originalname,
+        size: file.size,
+        mimeType: file.mimetype,
+        storedAs: file.filename,
+      })),
+      materialType: req.body?.materialType || null,
+      baseUrl: resolveBaseUrl(req),
+    })
     res.status(statusCode).json({
       success: false,
       message: error.message || 'Upload failed',
