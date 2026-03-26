@@ -276,25 +276,39 @@ app.post('/api/veo/generate', async (req, res) => {
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
   }, ({ payload, traceMetadata, status, url }) => {
-    if (status >= 400) return
-    const taskId = extractAggregationTaskId(payload)
-    insertUsageLog({
-      session: req.videoSiteSession,
-      channel: 'aggregation',
-      providerId: body.providerId || null,
-      model: body.modelId || body.model || null,
-      generationMode: body.mode || 't2v',
-      prompt: body.prompt || null,
-      aspectRatio: body.params?.aspectRatio || body.aspectRatio || null,
-      resolution: body.params?.resolution || null,
-      duration: body.params?.duration || null,
-      sampleCount: body.sampleCount || 1,
-      requestParams: attachUsageMediaSummary(body, mediaSummary),
-      engineTaskId: taskId || null,
-      upstreamRequestId: traceMetadata?.requestId || null,
-      upstreamTraceId: traceMetadata?.traceId || null,
-      upstreamUrl: url,
-    }).catch(() => {})
+    try {
+      const taskId = extractAggregationTaskId(payload)
+      console.log('[monitor-debug] /api/veo/generate upstream:', {
+        status,
+        taskId: taskId || null,
+        requestId: traceMetadata?.requestId || null,
+        traceId: traceMetadata?.traceId || null,
+        payloadKeys: payload && typeof payload === 'object' && !Array.isArray(payload) ? Object.keys(payload) : [],
+        payloadDataKeys: payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? Object.keys(payload.data) : [],
+      })
+      if (status >= 400) return
+      insertUsageLog({
+        session: req.videoSiteSession,
+        channel: 'aggregation',
+        providerId: body.providerId || null,
+        model: body.modelId || body.model || null,
+        generationMode: body.mode || 't2v',
+        prompt: body.prompt || null,
+        aspectRatio: body.params?.aspectRatio || body.aspectRatio || null,
+        resolution: body.params?.resolution || null,
+        duration: body.params?.duration || null,
+        sampleCount: body.sampleCount || 1,
+        requestParams: attachUsageMediaSummary(body, mediaSummary),
+        engineTaskId: taskId || null,
+        upstreamRequestId: traceMetadata?.requestId || null,
+        upstreamTraceId: traceMetadata?.traceId || null,
+        upstreamUrl: url,
+      }).catch((error) => {
+        console.error('[monitor-debug] insertUsageLog promise rejected:', error)
+      })
+    } catch (error) {
+      console.error('[monitor-debug] /api/veo/generate monitor callback failed:', error)
+    }
   })
 })
 
@@ -313,17 +327,29 @@ app.post('/api/veo/queryResult', async (req, res) => {
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
   }, ({ payload, traceMetadata }) => {
-    const taskId = extractAggregationTaskId(payload) || normalizeTaskIdValue(req.body?.taskId)
-    const finalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
-    if (!taskId || !finalStatus) return
-    updateUsageLogByTaskId(taskId, {
-      status: finalStatus,
-      videoUrl: finalStatus === 'succeeded' ? extractAggregationVideoUrl(payload) : null,
-      errorMessage: finalStatus === 'failed' ? extractAggregationMessage(payload) : null,
-      completedAt: new Date().toISOString(),
-      upstreamRequestId: traceMetadata?.requestId || null,
-      upstreamTraceId: traceMetadata?.traceId || null,
-    }).catch(() => {})
+    try {
+      const taskId = extractAggregationTaskId(payload) || normalizeTaskIdValue(req.body?.taskId)
+      const finalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
+      console.log('[monitor-debug] /api/veo/queryResult upstream:', {
+        taskId: taskId || null,
+        finalStatus: finalStatus || null,
+        requestId: traceMetadata?.requestId || null,
+        traceId: traceMetadata?.traceId || null,
+      })
+      if (!taskId || !finalStatus) return
+      updateUsageLogByTaskId(taskId, {
+        status: finalStatus,
+        videoUrl: finalStatus === 'succeeded' ? extractAggregationVideoUrl(payload) : null,
+        errorMessage: finalStatus === 'failed' ? extractAggregationMessage(payload) : null,
+        completedAt: new Date().toISOString(),
+        upstreamRequestId: traceMetadata?.requestId || null,
+        upstreamTraceId: traceMetadata?.traceId || null,
+      }).catch((error) => {
+        console.error('[monitor-debug] updateUsageLogByTaskId promise rejected:', error)
+      })
+    } catch (error) {
+      console.error('[monitor-debug] /api/veo/queryResult monitor callback failed:', error)
+    }
   })
 })
 
