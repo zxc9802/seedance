@@ -535,11 +535,20 @@ app.get('/api/veo-fast/status/:taskId', async (req, res) => {
       if (contentType.includes('application/json')) {
         const parsed = JSON.parse(buffer.toString('utf8'))
         const state = parsed?.state || parsed?.status
-        if (state === 'succeeded' || state === 'failed' || state === 'SUCCEEDED' || state === 'FAILED') {
+        const normalizedState = typeof state === 'string' ? state.toLowerCase() : ''
+        const directVideoUrl = parsed?.video_url || parsed?.videoUrl || null
+        const succeeded = (
+          normalizedState === 'succeeded'
+          || normalizedState === 'completed'
+          || ((parsed?.success === true) && Boolean(directVideoUrl))
+        )
+        const failed = normalizedState === 'failed'
+
+        if (succeeded || failed) {
           updateUsageLogByTaskId(req.params.taskId, {
-            status: state.toLowerCase() === 'succeeded' ? 'succeeded' : 'failed',
-            videoUrl: parsed?.video_url || parsed?.videoUrl || null,
-            errorMessage: state.toLowerCase() === 'failed' ? (parsed?.error?.message || parsed?.message || null) : null,
+            status: succeeded ? 'succeeded' : 'failed',
+            videoUrl: directVideoUrl,
+            errorMessage: failed ? (parsed?.error?.message || parsed?.message || null) : null,
             completedAt: new Date().toISOString(),
             upstreamRequestId: traceMetadata?.requestId || null,
             upstreamTraceId: traceMetadata?.traceId || null,
