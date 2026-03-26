@@ -5,11 +5,21 @@ function extractUserInfo(session) {
     return { userId: null, email: null, nickname: null, group: null }
   }
   const user = session.user
+  const userId = (
+    user.id
+    || user.userId
+    || user.uid
+    || user.uuid
+    || user.memberId
+    || user.account
+    || user.email
+    || null
+  )
   return {
-    userId: user.id || user.userId || null,
-    email: user.account || user.email || null,
-    nickname: user.nickname || user.name || null,
-    group: user.groupName || null,
+    userId,
+    email: user.account || user.email || user.username || user.userName || user.login || null,
+    nickname: user.nickname || user.name || user.displayName || user.realName || null,
+    group: user.groupName || user.group || (Array.isArray(user.groupNames) ? user.groupNames.join(',') : null),
   }
 }
 
@@ -38,7 +48,9 @@ export async function insertUsageLog({
 
   const { userId, email, nickname, group } = extractUserInfo(session)
   if (!userId) {
-    console.warn('[usage-db] No user ID in session, skipping usage log.')
+    console.warn('[usage-db] No usable user identity in session, skipping usage log.', {
+      userKeys: session?.user ? Object.keys(session.user) : [],
+    })
     return null
   }
 
