@@ -100,6 +100,8 @@ app.get('/api/health', (_, res) => {
 })
 
 app.get('/api/session', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+
   const session = req.videoSiteSession
   if (!session) {
     res.status(401).json({
@@ -152,13 +154,13 @@ app.use(async (req, res, next) => {
     return
   }
 
-  if (session) {
+  const ticket = readSingleQueryValue(req.query.ticket)
+  const requestedMainAppUrl = resolveRequestedMainAppUrl(req)
+
+  if (!ticket && session) {
     next()
     return
   }
-
-  const ticket = readSingleQueryValue(req.query.ticket)
-  const requestedMainAppUrl = resolveRequestedMainAppUrl(req)
 
   if (!ticket) {
     res.redirect(302, buildMainAppVideoEntryUrl(requestedMainAppUrl))
