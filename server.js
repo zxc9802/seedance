@@ -254,6 +254,12 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
 })
 
 app.post('/api/veo/generate', async (req, res) => {
+  console.log('[monitor-debug] /api/veo/generate hit:', {
+    hasSession: Boolean(req.videoSiteSession?.user),
+    userKeys: req.videoSiteSession?.user ? Object.keys(req.videoSiteSession.user) : [],
+    modelId: req.body?.modelId || req.body?.model || null,
+    mode: req.body?.mode || req.body?.params?.mode || null,
+  })
   const missing = getMissingVideoConfig()
   if (missing.length > 0) {
     res.status(500).json({
@@ -322,6 +328,11 @@ app.post('/api/veo/queryResult', async (req, res) => {
 })
 
 app.post('/api/image/chat/completions', async (req, res) => {
+  console.log('[monitor-debug] /api/image/chat/completions hit:', {
+    hasSession: Boolean(req.videoSiteSession?.user),
+    userKeys: req.videoSiteSession?.user ? Object.keys(req.videoSiteSession.user) : [],
+    model: req.body?.model || null,
+  })
   if (!process.env.IMAGE_API_KEY) {
     res.status(500).json({
       error: {
@@ -678,6 +689,12 @@ function logVeoFastUpstream(route, taskId, response, buffer) {
 }
 
 app.post('/api/veo-fast/generate', async (req, res) => {
+  console.log('[monitor-debug] /api/veo-fast/generate hit:', {
+    hasSession: Boolean(req.videoSiteSession?.user),
+    userKeys: req.videoSiteSession?.user ? Object.keys(req.videoSiteSession.user) : [],
+    model: req.body?.model || null,
+    mode: req.body?.mode || req.body?.params?.mode || null,
+  })
   const apiKey = process.env.VEO_FAST_API_KEY?.trim()
   if (!apiKey) {
     res.status(500).json({

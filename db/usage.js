@@ -73,7 +73,16 @@ export async function insertUsageLog({
         status, videoUrl, errorMessage,
       ]
     )
-    return result.rows[0]?.id || null
+    const insertedId = result.rows[0]?.id || null
+    console.log('[usage-db] insertUsageLog success:', {
+      id: insertedId,
+      userId,
+      channel,
+      model: model || null,
+      engineTaskId: engineTaskId || null,
+      status,
+    })
+    return insertedId
   } catch (err) {
     console.error('[usage-db] insertUsageLog failed:', err.message)
     return null
