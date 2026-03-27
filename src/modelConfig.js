@@ -1,9 +1,11 @@
-export const PROVIDERS = {
+import { YUNWU_PROVIDER_ORDER, YUNWU_PROVIDERS } from './yunwuProviders'
+
+const BASE_PROVIDERS = {
   veo: {
     id: 'veo',
     typeId: 'seedance',
     typeLabel: 'Seedance',
-    selectorLabel: 'seedance1',
+    selectorLabel: 'seedance2.0',
     name: 'Seedance 2.0',
     vendor: '聚合 API',
     color: '#2563eb',
@@ -180,12 +182,14 @@ export const PROVIDERS = {
     generationModes: [
       { value: 'i2v', label: '首帧' },
       { value: 'flf', label: '首尾帧' },
+      { value: 'ref', label: '参考图片' },
       { value: 'fusion', label: '参考生视频' },
     ],
     referenceInputMode: 'url',
     maxReferenceImages: {
       i2v: 1,
       flf: 2,
+      ref: 7,
       fusion: 7,
     },
     maxReferenceVideos: {
@@ -289,7 +293,14 @@ export const PROVIDERS = {
   },
 }
 
-export const PROVIDER_ORDER = ['veo', 've31p', 'veo31fast', 'kling', 'gemini-image']
+export const PROVIDERS = {
+  ...BASE_PROVIDERS,
+  ...YUNWU_PROVIDERS,
+}
+
+const BASE_PROVIDER_ORDER = ['veo', 've31p', 'veo31fast', 'kling', 'gemini-image']
+
+export const PROVIDER_ORDER = [...BASE_PROVIDER_ORDER, ...YUNWU_PROVIDER_ORDER]
 
 export const MODEL_TYPES = PROVIDER_ORDER.reduce((acc, providerId) => {
   const config = PROVIDERS[providerId]

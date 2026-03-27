@@ -313,7 +313,7 @@ export default function PromptInput({
                   />
                 )}
 
-                {mode === 'fusion' && maxVideos > 0 && (
+                {(mode === 'fusion' || mode === 'omni') && maxVideos > 0 && (
                   <AssetUploadBucket
                     title="参考视频"
                     subtitle={getVideoBucketSubtitle(providerConfig, maxVideos)}
@@ -509,6 +509,8 @@ function renderModeIcon(mode, isImageOutput) {
       return <Layers3 size={13} />
     case 'fusion':
       return <Video size={13} />
+    case 'omni':
+      return <Video size={13} />
     case 'ref':
       return <ImageIcon size={13} />
     case 't2v':
@@ -549,6 +551,7 @@ function hasRequiredVideoAssets(mode, references) {
   if (mode === 't2v') return true
   if (mode === 'i2v') return references.images.length === 1
   if (mode === 'flf') return references.images.length === 2
+  if (mode === 'omni') return references.images.length + references.videos.length > 0
   if (mode === 'fusion') {
     const imageCount = references.images.length
     const videoCount = references.videos.length

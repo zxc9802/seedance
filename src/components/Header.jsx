@@ -1,8 +1,9 @@
 import { motion } from 'framer-motion'
-import { Film, History, Loader2, Save } from 'lucide-react'
+import { Film, History, Loader2, Save, ShieldCheck } from 'lucide-react'
 import './Header.css'
 
 export default function Header({
+  onOpenAdmin,
   onSaveSnapshot,
   onLoadSnapshot,
   snapshotBusy,
@@ -10,9 +11,10 @@ export default function Header({
   hasSnapshot,
   lastSavedAt,
   snapshotNotice,
+  showAdminEntry,
 }) {
   const noticeType = snapshotNotice?.type || 'neutral'
-  const noticeText = snapshotNotice?.text || `\u6700\u8fd1\u4fdd\u5b58 ${lastSavedAt ? formatSnapshotTime(lastSavedAt) : '\u672a\u4fdd\u5b58'}`
+  const noticeText = snapshotNotice?.text || `最近保存 ${lastSavedAt ? formatSnapshotTime(lastSavedAt) : '未保存'}`
 
   return (
     <motion.header
@@ -23,18 +25,25 @@ export default function Header({
     >
       <div className="header-left">
         <div className="logo-mark"><Film size={17} strokeWidth={1.5} /></div>
-        <span className="logo-name">{'\u89c6\u9891\u5de5\u4f5c\u53f0'}</span>
+        <span className="logo-name">视频工作台</span>
       </div>
 
       <div className="header-actions">
+        {showAdminEntry ? (
+          <button className="header-action-btn admin-entry-btn" onClick={onOpenAdmin}>
+            <ShieldCheck size={14} />
+            <span>后台管理</span>
+          </button>
+        ) : null}
+
         <div className={`snapshot-meta ${noticeType}`}>
-          <span className="snapshot-meta-label">Snapshot</span>
+          <span className="snapshot-meta-label">SNAPSHOT</span>
           <span className="snapshot-meta-value">{noticeText}</span>
         </div>
 
         <button className="header-action-btn" onClick={onSaveSnapshot} disabled={snapshotBusy}>
           {snapshotBusy ? <Loader2 size={14} className="spin" /> : <Save size={14} />}
-          <span>{'\u4fdd\u5b58\u5feb\u7167'}</span>
+          <span>保存快照</span>
         </button>
 
         <button
@@ -43,7 +52,7 @@ export default function Header({
           disabled={snapshotBusy || snapshotLoadDisabled || !hasSnapshot}
         >
           <History size={14} />
-          <span>{'\u52a0\u8f7d\u5feb\u7167'}</span>
+          <span>加载快照</span>
         </button>
       </div>
     </motion.header>

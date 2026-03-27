@@ -74,7 +74,7 @@ export default function ApiConfigModal({ apiKeys, onSave, onClose, activeProvide
             <>
               <Field icon={<Key size={14} />} label="API 密钥" placeholder="sk-..."
                 value={draft['gemini-image']?.apiKey || ''} onChange={v => update('gemini-image', 'apiKey', v)} type="password" />
-              <Field icon={<Globe size={14} />} label="接口地址" placeholder="http://47.77.198.47:3001/v1/chat/completions"
+              <Field icon={<Globe size={14} />} label="接口地址" placeholder="http://47.77.198.47:3001/v1"
                 value={draft['gemini-image']?.endpoint || ''} onChange={v => update('gemini-image', 'endpoint', v)} />
             </>
           )}

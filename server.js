@@ -7,6 +7,9 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createViteServer, loadEnv } from 'vite'
+import { initDatabase, closePool } from './db/postgres.js'
+import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
+import adminRouter from './admin/api.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -28,10 +31,12 @@ const publicBaseUrl = stripTrailingSlash(process.env.PUBLIC_BASE_URL || '')
 const videoApiBaseUrl = stripTrailingSlash(process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const imageApiBaseUrl = normalizeOpenAiBaseUrl(process.env.IMAGE_API_BASE_URL || 'http://47.77.198.47:3001/v1')
+const yunwuApiBaseUrl = stripTrailingSlash(process.env.YUNWU_API_BASE_URL || 'https://yunwu.ai')
 const materialThirdChannel = Number(process.env.MATERIAL_THIRD_CHANNEL || 1)
 const materialPollIntervalMs = Math.max(1000, Number(process.env.MATERIAL_POLL_INTERVAL_MS || 3000))
 const materialPollTimeoutMs = Math.max(materialPollIntervalMs, Number(process.env.MATERIAL_POLL_TIMEOUT_MS || 180000))
 const materialResourceTemplate = (process.env.MATERIAL_RESOURCE_TEMPLATE || '{materialId}').trim() || '{materialId}'
+const tempAssetSigningSecret = resolveTempAssetSigningSecret()
 const mainAppUrl = stripTrailingSlash(process.env.MAIN_APP_URL || 'https://www.qycm.top')
 const mainAppVideoEntryPath = normalizeMainAppEntryPath(process.env.MAIN_APP_VIDEO_ENTRY_PATH || '/bot/video-workbench-seedance')
 const requireMainAppSso = readBooleanEnv(process.env.REQUIRE_MAIN_APP_SSO, isProduction)
@@ -39,8 +44,19 @@ const videoSiteSessionCookieName = process.env.VIDEO_SITE_SESSION_COOKIE_NAME?.t
 const videoSiteSessionTtlMinutes = Math.max(5, Number(process.env.VIDEO_SITE_SESSION_TTL_MINUTES || 720))
 const videoSiteSessionTtlMs = videoSiteSessionTtlMinutes * 60 * 1000
 const videoSiteSessionSecret = resolveVideoSiteSessionSecret()
+const adminUserIdAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_IDS)
+const adminUserAccountAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_ACCOUNTS)
+const adminUserEmailAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_EMAILS)
+const adminUserNameAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_NAMES)
+const hasExplicitAdminAllowlist = [
+  adminUserIdAllowlist,
+  adminUserAccountAllowlist,
+  adminUserEmailAllowlist,
+  adminUserNameAllowlist,
+].some((set) => set.size > 0)
 const UPSTREAM_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'request-id']
 const UPSTREAM_TRACE_ID_HEADERS = ['trace-id', 'x-trace-id', 'cf-ray']
+const uploadedReferenceMetadata = new Map()
 
 fs.mkdirSync(uploadDir, { recursive: true })
 
@@ -69,11 +85,41 @@ app.use((req, _, next) => {
   next()
 })
 
-app.use('/temp-assets', express.static(uploadDir, {
-  setHeaders: (res) => {
-    res.setHeader('Cache-Control', `public, max-age=${Math.max(60, uploadTtlMinutes * 60)}`)
-  },
-}))
+app.get('/temp-assets/:filename', async (req, res) => {
+  const filename = sanitizeTempAssetName(req.params.filename)
+  const expiresAt = Number(req.query.exp || 0)
+  const signature = readSingleQueryValue(req.query.sig) || ''
+
+  if (!filename || !Number.isFinite(expiresAt) || expiresAt <= 0 || !signature) {
+    res.status(400).send('Missing temp asset signature.')
+    return
+  }
+
+  if (expiresAt <= Date.now()) {
+    res.status(410).send('Temp asset URL has expired.')
+    return
+  }
+
+  if (!verifyTempAssetSignature(filename, expiresAt, signature)) {
+    res.status(403).send('Invalid temp asset signature.')
+    return
+  }
+
+  const absolutePath = path.join(uploadDir, filename)
+  try {
+    const stat = await fsp.stat(absolutePath)
+    if (!stat.isFile()) {
+      res.status(404).send('Temp asset not found.')
+      return
+    }
+  } catch {
+    res.status(404).send('Temp asset not found.')
+    return
+  }
+
+  res.setHeader('Cache-Control', `private, max-age=${Math.max(60, Math.floor((expiresAt - Date.now()) / 1000))}`)
+  res.sendFile(filename, { root: uploadDir })
+})
 
 app.get('/api/health', (_, res) => {
   res.json({
@@ -100,6 +146,7 @@ app.get('/api/session', (req, res) => {
     success: true,
     data: {
       user: session.user,
+      isAdmin: isAdminUser(session.user),
       mainAppUrl: session.mainAppUrl,
       expiresAt: new Date(session.expiresAt).toISOString(),
     },
@@ -175,7 +222,8 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
   try {
     const baseUrl = resolveBaseUrl(req)
     const publiclyReachable = isLikelyPublicBaseUrl(baseUrl)
-    const expiresAt = new Date(Date.now() + uploadTtlMinutes * 60 * 1000).toISOString()
+    const expiresAtMs = Date.now() + uploadTtlMinutes * 60 * 1000
+    const expiresAt = new Date(expiresAtMs).toISOString()
     const materialType = parseMaterialType(req.body?.materialType)
     const payload = []
 
@@ -191,7 +239,7 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
     }
 
     for (const file of files) {
-      const url = `${baseUrl}/temp-assets/${encodeURIComponent(file.filename)}`
+      const url = buildTempAssetUrl(baseUrl, file.filename, expiresAtMs)
       const item = {
         name: file.originalname,
         size: file.size,
@@ -212,6 +260,8 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
         item.resourceRef = material.resourceRef
       }
 
+      registerUploadedReference(item.url, file.size, file.mimetype, expiresAtMs)
+      registerUploadedReference(item.resourceRef, file.size, file.mimetype, expiresAtMs)
       payload.push(item)
     }
 
@@ -245,10 +295,32 @@ app.post('/api/veo/generate', async (req, res) => {
     return
   }
 
+  const body = req.body || {}
+  const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
+  }, ({ payload, traceMetadata, status, url }) => {
+    if (status >= 400) return
+    const taskId = extractAggregationTaskId(payload)
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'aggregation',
+      providerId: body.providerId || null,
+      model: body.modelId || body.model || null,
+      generationMode: body.mode || 't2v',
+      prompt: body.prompt || null,
+      aspectRatio: body.params?.aspectRatio || body.aspectRatio || null,
+      resolution: body.params?.resolution || null,
+      duration: body.params?.duration || null,
+      sampleCount: body.sampleCount || 1,
+      requestParams: attachUsageMediaSummary(body, mediaSummary),
+      engineTaskId: taskId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: url,
+    }).catch(() => {})
   })
 })
 
@@ -266,6 +338,18 @@ app.post('/api/veo/queryResult', async (req, res) => {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
+  }, ({ payload, traceMetadata }) => {
+    const taskId = extractAggregationTaskId(payload) || normalizeTaskIdValue(req.body?.taskId)
+    const finalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
+    if (!taskId || !finalStatus) return
+    updateUsageLogByTaskId(taskId, {
+      status: finalStatus,
+      videoUrl: finalStatus === 'succeeded' ? extractAggregationVideoUrl(payload) : null,
+      errorMessage: finalStatus === 'failed' ? extractAggregationMessage(payload) : null,
+      completedAt: new Date().toISOString(),
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+    }).catch(() => {})
   })
 })
 
@@ -280,9 +364,133 @@ app.post('/api/image/chat/completions', async (req, res) => {
     return
   }
 
+  const body = req.body || {}
+  const mediaSummary = parseUsageMediaSummaryHeader(req)
   await proxyJson(req, res, `${imageApiBaseUrl}/chat/completions`, {
     Authorization: `Bearer ${process.env.IMAGE_API_KEY}`,
+  }, ({ payload, traceMetadata, status, url }) => {
+    const succeeded = status < 400
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'image',
+      providerId: body.providerId || 'gemini-image',
+      model: body.model || null,
+      generationMode: 'image',
+      prompt: extractImagePromptText(body) || null,
+      requestParams: attachUsageMediaSummary({
+        model: body.model,
+        mediaCounts: extractImageMediaCounts(body),
+      }, mediaSummary),
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: url,
+      status: succeeded ? 'succeeded' : 'failed',
+      errorMessage: succeeded ? null : (payload?.error?.message || null),
+    }).catch(() => {})
   })
+})
+
+app.post('/api/yunwu/generate', async (req, res) => {
+  const missing = getMissingYunwuConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  try {
+    const body = req.body || {}
+    const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
+    const requestSpec = buildYunwuGenerateRequest(body)
+    const upstream = await requestYunwu(requestSpec)
+    const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
+    const normalized = normalizeYunwuGenerateResponse(upstream.payload, requestSpec, traceMetadata)
+
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'yunwu',
+      providerId: body.providerId || null,
+      model: body.params?.model || requestSpec.body?.model || null,
+      generationMode: body.mode || 't2v',
+      prompt: body.prompt || null,
+      aspectRatio: body.params?.aspectRatio || null,
+      resolution: body.params?.resolution || null,
+      duration: body.params?.duration || null,
+      requestParams: attachUsageMediaSummary(body, mediaSummary),
+      engineTaskId: normalized.taskId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: `${yunwuApiBaseUrl}${requestSpec.path}`,
+    }).catch(() => {})
+
+    applyUpstreamTraceHeaders(res, traceMetadata)
+    res.json({
+      success: true,
+      data: normalized,
+      ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+      ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Yunwu generate failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
+app.post('/api/yunwu/query', async (req, res) => {
+  const missing = getMissingYunwuConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  try {
+    const requestSpec = buildYunwuQueryRequest(req.body || {})
+    const upstream = await requestYunwu(requestSpec)
+    const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
+    const normalized = normalizeYunwuQueryResponse(upstream.payload, requestSpec, traceMetadata)
+
+    if (normalized.status === 'succeeded' || normalized.status === 'failed') {
+      const taskId = normalized.taskId || req.body?.taskId
+      if (taskId) {
+        updateUsageLogByTaskId(taskId, {
+          status: normalized.status,
+          videoUrl: normalized.videoUrl || null,
+          errorMessage: normalized.status === 'failed' ? (normalized.message || null) : null,
+          completedAt: new Date().toISOString(),
+          upstreamRequestId: traceMetadata?.requestId || null,
+          upstreamTraceId: traceMetadata?.traceId || null,
+        }).catch(() => {})
+      }
+    }
+
+    applyUpstreamTraceHeaders(res, traceMetadata)
+    res.json({
+      success: true,
+      data: normalized,
+      ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+      ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Yunwu query failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
 })
 
 const veoFastGenerateUrl = stripTrailingSlash(process.env.VEO_FAST_GENERATE_URL || 'http://pay.verveship.com')
@@ -301,6 +509,289 @@ function summarizeBase64Field(value) {
     hasDataUrlPrefix: /^data:/i.test(value),
     containsBase64Marker: value.includes(';base64,'),
   }
+}
+
+function extractImagePromptText(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : []
+  const content = messages[messages.length - 1]?.content
+
+  if (typeof content === 'string') {
+    return content.trim()
+  }
+
+  if (!Array.isArray(content)) {
+    return ''
+  }
+
+  return content
+    .filter((item) => item?.type === 'text' && typeof item.text === 'string')
+    .map((item) => item.text.trim())
+    .filter(Boolean)
+    .join('\n')
+}
+
+function extractImageMediaCounts(body) {
+  const messages = Array.isArray(body?.messages) ? body.messages : []
+  const content = messages[messages.length - 1]?.content
+  if (!Array.isArray(content)) {
+    return { images: 0, videos: 0, audios: 0 }
+  }
+
+  const imageCount = content.filter((item) => (
+    item?.type === 'image_base64' || item?.type === 'image_url'
+  )).length
+
+  return { images: imageCount, videos: 0, audios: 0 }
+}
+
+const USAGE_MEDIA_SUMMARY_HEADER = 'x-usage-media-summary'
+
+function normalizeUsageMediaMetric(metric) {
+  return {
+    count: Math.max(0, Number(metric?.count) || 0),
+    bytes: Math.max(0, Number(metric?.bytes) || 0),
+  }
+}
+
+function normalizeUsageMediaSummary(summary) {
+  if (!summary || typeof summary !== 'object') return null
+
+  return {
+    images: normalizeUsageMediaMetric(summary.images),
+    videos: normalizeUsageMediaMetric(summary.videos),
+    audios: normalizeUsageMediaMetric(summary.audios),
+  }
+}
+
+function parseUsageMediaSummaryHeader(req) {
+  const rawValue = req.get(USAGE_MEDIA_SUMMARY_HEADER)
+  if (!rawValue) return null
+
+  try {
+    const parsed = JSON.parse(decodeURIComponent(rawValue))
+    return normalizeUsageMediaSummary(parsed)
+  } catch {
+    return null
+  }
+}
+
+function attachUsageMediaSummary(requestParams, mediaSummary) {
+  if (!mediaSummary) return requestParams
+  return {
+    ...(requestParams && typeof requestParams === 'object' ? requestParams : {}),
+    mediaSummary,
+  }
+}
+
+function resolveUsageMediaSummary(requestParams, headerSummary) {
+  if (headerSummary) {
+    return headerSummary
+  }
+
+  const references = requestParams?.references
+  if (!references || typeof references !== 'object') {
+    return null
+  }
+
+  return buildUploadedReferenceMediaSummary(references)
+}
+
+function buildUploadedReferenceMediaSummary(references) {
+  return {
+    images: buildUploadedReferenceMetric(references.images),
+    videos: buildUploadedReferenceMetric(references.videos),
+    audios: buildUploadedReferenceMetric(references.audios),
+  }
+}
+
+function buildUploadedReferenceMetric(items) {
+  const refs = Array.isArray(items) ? items : []
+  return {
+    count: refs.length,
+    bytes: refs.reduce((total, item) => total + resolveUploadedReferenceBytes(item), 0),
+  }
+}
+
+function resolveUploadedReferenceBytes(reference) {
+  const key = normalizeUploadedReferenceKey(reference)
+  if (!key) return 0
+
+  const metadata = uploadedReferenceMetadata.get(key)
+  if (!metadata) return 0
+
+  if (metadata.expiresAtMs <= Date.now()) {
+    uploadedReferenceMetadata.delete(key)
+    return 0
+  }
+
+  return metadata.bytes
+}
+
+function registerUploadedReference(reference, bytes, mimeType, expiresAtMs) {
+  const key = normalizeUploadedReferenceKey(reference)
+  if (!key) return
+
+  uploadedReferenceMetadata.set(key, {
+    bytes: Math.max(0, Number(bytes) || 0),
+    mimeType: typeof mimeType === 'string' ? mimeType : '',
+    expiresAtMs: Math.max(Date.now(), Number(expiresAtMs) || Date.now()),
+  })
+}
+
+function normalizeUploadedReferenceKey(reference) {
+  if (typeof reference !== 'string') return ''
+  return reference.trim()
+}
+
+function cleanupUploadedReferenceMetadata() {
+  const now = Date.now()
+  for (const [key, metadata] of uploadedReferenceMetadata.entries()) {
+    if (!metadata || metadata.expiresAtMs <= now) {
+      uploadedReferenceMetadata.delete(key)
+    }
+  }
+}
+
+function normalizeTaskIdValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.trunc(value))
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim()
+  }
+
+  return null
+}
+
+function extractAggregationTaskId(payload) {
+  return normalizeTaskIdValue(findFirstPathValue(payload, [
+    'taskId',
+    'task_id',
+    'id',
+    'data.taskId',
+    'data.task_id',
+    'data.id',
+    'data.result.taskId',
+    'data.result.task_id',
+    'data.result.id',
+    'result.taskId',
+    'result.task_id',
+    'result.id',
+  ]))
+}
+
+function extractAggregationStatus(payload) {
+  return findFirstPathValue(payload, [
+    'status',
+    'state',
+    'task_status',
+    'data.status',
+    'data.state',
+    'data.task_status',
+    'data.result.status',
+    'data.result.state',
+    'data.result.task_status',
+    'result.status',
+    'result.state',
+    'result.task_status',
+  ])
+}
+
+function normalizeAggregationFinalStatus(value) {
+  if (value === null || value === undefined) return null
+
+  const normalized = String(value).trim().toLowerCase()
+  if (!normalized) return null
+
+  if (
+    normalized === '2'
+    || normalized === 'succeeded'
+    || normalized === 'success'
+    || normalized === 'completed'
+    || normalized === 'done'
+  ) {
+    return 'succeeded'
+  }
+
+  if (
+    normalized === '3'
+    || normalized === '4'
+    || normalized === 'failed'
+    || normalized === 'failure'
+    || normalized === 'error'
+    || normalized === 'cancelled'
+    || normalized === 'canceled'
+  ) {
+    return 'failed'
+  }
+
+  return null
+}
+
+function extractAggregationVideoUrl(payload) {
+  return readFirstString(findFirstPathValue(payload, [
+    'videoUrl',
+    'video_url',
+    'resultUrl',
+    'url',
+    'content',
+    'message',
+    'data.videoUrl',
+    'data.video_url',
+    'data.resultUrl',
+    'data.url',
+    'data.content',
+    'data.message',
+    'data.result.videoUrl',
+    'data.result.video_url',
+    'data.result.resultUrl',
+    'data.result.url',
+    'data.result.content',
+    'data.result.message',
+    'result.videoUrl',
+    'result.video_url',
+    'result.resultUrl',
+    'result.url',
+    'result.content',
+    'result.message',
+  ]))
+}
+
+function extractAggregationMessage(payload) {
+  return readFirstString(findFirstPathValue(payload, [
+    'message',
+    'msg',
+    'error',
+    'errorMessage',
+    'data.message',
+    'data.msg',
+    'data.error',
+    'data.errorMessage',
+    'data.result.message',
+    'data.result.msg',
+    'data.result.error',
+    'data.result.errorMessage',
+    'result.message',
+    'result.msg',
+    'result.error',
+    'result.errorMessage',
+  ]))
+}
+
+function extractVeoFastReferenceCounts(normalizedBody) {
+  const firstInstance = Array.isArray(normalizedBody?.instances) ? normalizedBody.instances[0] : null
+  if (!firstInstance) {
+    return { images: 0, videos: 0, audios: 0 }
+  }
+
+  const imageCount = [
+    firstInstance.image,
+    firstInstance.lastFrame,
+    ...(Array.isArray(firstInstance.referenceImages) ? firstInstance.referenceImages.map((item) => item?.image) : []),
+  ].filter(Boolean).length
+
+  return { images: imageCount, videos: 0, audios: 0 }
 }
 
 function summarizeVeoFastResponse(contentType, buffer) {
@@ -370,8 +861,33 @@ app.post('/api/veo-fast/generate', async (req, res) => {
   }
   console.log('[veo-fast] request debug:', JSON.stringify(debugBody, null, 2))
 
+  const body = req.body || {}
+  const mediaSummary = parseUsageMediaSummaryHeader(req)
   await proxyJsonWithBody(req, res, `${veoFastGenerateUrl}/v1/video/generations`, normalizedBody, {
     Authorization: `Bearer ${apiKey}`,
+  }, ({ payload, traceMetadata, status, url }) => {
+    if (status >= 400) return
+    const taskId = payload?.name || payload?.task_id || payload?.id
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'veo_fast',
+      providerId: body.providerId || 'veo31fast',
+      model: normalizedBody?.model || body.model || null,
+      generationMode: body.mode || 't2v',
+      prompt: normalizedBody?.instances?.[0]?.prompt || normalizedBody?.prompt || body.prompt || null,
+      aspectRatio: body.params?.aspectRatio || null,
+      resolution: body.params?.resolution || null,
+      duration: body.params?.duration || null,
+      requestParams: attachUsageMediaSummary({
+        model: normalizedBody?.model,
+        parameters: normalizedBody?.parameters,
+        referenceCounts: extractVeoFastReferenceCounts(normalizedBody),
+      }, mediaSummary),
+      engineTaskId: taskId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: url,
+    }).catch(() => {})
   })
 })
 
@@ -393,12 +909,33 @@ app.get('/api/veo-fast/status/:taskId', async (req, res) => {
       },
     })
 
+    const traceMetadata = extractUpstreamTraceMetadata(response)
     res.status(response.status)
     copyUpstreamResponseHeaders(res, response.headers)
-    applyUpstreamTraceHeaders(res, extractUpstreamTraceMetadata(response))
+    applyUpstreamTraceHeaders(res, traceMetadata)
 
     const buffer = Buffer.from(await response.arrayBuffer())
     logVeoFastUpstream('status', req.params.taskId, response, buffer)
+
+    // Track status update
+    try {
+      const contentType = response.headers.get('content-type') || ''
+      if (contentType.includes('application/json')) {
+        const parsed = JSON.parse(buffer.toString('utf8'))
+        const state = parsed?.state || parsed?.status
+        if (state === 'succeeded' || state === 'failed' || state === 'SUCCEEDED' || state === 'FAILED') {
+          updateUsageLogByTaskId(req.params.taskId, {
+            status: state.toLowerCase() === 'succeeded' ? 'succeeded' : 'failed',
+            videoUrl: parsed?.video_url || parsed?.videoUrl || null,
+            errorMessage: state.toLowerCase() === 'failed' ? (parsed?.error?.message || parsed?.message || null) : null,
+            completedAt: new Date().toISOString(),
+            upstreamRequestId: traceMetadata?.requestId || null,
+            upstreamTraceId: traceMetadata?.traceId || null,
+          }).catch(() => {})
+        }
+      }
+    } catch (_) {}
+
     res.end(buffer)
   } catch (error) {
     res.status(502).json({
@@ -451,6 +988,12 @@ cleanupExpiredUploads().catch((error) => {
   console.error('[cleanup]', error)
 })
 
+// Admin dashboard
+app.use('/api/admin', requireAdminApiAccess, adminRouter)
+app.get('/admin', requireAdminPageAccess, (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin', 'index.html'))
+})
+
 const httpServer = createHttpServer(app)
 
 if (!isProduction) {
@@ -478,15 +1021,16 @@ if (!isProduction) {
   })
 }
 
-httpServer.listen(port, () => {
+httpServer.listen(port, async () => {
   console.log(`[server] ${mode} listening on http://localhost:${port}`)
+  await initDatabase()
 })
 
-async function proxyJson(req, res, url, extraHeaders = {}) {
-  return proxyJsonWithBody(req, res, url, req.body, extraHeaders)
+async function proxyJson(req, res, url, extraHeaders = {}, onResponse = null) {
+  return proxyJsonWithBody(req, res, url, req.body, extraHeaders, onResponse)
 }
 
-async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}) {
+async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onResponse = null) {
   try {
     const response = await fetch(url, {
       method: req.method,
@@ -502,6 +1046,10 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}) {
     const parsedPayload = tryParseJsonBuffer(buffer, contentType)
     const traceMetadata = extractUpstreamTraceMetadata(response, parsedPayload)
     const tracedPayload = injectUpstreamTraceMetadata(parsedPayload, traceMetadata)
+
+    if (onResponse) {
+      try { onResponse({ payload: parsedPayload, traceMetadata, status: response.status, url }) } catch (_) {}
+    }
 
     res.status(response.status)
     copyUpstreamResponseHeaders(res, response.headers)
@@ -525,6 +1073,736 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}) {
       ...(error.traceId ? { traceId: error.traceId } : {}),
     })
   }
+}
+
+const YUNWU_VIDEO_PROVIDERS = {
+  'yunwu-seedance': { family: 'seedance' },
+  'yunwu-veo': { family: 'veo' },
+  'yunwu-kling': { family: 'kling' },
+  'yunwu-sora': { family: 'sora' },
+  'yunwu-hailuo': { family: 'hailuo' },
+  'yunwu-luma': { family: 'luma' },
+  'yunwu-runway': { family: 'runway' },
+  'yunwu-grok': { family: 'grok' },
+  'yunwu-wanxiang': { family: 'wanxiang' },
+  'yunwu-tencent': { family: 'tencent' },
+}
+
+function getMissingYunwuConfig() {
+  return [
+    !process.env.YUNWU_API_KEY && 'YUNWU_API_KEY',
+  ].filter(Boolean)
+}
+
+function getYunwuProviderConfig(providerId) {
+  return YUNWU_VIDEO_PROVIDERS[providerId] || null
+}
+
+function buildYunwuGenerateRequest(input) {
+  const providerId = String(input.providerId || '')
+  const providerConfig = getYunwuProviderConfig(providerId)
+  if (!providerConfig) {
+    throw createHttpError(400, `Unsupported Yunwu provider: ${providerId || 'unknown'}`)
+  }
+
+  const prompt = String(input.prompt || '').trim()
+  if (!prompt) {
+    throw createHttpError(400, 'Prompt is required.')
+  }
+
+  const mode = String(input.mode || 't2v')
+  const params = input.params && typeof input.params === 'object' ? input.params : {}
+  const references = normalizeYunwuReferences(input.references)
+
+  switch (providerConfig.family) {
+    case 'veo':
+      return {
+        method: 'POST',
+        path: '/v1/video/create',
+        body: {
+          model: params.model,
+          prompt,
+          aspect_ratio: params.aspectRatio,
+          ...(typeof params.enhancePrompt === 'boolean' ? { enhance_prompt: params.enhancePrompt } : {}),
+          ...(typeof params.enableUpsample === 'boolean' ? { enable_upsample: params.enableUpsample } : {}),
+          ...(references.images.length > 0 ? { images: references.images } : {}),
+          ...(params.resolution ? { size: params.resolution } : {}),
+        },
+      }
+    case 'sora':
+      return {
+        method: 'POST',
+        path: '/v1/video/create',
+        body: {
+          model: params.model,
+          prompt,
+          duration: coercePositiveNumber(params.duration, 10),
+          orientation: mapOrientationFromAspectRatio(params.aspectRatio),
+          size: params.resolution || '720p',
+          private: params.privateOutput !== false,
+          watermark: Boolean(params.watermark),
+          ...(references.images.length > 0 ? { images: references.images.slice(0, 1) } : {}),
+        },
+      }
+    case 'grok':
+      return {
+        method: 'POST',
+        path: '/v1/video/create',
+        body: {
+          model: params.model,
+          prompt,
+          aspect_ratio: params.aspectRatio,
+          size: params.resolution || '720p',
+          ...(references.images.length > 0 ? { images: references.images.slice(0, 1) } : {}),
+        },
+      }
+    case 'hailuo':
+      return {
+        method: 'POST',
+        path: '/minimax/v1/video_generation',
+        body: {
+          model: params.model,
+          prompt,
+          duration: coercePositiveNumber(params.duration, 6),
+          ...(mode !== 't2v' && references.images[0] ? { first_frame_image: references.images[0] } : {}),
+          ...(mode === 'flf' && references.images[1] ? { last_frame_image: references.images[1] } : {}),
+          ...(mode !== 't2v'
+            ? {
+                resolution: params.resolution || '768P',
+                prompt_optimizer: params.promptOptimizer !== false,
+              }
+            : {}),
+        },
+      }
+    case 'luma':
+      return {
+        method: 'POST',
+        path: '/luma/generations',
+        body: {
+          user_prompt: prompt,
+          model_name: params.model,
+          duration: coercePositiveNumber(params.duration, 5),
+          resolution: params.resolution || '720p',
+        },
+      }
+    case 'runway':
+      return {
+        method: 'POST',
+        path: '/runwayml/v1/image_to_video',
+        body: {
+          model: params.model,
+          promptText: prompt,
+          promptImage: references.images[0],
+          duration: String(coercePositiveNumber(params.duration, 5)),
+          ratio: params.aspectRatio || '16:9',
+          watermark: Boolean(params.watermark),
+        },
+      }
+    case 'seedance':
+      return {
+        method: 'POST',
+        path: '/volc/v1/contents/generations/tasks',
+        body: {
+          model: params.model,
+          content: buildYunwuSeedanceContent(prompt, mode, params, references),
+        },
+      }
+    case 'kling': {
+      const createKind = resolveYunwuKlingCreateKind(mode)
+      return {
+        method: 'POST',
+        path: mapYunwuKlingCreatePath(createKind),
+        body: buildYunwuKlingBody(createKind, prompt, params, references),
+        queryContext: { createKind },
+      }
+    }
+    case 'wanxiang':
+      return {
+        method: 'POST',
+        path: '/alibailian/api/v1/services/aigc/video-generation/video-synthesis',
+        body: {
+          model: params.model,
+          input: {
+            prompt,
+            img_url: references.images[0],
+          },
+          parameters: {
+            resolution: params.resolution || '720p',
+            prompt_extend: params.promptExtend !== false,
+            audio: Boolean(params.generateAudio),
+          },
+        },
+      }
+    case 'tencent':
+      return {
+        method: 'POST',
+        path: '/tencent-vod/v1/aigc-video',
+        body: {
+          model_name: 'Kling',
+          model_version: params.model,
+          prompt,
+          output_config: {
+            storage_mode: 'url',
+            media_name: `veo-studio-${Date.now()}`,
+            duration: coercePositiveNumber(params.duration, 5),
+            resolution: params.resolution || '720p',
+            aspect_ratio: params.aspectRatio || '16:9',
+            audio_generation: Boolean(params.generateAudio),
+            person_generation: 'real',
+            input_compliance_check: false,
+            output_compliance_check: false,
+            enhance_switch: true,
+          },
+        },
+      }
+    default:
+      throw createHttpError(400, `Unsupported Yunwu family: ${providerConfig.family}`)
+  }
+}
+
+function buildYunwuQueryRequest(input) {
+  const providerId = String(input.providerId || '')
+  const providerConfig = getYunwuProviderConfig(providerId)
+  if (!providerConfig) {
+    throw createHttpError(400, `Unsupported Yunwu provider: ${providerId || 'unknown'}`)
+  }
+
+  const taskId = String(input.taskId || '').trim()
+  if (!taskId) {
+    throw createHttpError(400, 'taskId is required.')
+  }
+
+  const queryContext = input.queryContext && typeof input.queryContext === 'object' ? input.queryContext : {}
+
+  switch (providerConfig.family) {
+    case 'veo':
+    case 'sora':
+    case 'grok':
+      return {
+        method: 'GET',
+        path: '/v1/video/query',
+        query: { id: taskId },
+      }
+    case 'hailuo':
+      return {
+        method: 'GET',
+        path: '/minimax/v1/query/video_generation',
+        query: { task_id: taskId },
+      }
+    case 'luma':
+      return {
+        method: 'GET',
+        path: `/luma/generations/${encodeURIComponent(taskId)}`,
+      }
+    case 'runway':
+      return {
+        method: 'GET',
+        path: `/runwayml/v1/tasks/${encodeURIComponent(taskId)}`,
+      }
+    case 'seedance':
+      return {
+        method: 'GET',
+        path: `/volc/v1/contents/generations/tasks/${encodeURIComponent(taskId)}`,
+      }
+    case 'kling':
+      return {
+        method: 'GET',
+        path: mapYunwuKlingQueryPath(queryContext.createKind, taskId),
+      }
+    case 'wanxiang':
+      return {
+        method: 'GET',
+        path: `/alibailian/api/v1/tasks/${encodeURIComponent(taskId)}`,
+      }
+    case 'tencent':
+      return {
+        method: 'GET',
+        path: `/tencent-vod/v1/query/${encodeURIComponent(taskId)}`,
+      }
+    default:
+      throw createHttpError(400, `Unsupported Yunwu family: ${providerConfig.family}`)
+  }
+}
+
+async function requestYunwu(spec) {
+  const url = appendQueryParams(`${yunwuApiBaseUrl}${spec.path}`, spec.query)
+  const headers = {
+    Accept: 'application/json',
+    Authorization: `Bearer ${process.env.YUNWU_API_KEY}`,
+  }
+
+  if (spec.body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+  }
+
+  const options = {
+    method: spec.method || 'POST',
+    headers,
+    body: spec.body !== undefined ? JSON.stringify(spec.body) : undefined,
+  }
+
+  let response
+  let lastError = null
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await fetch(url, options)
+      break
+    } catch (error) {
+      lastError = error
+      if (attempt === 2) {
+        throw createHttpError(502, error?.message || 'Yunwu upstream fetch failed.')
+      }
+      await sleep(800 * (attempt + 1))
+    }
+  }
+
+  if (!response) {
+    throw createHttpError(502, lastError?.message || 'Yunwu upstream fetch failed.')
+  }
+
+  const contentType = response.headers.get('content-type') || ''
+  const payload = isJsonContentType(contentType)
+    ? await response.json()
+    : await response.text()
+  const traceMetadata = extractUpstreamTraceMetadata(response, payload)
+
+  if (!response.ok) {
+    const message = typeof payload === 'string'
+      ? payload
+      : payload?.message || payload?.msg || payload?.error?.message || JSON.stringify(payload)
+    throw createHttpError(response.status, message || 'Yunwu upstream request failed.', traceMetadata)
+  }
+
+  return { response, payload }
+}
+
+function normalizeYunwuGenerateResponse(payload, requestSpec, traceMetadata) {
+  return {
+    taskId: extractYunwuTaskId(payload),
+    status: normalizeYunwuStatus(extractYunwuStatus(payload) || 'submitted'),
+    message: extractYunwuMessage(payload),
+    videoUrl: extractYunwuVideoUrl(payload),
+    queryContext: requestSpec.queryContext || null,
+    ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+    ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+  }
+}
+
+function normalizeYunwuQueryResponse(payload, requestSpec, traceMetadata) {
+  return {
+    taskId: extractYunwuTaskId(payload) || readFirstString(requestSpec.query?.id, requestSpec.query?.task_id),
+    status: normalizeYunwuStatus(extractYunwuStatus(payload)),
+    message: extractYunwuMessage(payload),
+    videoUrl: extractYunwuVideoUrl(payload),
+    ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+    ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+  }
+}
+
+function normalizeYunwuReferences(references) {
+  return {
+    images: Array.isArray(references?.images) ? references.images.filter((item) => typeof item === 'string' && item) : [],
+    videos: Array.isArray(references?.videos) ? references.videos.filter((item) => typeof item === 'string' && item) : [],
+    audios: Array.isArray(references?.audios) ? references.audios.filter((item) => typeof item === 'string' && item) : [],
+  }
+}
+
+function buildYunwuSeedanceContent(prompt, mode, params, references) {
+  const flags = [
+    `--resolution ${params.resolution || '480p'}`,
+    `--ratio ${params.aspectRatio || '16:9'}`,
+    `--duration ${coercePositiveNumber(params.duration, 5)}`,
+    `--wm ${Boolean(params.watermark)}`,
+  ]
+
+  const content = [{
+    type: 'text',
+    text: `${prompt} ${flags.join(' ')}`.trim(),
+  }]
+
+  if (mode === 'i2v' && references.images[0]) {
+    content.push({ type: 'image_url', image_url: references.images[0] })
+  }
+
+  if (mode === 'flf') {
+    if (references.images[0]) {
+      content.push({ type: 'image_url', image_url: references.images[0], role: 'first_frame' })
+    }
+    if (references.images[1]) {
+      content.push({ type: 'image_url', image_url: references.images[1], role: 'last_frame' })
+    }
+  }
+
+  if (mode === 'ref') {
+    for (const imageUrl of references.images) {
+      content.push({ type: 'image_url', image_url: imageUrl, role: 'reference_image' })
+    }
+  }
+
+  return content
+}
+
+function resolveYunwuKlingCreateKind(mode) {
+  switch (mode) {
+    case 't2v':
+      return 'text2video'
+    case 'ref':
+      return 'multi-image2video'
+    case 'omni':
+      return 'omni-video'
+    case 'flf':
+    case 'i2v':
+    default:
+      return 'image2video'
+  }
+}
+
+function mapYunwuKlingCreatePath(createKind) {
+  switch (createKind) {
+    case 'text2video':
+      return '/kling/v1/videos/text2video'
+    case 'multi-image2video':
+      return '/kling/v1/videos/multi-image2video'
+    case 'omni-video':
+      return '/kling/v1/videos/omni-video'
+    case 'image2video':
+    default:
+      return '/kling/v1/videos/image2video'
+  }
+}
+
+function mapYunwuKlingQueryPath(createKind, taskId) {
+  switch (createKind) {
+    case 'text2video':
+      return `/kling/v1/videos/text2video/${encodeURIComponent(taskId)}`
+    case 'multi-image2video':
+      return `/kling/v1/videos/multi-image2video/${encodeURIComponent(taskId)}`
+    case 'omni-video':
+      return `/kling/v1/videos/omni-video/${encodeURIComponent(taskId)}`
+    case 'image2video':
+    default:
+      return `/kling/v1/videos/image2video/${encodeURIComponent(taskId)}`
+  }
+}
+
+function buildYunwuKlingBody(createKind, prompt, params, references) {
+  if (createKind === 'text2video') {
+    return {
+      model_name: params.model,
+      prompt,
+      aspect_ratio: params.aspectRatio || '16:9',
+      duration: String(coercePositiveNumber(params.duration, 5)),
+      sound: Boolean(params.generateAudio),
+    }
+  }
+
+  if (createKind === 'multi-image2video') {
+    return {
+      model_name: params.model,
+      prompt,
+      image_list: references.images.map((image) => ({ image })),
+      aspect_ratio: params.aspectRatio || '16:9',
+      duration: String(coercePositiveNumber(params.duration, 5)),
+      mode: 'std',
+    }
+  }
+
+  if (createKind === 'omni-video') {
+    return {
+      model_name: params.model,
+      prompt,
+      ...(references.images[0]
+        ? {
+            image_list: [
+              {
+                image_url: references.images[0],
+                type: 'first_frame',
+              },
+            ],
+          }
+        : {}),
+      ...(references.videos[0]
+        ? {
+            video_list: [
+              {
+                video_url: references.videos[0],
+                refer_type: 'base',
+                keep_original_sound: 'yes',
+              },
+            ],
+          }
+        : {}),
+      mode: 'std',
+      sound: params.generateAudio ? 'on' : 'off',
+      aspect_ratio: params.aspectRatio || '16:9',
+      duration: String(coercePositiveNumber(params.duration, 5)),
+    }
+  }
+
+  return {
+    model_name: params.model,
+    prompt,
+    image: references.images[0],
+    ...(references.images[1] ? { image_tail: references.images[1] } : {}),
+    aspect_ratio: params.aspectRatio || '16:9',
+    duration: String(coercePositiveNumber(params.duration, 5)),
+    sound: Boolean(params.generateAudio),
+  }
+}
+
+function extractYunwuTaskId(payload) {
+  const taskValue = findFirstPathValue(payload, [
+    'taskId',
+    'task_id',
+    'id',
+    'data.taskId',
+    'data.task_id',
+    'data.id',
+    'result.taskId',
+    'result.task_id',
+    'result.id',
+    'Response.TaskId',
+    'Response.TaskID',
+  ])
+
+  if (typeof taskValue === 'number') {
+    return String(taskValue)
+  }
+
+  return typeof taskValue === 'string' && taskValue.trim() ? taskValue.trim() : null
+}
+
+function extractYunwuStatus(payload) {
+  return readFirstString(
+    findFirstPathValue(payload, [
+      'status',
+      'state',
+      'task_status',
+      'detail.status',
+      'detail.state',
+      'detail.task_status',
+      'data.status',
+      'data.state',
+      'data.task_status',
+      'result.status',
+      'result.state',
+      'Response.Status',
+      'base_resp.status_msg',
+    ]),
+  )
+}
+
+function extractYunwuMessage(payload) {
+  const message = findFirstPathValue(payload, [
+    'message',
+    'msg',
+    'error.message',
+    'error',
+    'detail.error_message',
+    'detail.errorMessage',
+    'detail.error.message',
+    'detail.message',
+    'detail.msg',
+    'detail.error',
+    'detail.images.0.error_message',
+    'detail.images.1.error_message',
+    'detail.images.2.error_message',
+    'detail.images.3.error_message',
+    'detail.images.4.error_message',
+    'data.message',
+    'data.msg',
+    'data.error.message',
+    'data.error',
+    'result.message',
+    'result.msg',
+    'result.error.message',
+    'result.error',
+    'failure_reason',
+    'base_resp.status_msg',
+    'Response.ErrorMessage',
+  ])
+
+  if (typeof message === 'string' && message.trim()) {
+    return message.trim()
+  }
+
+  return null
+}
+
+function extractYunwuVideoUrl(payload) {
+  const directValue = findFirstPathValue(payload, [
+    'videoUrl',
+    'video_url',
+    'url',
+    'content',
+    'data.videoUrl',
+    'data.video_url',
+    'data.url',
+    'data.content',
+    'data.output.video_url',
+    'data.output.url',
+    'data.result.video_url',
+    'data.result.videoUrl',
+    'data.result.url',
+    'data.file.download_url',
+    'data.data.file.download_url',
+    'output.video_url',
+    'output.url',
+    'result.video_url',
+    'result.videoUrl',
+    'result.url',
+    'assets.video',
+    'assets.video.url',
+    'data.assets.video',
+    'data.assets.video.url',
+    'video.url',
+    'Response.AigcVideoResult.Output.FileInfos.0.FileUrl',
+    'Response.AigcVideoTask.Output.FileInfos.0.FileUrl',
+  ])
+
+  if (typeof directValue === 'string' && /^https?:\/\//i.test(directValue)) {
+    return directValue
+  }
+
+  return findFirstMediaUrlDeep(payload)
+}
+
+function normalizeYunwuStatus(value) {
+  if (typeof value !== 'string') {
+    return 'processing'
+  }
+
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) {
+    return 'processing'
+  }
+
+  if (['success', 'succeeded', 'completed', 'complete', 'finished', 'done'].includes(normalized)) {
+    return 'succeeded'
+  }
+
+  if (['failed', 'failure', 'error', 'rejected', 'canceled', 'cancelled'].includes(normalized)) {
+    return 'failed'
+  }
+
+  if (['pending', 'queued', 'submitted', 'processing', 'running', 'in_progress'].includes(normalized)) {
+    return 'processing'
+  }
+
+  return normalized
+}
+
+function findFirstPathValue(target, paths) {
+  for (const path of paths) {
+    const value = getPathValue(target, path)
+    if (value !== undefined && value !== null && value !== '') {
+      return value
+    }
+  }
+
+  return null
+}
+
+function getPathValue(target, pathExpression) {
+  if (!target || typeof target !== 'object') {
+    return undefined
+  }
+
+  const segments = pathExpression.split('.')
+  let current = target
+
+  for (const rawSegment of segments) {
+    if (current === null || current === undefined) {
+      return undefined
+    }
+
+    if (/^\d+$/.test(rawSegment)) {
+      current = current[Number(rawSegment)]
+      continue
+    }
+
+    current = current[rawSegment]
+  }
+
+  return current
+}
+
+function findFirstMediaUrlDeep(target, depth = 0) {
+  if (!target || depth > 6) {
+    return null
+  }
+
+  if (typeof target === 'string') {
+    if (/^https?:\/\//i.test(target) && /\.(mp4|mov|webm|m3u8)(\?|$)/i.test(target)) {
+      return target
+    }
+    return null
+  }
+
+  if (Array.isArray(target)) {
+    for (const item of target) {
+      const match = findFirstMediaUrlDeep(item, depth + 1)
+      if (match) {
+        return match
+      }
+    }
+    return null
+  }
+
+  if (typeof target === 'object') {
+    for (const [key, value] of Object.entries(target)) {
+      if (typeof value === 'string' && /^https?:\/\//i.test(value)) {
+        if (
+          /\.(mp4|mov|webm|m3u8)(\?|$)/i.test(value)
+          || /video|download|fileurl|content/i.test(key)
+        ) {
+          return value
+        }
+      }
+
+      const nestedMatch = findFirstMediaUrlDeep(value, depth + 1)
+      if (nestedMatch) {
+        return nestedMatch
+      }
+    }
+  }
+
+  return null
+}
+
+function appendQueryParams(url, query) {
+  if (!query || typeof query !== 'object') {
+    return url
+  }
+
+  const nextUrl = new URL(url)
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') {
+      continue
+    }
+    nextUrl.searchParams.set(key, String(value))
+  }
+  return nextUrl.toString()
+}
+
+function coercePositiveNumber(value, fallbackValue) {
+  const numericValue = Number(value)
+  if (Number.isFinite(numericValue) && numericValue > 0) {
+    return numericValue
+  }
+  return fallbackValue
+}
+
+function mapOrientationFromAspectRatio(aspectRatio) {
+  if (aspectRatio === '9:16' || aspectRatio === '3:4') {
+    return 'portrait'
+  }
+
+  if (aspectRatio === '1:1') {
+    return 'square'
+  }
+
+  return 'landscape'
 }
 
 function copyUpstreamResponseHeaders(res, headers) {
@@ -839,7 +2117,37 @@ function resolveBaseUrl(req) {
   return `${protocol}://${host}`
 }
 
+function buildTempAssetUrl(baseUrl, filename, expiresAt) {
+  const normalizedFilename = sanitizeTempAssetName(filename)
+  const signature = signTempAssetPayload(normalizedFilename, expiresAt)
+  const url = new URL(`${stripTrailingSlash(baseUrl)}/temp-assets/${encodeURIComponent(normalizedFilename)}`)
+  url.searchParams.set('exp', String(expiresAt))
+  url.searchParams.set('sig', signature)
+  return url.toString()
+}
+
+function sanitizeTempAssetName(value) {
+  const normalized = path.basename(String(value || '').trim())
+  if (!normalized || normalized === '.' || normalized === '..') return ''
+  return normalized
+}
+
+function signTempAssetPayload(filename, expiresAt) {
+  return createHmac('sha256', tempAssetSigningSecret)
+    .update(`${filename}:${expiresAt}`)
+    .digest('base64url')
+}
+
+function verifyTempAssetSignature(filename, expiresAt, signature) {
+  const expected = signTempAssetPayload(filename, expiresAt)
+  const providedBuffer = Buffer.from(signature, 'utf8')
+  const expectedBuffer = Buffer.from(expected, 'utf8')
+  if (providedBuffer.length !== expectedBuffer.length) return false
+  return timingSafeEqual(providedBuffer, expectedBuffer)
+}
+
 async function cleanupExpiredUploads() {
+  cleanupUploadedReferenceMetadata()
   const entries = await fsp.readdir(uploadDir, { withFileTypes: true })
   const expiration = Date.now() - uploadTtlMinutes * 60 * 1000
 
@@ -858,12 +2166,18 @@ function stripTrailingSlash(value) {
 }
 
 function normalizeOpenAiBaseUrl(value) {
-  const normalized = stripTrailingSlash(value)
+  const normalized = stripTrailingSlash(String(value || '').trim())
 
   try {
     const url = new URL(normalized)
-    if (url.pathname === '' || url.pathname === '/') {
+    const pathname = stripTrailingSlash(url.pathname || '')
+    if (pathname === '' || pathname === '/') {
       url.pathname = '/v1'
+      return stripTrailingSlash(url.toString())
+    }
+
+    if (pathname.endsWith('/chat/completions')) {
+      url.pathname = pathname.slice(0, -'/chat/completions'.length) || '/v1'
       return stripTrailingSlash(url.toString())
     }
   } catch {
@@ -948,6 +2262,28 @@ function normalizeMainAppEntryPath(value) {
 function readBooleanEnv(value, fallbackValue) {
   if (!value) return fallbackValue
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+}
+
+function resolveTempAssetSigningSecret() {
+  const candidates = [
+    process.env.TEMP_ASSET_SIGNING_SECRET,
+    process.env.VIDEO_SITE_SESSION_SECRET,
+    process.env.VIDEO_SSO_INTERNAL_SECRET,
+    process.env.VIDEO_SECRET_KEY,
+  ]
+
+  for (const candidate of candidates) {
+    const normalized = candidate?.trim()
+    if (normalized) {
+      return normalized
+    }
+  }
+
+  if (!isProduction) {
+    return 'veo-studio-dev-temp-asset-secret'
+  }
+
+  throw new Error('TEMP_ASSET_SIGNING_SECRET is required in production when temp asset URLs are enabled.')
 }
 
 function resolveVideoSiteSessionSecret() {
@@ -1158,6 +2494,185 @@ function clearVideoSiteSession(res) {
     path: '/',
     maxAge: 0,
   }))
+}
+
+function parseIdentityAllowlist(value) {
+  if (typeof value !== 'string') return new Set()
+  return new Set(
+    value
+      .split(/[,\n;\r]+/)
+      .map((item) => normalizeIdentityValue(item))
+      .filter(Boolean),
+  )
+}
+
+function normalizeIdentityValue(value) {
+  if (value == null) return ''
+  return String(value).trim().toLowerCase()
+}
+
+function isAdminUser(user) {
+  if (!user || typeof user !== 'object') return false
+
+  if (user.isAdmin === true || user.is_admin === true) {
+    return true
+  }
+
+  const identities = collectUserIdentities(user)
+  if (
+    matchesAllowlist(adminUserIdAllowlist, identities.ids)
+    || matchesAllowlist(adminUserAccountAllowlist, identities.accounts)
+    || matchesAllowlist(adminUserEmailAllowlist, identities.emails)
+    || matchesAllowlist(adminUserNameAllowlist, identities.names)
+  ) {
+    return true
+  }
+
+  if (
+    identities.roles.some(isAdminRoleValue)
+    || identities.groups.some(isAdminRoleValue)
+  ) {
+    return true
+  }
+
+  if (hasExplicitAdminAllowlist) {
+    return false
+  }
+
+  return (
+    identities.ids.some(isBuiltInAdminIdentity)
+    || identities.accounts.some(isBuiltInAdminIdentity)
+    || identities.emails.some(isBuiltInAdminIdentity)
+    || identities.names.some(isBuiltInAdminIdentity)
+  )
+}
+
+function collectUserIdentities(user) {
+  return {
+    ids: uniqueNormalizedValues([user.id, user.userId, user.uid]),
+    accounts: uniqueNormalizedValues([user.account, user.username, user.userName, user.login]),
+    emails: uniqueNormalizedValues([user.email]),
+    names: uniqueNormalizedValues([user.name, user.nickname, user.displayName, user.realName]),
+    roles: uniqueNormalizedValues([
+      user.role,
+      user.roles,
+      user.permission,
+      user.permissions,
+    ]),
+    groups: uniqueNormalizedValues([
+      user.group,
+      user.groupName,
+      user.groups,
+      user.groupNames,
+    ]),
+  }
+}
+
+function uniqueNormalizedValues(values) {
+  const normalized = []
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      normalized.push(...uniqueNormalizedValues(value))
+      continue
+    }
+
+    if (typeof value === 'string' && /[,;|]/.test(value)) {
+      normalized.push(...value.split(/[,;|]/).map((item) => normalizeIdentityValue(item)).filter(Boolean))
+      continue
+    }
+
+    const nextValue = normalizeIdentityValue(value)
+    if (nextValue) {
+      normalized.push(nextValue)
+    }
+  }
+
+  return [...new Set(normalized)]
+}
+
+function matchesAllowlist(allowlist, candidates) {
+  if (!allowlist.size) return false
+  return candidates.some((candidate) => allowlist.has(candidate))
+}
+
+function isBuiltInAdminIdentity(value) {
+  return value === 'admin' || value === 'administrator'
+}
+
+function isAdminRoleValue(value) {
+  return (
+    value === 'admin'
+    || value === 'administrator'
+    || value === 'superadmin'
+    || value === 'super-admin'
+    || value === 'root'
+    || value.includes('管理员')
+    || value.includes('administrator')
+    || value.includes('superadmin')
+  )
+}
+
+function requireAdminApiAccess(req, res, next) {
+  if (!requireMainAppSso) {
+    next()
+    return
+  }
+
+  const session = req.videoSiteSession
+  if (!session) {
+    res.status(401).json({
+      success: false,
+      message: 'Please launch VEO Studio from the main site first.',
+      redirectUrl: buildMainAppVideoEntryUrl(resolveRequestedMainAppUrl(req)),
+    })
+    return
+  }
+
+  if (!isAdminUser(session.user)) {
+    res.status(403).json({
+      success: false,
+      message: 'Admin access only.',
+    })
+    return
+  }
+
+  next()
+}
+
+function requireAdminPageAccess(req, res, next) {
+  if (!requireMainAppSso) {
+    next()
+    return
+  }
+
+  if (!isAdminUser(req.videoSiteSession?.user)) {
+    res
+      .status(403)
+      .type('html')
+      .send(`<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>无权限访问</title>
+    <style>
+      body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f172a; color: #e2e8f0; display: grid; place-items: center; min-height: 100vh; }
+      .card { width: min(92vw, 460px); padding: 32px; border-radius: 20px; background: rgba(15, 23, 42, 0.9); border: 1px solid rgba(148, 163, 184, 0.24); box-shadow: 0 20px 60px rgba(15, 23, 42, 0.35); }
+      h1 { margin: 0 0 10px; font-size: 26px; }
+      p { margin: 0; line-height: 1.7; color: #cbd5e1; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>当前账号无后台权限</h1>
+      <p>只有管理员账号可以进入监控后台。请返回视频工作台并使用管理员账号登录。</p>
+    </div>
+  </body>
+</html>`)
+    return
+  }
+
+  next()
 }
 
 function appendSetCookie(res, cookie) {

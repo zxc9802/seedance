@@ -9,6 +9,17 @@ import './ParameterPanel.css'
 
 export default function ParameterPanel({ provider, config, params, onUpdate }) {
   const [advOpen, setAdvOpen] = useState(false)
+  const hasAdvancedSettings = (
+    config.features.personGeneration
+    || config.features.compressionQuality
+    || config.features.enhancePrompt
+    || config.features.enableUpsample
+    || config.features.privateOutput
+    || config.features.promptExtend
+    || config.features.promptOptimizer
+    || config.features.watermark
+    || config.features.cameraControl
+  )
 
   return (
     <div className="param-panel">
@@ -143,7 +154,7 @@ export default function ParameterPanel({ provider, config, params, onUpdate }) {
         <Section icon={<Volume2 size={13} />} title="音频">
           <Toggle
             label="生成音频"
-            desc="AI 自动为视频生成配套音频"
+            desc="为视频生成配套音频。"
             checked={Boolean(params.generateAudio)}
             onChange={(value) => onUpdate('generateAudio', value)}
           />
@@ -166,13 +177,13 @@ export default function ParameterPanel({ provider, config, params, onUpdate }) {
             ))}
           </div>
           <div className="param-help">
-            人物参考图请切到“人物审核”，前端会先把图片送到素材接口审核，再把审核后的素材标识提交给视频模型。
+            人物参考图建议使用素材审核模式，前端会先把图片送到素材接口审核，再把审核后的素材标识提交给视频模型。
           </div>
         </Section>
       )}
 
       {config.features.cfgScale && (
-        <Section icon={<Wand2 size={13} />} title="CFG 引导强度">
+        <Section icon={<Wand2 size={13} />} title="CFG 强度">
           <div className="slider-row">
             <input
               type="range"
@@ -193,11 +204,7 @@ export default function ParameterPanel({ provider, config, params, onUpdate }) {
         </Section>
       )}
 
-      {(config.features.personGeneration
-        || config.features.compressionQuality
-        || config.features.enhancePrompt
-        || config.features.watermark
-        || config.features.cameraControl) && (
+      {hasAdvancedSettings && (
         <div className="adv-section">
           <button className="adv-toggle" onClick={() => setAdvOpen(!advOpen)}>
             {advOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
@@ -247,13 +254,57 @@ export default function ParameterPanel({ provider, config, params, onUpdate }) {
                   </Section>
                 )}
 
-                {config.features.enhancePrompt && params.model?.includes('veo-2') && (
-                  <Section icon={<Wand2 size={13} />} title="增强提示词" compact>
+                {config.features.enhancePrompt && (
+                  <Section icon={<Wand2 size={13} />} title="提示词增强" compact>
                     <Toggle
-                      label="使用 Gemini"
-                      desc="用 AI 自动补全和优化提示词"
+                      label="启用提示词增强"
+                      desc="使用上游的 enhance_prompt 选项。"
                       checked={Boolean(params.enhancePrompt)}
                       onChange={(value) => onUpdate('enhancePrompt', value)}
+                    />
+                  </Section>
+                )}
+
+                {config.features.enableUpsample && (
+                  <Section icon={<Maximize size={13} />} title="超分放大" compact>
+                    <Toggle
+                      label="启用超分放大"
+                      desc="使用上游的 enable_upsample 选项。"
+                      checked={Boolean(params.enableUpsample)}
+                      onChange={(value) => onUpdate('enableUpsample', value)}
+                    />
+                  </Section>
+                )}
+
+                {config.features.privateOutput && (
+                  <Section icon={<Shield size={13} />} title="私密输出" compact>
+                    <Toggle
+                      label="启用私密输出"
+                      desc="使用上游的 private 选项。"
+                      checked={params.privateOutput !== false}
+                      onChange={(value) => onUpdate('privateOutput', value)}
+                    />
+                  </Section>
+                )}
+
+                {config.features.promptExtend && (
+                  <Section icon={<Wand2 size={13} />} title="提示词扩展" compact>
+                    <Toggle
+                      label="启用提示词扩展"
+                      desc="使用上游的 prompt_extend 选项。"
+                      checked={params.promptExtend !== false}
+                      onChange={(value) => onUpdate('promptExtend', value)}
+                    />
+                  </Section>
+                )}
+
+                {config.features.promptOptimizer && (
+                  <Section icon={<Wand2 size={13} />} title="提示词优化" compact>
+                    <Toggle
+                      label="启用提示词优化"
+                      desc="使用上游的 prompt_optimizer 选项。"
+                      checked={params.promptOptimizer !== false}
+                      onChange={(value) => onUpdate('promptOptimizer', value)}
                     />
                   </Section>
                 )}
@@ -261,8 +312,8 @@ export default function ParameterPanel({ provider, config, params, onUpdate }) {
                 {config.features.watermark && (
                   <Section icon={<Video size={13} />} title="水印" compact>
                     <Toggle
-                      label="添加水印"
-                      desc=""
+                      label="保留水印"
+                      desc="使用上游的 watermark 选项。"
                       checked={Boolean(params.watermark)}
                       onChange={(value) => onUpdate('watermark', value)}
                     />

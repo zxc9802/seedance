@@ -26,6 +26,10 @@ function isKlingProvider(id) {
   return id === 'kling'
 }
 
+function isYunwuProvider(id) {
+  return PROVIDERS[id]?.backendKind === 'yunwu'
+}
+
 function App() {
   const [provider, setProvider] = useState('veo')
   const [allParams, setAllParams] = useState(createInitialParams)
@@ -38,6 +42,7 @@ function App() {
   const [snapshotMeta, setSnapshotMeta] = useState(() => getLatestSnapshotMeta())
   const [snapshotBusy, setSnapshotBusy] = useState(false)
   const [snapshotNotice, setSnapshotNotice] = useState(null)
+  const [showAdminEntry, setShowAdminEntry] = useState(false)
   const videoReferencesRef = useRef(videoReferences)
   const providerStateRef = useRef(providerState)
 
@@ -58,8 +63,29 @@ function App() {
     setAllParams((prev) => normalizeAllParams(prev))
   }, [])
 
-  const params = normalizeParamsForProvider(provider, allParams[provider])
+  useEffect(() => {
+    let cancelled = false
+
+    fetch('/api/session')
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null)
+        if (cancelled) return
+        setShowAdminEntry(response.ok && payload?.data?.isAdmin === true)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setShowAdminEntry(false)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const params = normalizeParamsForProvider(provider, allParams[provider], generationMode)
   const config = PROVIDERS[provider]
+  const panelConfig = getConfigForGenerationMode(config, generationMode)
   const currentState = providerState[provider] || { generating: false, progress: 0, videoUrl: null, error: null }
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
   const maxImages = resolveImageLimit(config, generationMode, videoReferences)
@@ -69,9 +95,9 @@ function App() {
   const updateParam = useCallback((key, value) => {
     setAllParams((prev) => ({
       ...prev,
-      [provider]: normalizeParamsForProvider(provider, { ...prev[provider], [key]: value }),
+      [provider]: normalizeParamsForProvider(provider, { ...prev[provider], [key]: value }, generationMode),
     }))
-  }, [provider])
+  }, [generationMode, provider])
 
   const updateProviderState = useCallback((targetProvider, updates) => {
     setProviderState((prev) => ({
@@ -198,19 +224,34 @@ function App() {
     setSelectedTemplate(null)
     const nextConfig = PROVIDERS[nextProvider]
     const firstMode = nextConfig.generationModes?.[0]?.value || 't2v'
+    setAllParams((prev) => ({
+      ...prev,
+      [nextProvider]: normalizeParamsForProvider(nextProvider, prev[nextProvider], firstMode),
+    }))
     setGenerationMode(firstMode)
     resetReferences()
   }, [resetReferences])
 
   const handleModeChange = useCallback((nextMode) => {
+    setAllParams((prev) => ({
+      ...prev,
+      [provider]: normalizeParamsForProvider(provider, prev[provider], nextMode),
+    }))
     setGenerationMode(nextMode)
     resetReferences()
-  }, [resetReferences])
+  }, [provider, resetReferences])
+
+  const handleOpenAdmin = useCallback(() => {
+    window.open('/admin', '_blank', 'noopener')
+  }, [])
 
   const handleGenerate = useCallback(async () => {
     const finalPrompt = selectedTemplate
       ? (prompt.trim() ? `${selectedTemplate.prompt}. Additional requirements: ${prompt.trim()}` : selectedTemplate.prompt)
       : prompt.trim()
+    const usageMediaSummary = isVideoProvider(provider)
+      ? buildUsageMediaSummaryFromVideoReferences(videoReferences)
+      : buildUsageMediaSummaryFromImageMedia(referenceMedia)
 
     if (!finalPrompt) return
 
@@ -242,7 +283,7 @@ function App() {
 
         const response = await fetch('/api/veo-fast/generate', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: withUsageMediaSummaryHeaders({ 'Content-Type': 'application/json' }, usageMediaSummary),
           body: JSON.stringify(requestBody),
         })
 
@@ -251,7 +292,7 @@ function App() {
         }
 
         const data = await response.json()
-        const taskId = data?.task_id || data?.data?.task_id || data?.taskId
+        const taskId = extractTaskId(data)
         if (!taskId) {
           throw new Error('接口已响应，但没有返回 task_id')
         }
@@ -298,6 +339,75 @@ function App() {
             )
           }
         }
+      } else if (isYunwuProvider(provider)) {
+        const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
+        if (uploadedReferences.requiresPublicBaseUrl) {
+          throw new Error('参考素材已经上传到本地后端，但当前后端地址不是公网可访问地址。请部署后端到公网，或设置 PUBLIC_BASE_URL 指向公网域名/隧道。')
+        }
+
+        const requestInfo = buildYunwuVideoRequest(provider, params, finalPrompt, generationMode, uploadedReferences)
+        updateProviderState(provider, { progress: 18 })
+
+        const response = await fetch(requestInfo.url, {
+          method: 'POST',
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
+          body: JSON.stringify(requestInfo.body),
+        })
+
+        if (!response.ok) {
+          throw new Error(await formatHttpError(response))
+        }
+
+        const data = await response.json()
+        if (!data?.success) {
+          throw new Error(data?.message || '视频生成请求失败')
+        }
+
+        const initialTask = normalizeYunwuTask(data?.data)
+        if (initialTask.videoUrl) {
+          window.clearInterval(progressTimer)
+          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl)
+          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          return
+        }
+
+        if (!initialTask.taskId) {
+          throw new Error('接口已响应，但没有返回 taskId')
+        }
+
+        let finished = false
+        while (!finished) {
+          await sleep(5000)
+          const pollRequest = buildYunwuQueryRequest(provider, initialTask.taskId, initialTask.queryContext)
+          const pollResponse = await fetch(pollRequest.url, {
+            method: 'POST',
+            headers: pollRequest.headers,
+            body: JSON.stringify(pollRequest.body),
+          })
+
+          if (!pollResponse.ok) {
+            throw new Error(await formatHttpError(pollResponse))
+          }
+
+          const pollData = await pollResponse.json()
+          if (!pollData?.success) {
+            throw new Error(pollData?.message || '查询任务状态失败')
+          }
+
+          const task = normalizeYunwuTask(pollData.data)
+          const state = normalizeTaskState(task.status)
+          if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
+            finished = true
+            window.clearInterval(progressTimer)
+            const previewUrl = await resolvePreviewUrl(task.videoUrl)
+            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            return
+          }
+
+          if (state === 'failed') {
+            throw new Error(task.message || '视频生成失败')
+          }
+        }
       } else if (isVideoProvider(provider)) {
         const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
         if (uploadedReferences.requiresPublicBaseUrl) {
@@ -309,7 +419,7 @@ function App() {
 
         const response = await fetch(requestInfo.url, {
           method: 'POST',
-          headers: requestInfo.headers,
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
           body: JSON.stringify(requestInfo.body),
         })
 
@@ -324,7 +434,7 @@ function App() {
 
         const payload = data.data || {}
         const initialTask = {
-          taskId: payload.result?.taskId || payload.taskId,
+          taskId: extractTaskId(payload),
           status: payload.status ?? null,
           message: payload.result?.content || payload.message,
         }
@@ -382,7 +492,7 @@ function App() {
         const requestInfo = buildImageRequest(params, finalPrompt, generationMode, referenceMedia)
         const response = await fetch(requestInfo.url, {
           method: 'POST',
-          headers: requestInfo.headers,
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
           body: JSON.stringify(requestInfo.body),
         })
 
@@ -424,11 +534,13 @@ function App() {
       <Header
         onSaveSnapshot={handleSaveSnapshot}
         onLoadSnapshot={handleLoadSnapshot}
+        onOpenAdmin={handleOpenAdmin}
         snapshotBusy={snapshotBusy}
         snapshotLoadDisabled={hasActiveGeneration}
         hasSnapshot={Boolean(snapshotMeta?.savedAt)}
         lastSavedAt={snapshotMeta?.savedAt ?? null}
         snapshotNotice={snapshotNotice}
+        showAdminEntry={showAdminEntry}
       />
       <main className="app-main">
         <div className="left-panel">
@@ -456,7 +568,7 @@ function App() {
           />
           <ParameterPanel
             provider={provider}
-            config={config}
+            config={panelConfig}
             params={params}
             onUpdate={updateParam}
           />
@@ -466,7 +578,7 @@ function App() {
             videoUrl={currentState.videoUrl}
             generating={currentState.generating}
             progress={currentState.progress}
-            error={currentState.error}
+            error={formatRuntimeErrorMessage(provider, currentState.error)}
             params={params}
             provider={provider}
           />
@@ -529,6 +641,67 @@ function serializeVideoAssetList(list) {
       mimeType: asset.mimeType,
       file: asset.file,
     }))
+}
+
+const USAGE_MEDIA_SUMMARY_HEADER = 'X-Usage-Media-Summary'
+
+function createEmptyUsageMediaSummary() {
+  return {
+    images: { count: 0, bytes: 0 },
+    videos: { count: 0, bytes: 0 },
+    audios: { count: 0, bytes: 0 },
+  }
+}
+
+function normalizeUsageMediaMetric(items) {
+  return {
+    count: items.length,
+    bytes: items.reduce((total, item) => total + Math.max(0, Number(item?.size) || 0), 0),
+  }
+}
+
+function buildUsageMediaSummaryFromVideoReferences(references) {
+  return {
+    images: normalizeUsageMediaMetric(Array.isArray(references?.images) ? references.images : []),
+    videos: normalizeUsageMediaMetric(Array.isArray(references?.videos) ? references.videos : []),
+    audios: normalizeUsageMediaMetric(Array.isArray(references?.audios) ? references.audios : []),
+  }
+}
+
+function estimateBase64Bytes(base64) {
+  if (typeof base64 !== 'string' || !base64.trim()) return 0
+  const normalized = base64.replace(/\s/g, '')
+  const paddingLength = normalized.endsWith('==') ? 2 : normalized.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor((normalized.length * 3) / 4) - paddingLength)
+}
+
+function buildUsageMediaSummaryFromImageMedia(mediaList) {
+  const images = Array.isArray(mediaList) ? mediaList : []
+  return {
+    ...createEmptyUsageMediaSummary(),
+    images: {
+      count: images.length,
+      bytes: images.reduce((total, media) => total + estimateBase64Bytes(extractImageBase64Payload(media)), 0),
+    },
+  }
+}
+
+function encodeUsageMediaSummary(summary) {
+  try {
+    return encodeURIComponent(JSON.stringify(summary))
+  } catch {
+    return ''
+  }
+}
+
+function withUsageMediaSummaryHeaders(headers, summary) {
+  const encoded = encodeUsageMediaSummary(summary)
+  if (!encoded) return headers
+
+  return {
+    ...headers,
+    [USAGE_MEDIA_SUMMARY_HEADER]: encoded,
+  }
 }
 
 function hydrateVideoReferences(references) {
@@ -625,20 +798,60 @@ function normalizeAllParams(allParams) {
   return changed ? next : allParams
 }
 
-function normalizeParamsForProvider(provider, params) {
+function normalizeParamsForProvider(provider, params, mode = 't2v') {
   const config = PROVIDERS[provider]
   if (!config) return params
 
-  const resolutionOptions = config.resolutions?.[params.model] || config.resolutions?.default || []
+  let nextParams = params
+  const availableModels = resolveAvailableModels(config, mode)
 
-  if (resolutionOptions.length > 0 && !resolutionOptions.includes(params.resolution)) {
+  if (availableModels.length > 0 && !availableModels.includes(nextParams.model)) {
+    nextParams = {
+      ...nextParams,
+      model: availableModels[0],
+    }
+  }
+
+  const resolutionOptions = config.resolutions?.[nextParams.model] || config.resolutions?.default || []
+
+  if (resolutionOptions.length > 0 && !resolutionOptions.includes(nextParams.resolution)) {
     return {
-      ...params,
+      ...nextParams,
       resolution: resolutionOptions[0],
     }
   }
 
-  return params
+  return nextParams
+}
+
+function getConfigForGenerationMode(config, mode) {
+  if (!config) return config
+
+  const availableModels = resolveAvailableModels(config, mode)
+  if (availableModels.length === config.models.length) {
+    return config
+  }
+
+  const allowedSet = new Set(availableModels)
+  return {
+    ...config,
+    models: config.models.filter((model) => allowedSet.has(model.value)),
+  }
+}
+
+function resolveAvailableModels(config, mode) {
+  const allModels = Array.isArray(config?.models) ? config.models : []
+  const scopedModels = config?.modeModels?.[mode]
+
+  if (!Array.isArray(scopedModels) || scopedModels.length === 0) {
+    return allModels.map((model) => model.value)
+  }
+
+  const allowedSet = new Set(scopedModels)
+  const filteredModels = allModels.filter((model) => allowedSet.has(model.value))
+  return filteredModels.length > 0
+    ? filteredModels.map((model) => model.value)
+    : allModels.map((model) => model.value)
 }
 
 function isSupportedProvider(value) {
@@ -765,6 +978,64 @@ function buildVideoRequest(provider, params, prompt, mode, references) {
       payload,
     },
   }
+}
+
+function buildYunwuVideoRequest(provider, params, prompt, mode, references) {
+  return {
+    url: '/api/yunwu/generate',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      prompt,
+      mode,
+      params: {
+        ...params,
+        generateAudio: Boolean(params.generateAudio),
+      },
+      references,
+    },
+  }
+}
+
+function buildYunwuQueryRequest(provider, taskId, queryContext) {
+  return {
+    url: '/api/yunwu/query',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      taskId,
+      queryContext,
+    },
+  }
+}
+
+function normalizeYunwuTask(data) {
+  return {
+    taskId: extractTaskId(data),
+    status: data?.status || null,
+    message: data?.message || null,
+    videoUrl: data?.videoUrl || null,
+    queryContext: data?.queryContext || null,
+  }
+}
+
+function formatRuntimeErrorMessage(provider, message) {
+  if (typeof message !== 'string' || !message.trim()) {
+    return '生成失败'
+  }
+
+  if (
+    provider === 'yunwu-veo'
+    && message.toLowerCase().includes('download file failed')
+  ) {
+    return '云雾无法下载参考图片。请检查参考图链接是否能被外网直接访问，优先使用稳定的 HTTPS 公网图片链接，或确认 PUBLIC_BASE_URL 指向可公网访问的地址。'
+  }
+
+  return message
 }
 
 function buildImageRequest(params, prompt, mode, mediaList) {
@@ -912,6 +1183,12 @@ function validateVideoReferenceInput(provider, params, mode, references) {
     if (references.images.length === 0) return '参考图片模式至少需要 1 张参考图片'
   }
 
+  if (mode === 'omni') {
+    if (references.images.length + references.videos.length === 0) {
+      return 'Omni 模式至少需要 1 张参考图片或 1 段参考视频'
+    }
+  }
+
   if (mode === 'fusion') {
     const imageCount = references.images.length
     const videoCount = references.videos.length
@@ -928,7 +1205,21 @@ function validateVideoReferenceInput(provider, params, mode, references) {
 }
 
 function validateKlingReferenceInput(provider, params, mode, references) {
-  if (!isKlingProvider(provider) || mode !== 'fusion') return null
+  if (!isKlingProvider(provider) && provider !== 'yunwu-kling') return null
+
+  if (provider === 'yunwu-kling' && mode === 'omni') {
+    if (references.images.length > 1) {
+      return 'Yunwu Kling Omni 模式最多上传 1 张参考图片'
+    }
+
+    if (references.videos.length > 1) {
+      return 'Yunwu Kling Omni 模式最多上传 1 段参考视频'
+    }
+
+    return null
+  }
+
+  if (mode !== 'fusion') return null
 
   if (references.videos.length > 1) {
     return '可灵参考模式最多上传 1 段参考视频'
@@ -1088,6 +1379,74 @@ function normalizeTaskState(value) {
   }
 }
 
+function normalizeTaskIdValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.trunc(value))
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim()
+  }
+
+  return null
+}
+
+function getPathValue(target, pathExpression) {
+  if (!target || typeof target !== 'object') {
+    return undefined
+  }
+
+  const segments = pathExpression.split('.')
+  let current = target
+
+  for (const rawSegment of segments) {
+    if (current === null || current === undefined) {
+      return undefined
+    }
+
+    if (/^\d+$/.test(rawSegment)) {
+      current = current[Number(rawSegment)]
+      continue
+    }
+
+    current = current[rawSegment]
+  }
+
+  return current
+}
+
+function findFirstPathValue(target, paths) {
+  for (const path of paths) {
+    const value = getPathValue(target, path)
+    if (value !== undefined && value !== null && value !== '') {
+      return value
+    }
+  }
+
+  return null
+}
+
+function extractTaskId(payload) {
+  return normalizeTaskIdValue(findFirstPathValue(payload, [
+    'taskId',
+    'task_id',
+    'id',
+    'name',
+    'data.taskId',
+    'data.task_id',
+    'data.id',
+    'data.name',
+    'data.result.taskId',
+    'data.result.task_id',
+    'data.result.id',
+    'data.result.name',
+    'result.taskId',
+    'result.task_id',
+    'result.id',
+    'result.name',
+  ]))
+}
+
 function extractVeoFastVideoUrl(payload) {
   const candidates = [
     payload?.data?.videos?.[0]?.url,
@@ -1242,12 +1601,34 @@ function sleep(ms) {
 }
 
 function buildImageResponseParseError(data) {
+  if (isGatewayStatusPayload(data)) {
+    return '图片接口返回的是 New API 网关状态，而不是模型生成结果。请检查部署路由是否把 /api/image/chat/completions 转发到了本站后端，并确认 IMAGE_API_BASE_URL 填的是上游基础地址（例如 https://example.com/v1），不要填当前站点地址，也不要重复带上 /chat/completions。'
+  }
+
   const summary = summarizeImageResponseShape(data)
   if (!summary) {
     return '图片生成已完成，但没有在响应中找到图片数据'
   }
 
   return `图片生成已完成，但没有在响应中找到图片数据（响应字段: ${summary}）`
+}
+
+function isGatewayStatusPayload(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return false
+  }
+
+  const keys = Object.keys(data)
+  if (!keys.length || keys.some((key) => !['message', 'status', 'version'].includes(key))) {
+    return false
+  }
+
+  return (
+    typeof data.message === 'string'
+    && /new api gateway is running/i.test(data.message)
+    && typeof data.status === 'string'
+    && typeof data.version === 'string'
+  )
 }
 
 function summarizeImageResponseShape(data) {
