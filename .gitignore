@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 .temp_uploads
+backups
 .env
 .env.*
 !.env.example

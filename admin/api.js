@@ -1,7 +1,25 @@
+import crypto from 'node:crypto'
 import express from 'express'
+import multer from 'multer'
 import { getPool } from '../db/postgres.js'
+import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
 
 const router = express.Router()
+const costImportUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+  },
+  fileFilter: (_, file, callback) => {
+    if (/\.(xlsx|xls|csv)$/i.test(file?.originalname || '')) {
+      callback(null, true)
+      return
+    }
+    callback(new Error('仅支持上传 .xlsx / .xls / .csv 文件'))
+  },
+})
+const COST_IMPORT_PREVIEW_TTL_MS = 30 * 60 * 1000
+const costImportPreviewCache = new Map()
 
 function asArray(value) {
   return Array.isArray(value) ? value : []
@@ -29,8 +47,13 @@ function normalizeText(value) {
 }
 
 function extractPromptFromContent(content) {
-  if (typeof content === 'string') return content.trim()
-  if (!Array.isArray(content)) return ''
+  if (typeof content === 'string') {
+    return content.trim()
+  }
+
+  if (!Array.isArray(content)) {
+    return ''
+  }
 
   return content
     .filter((item) => item?.type === 'text' && typeof item.text === 'string')
@@ -160,20 +183,262 @@ function enhanceUsageLog(log) {
   }
 }
 
+const CHANNEL_LABELS = Object.freeze({
+  aggregation: '\u56fd\u8fbe\u4e30',
+  veo_fast: '\u5468\u603b',
+  image: '\u5468\u603b',
+})
+
+const STATUS_LABELS = Object.freeze({
+  submitted: '\u5df2\u63d0\u4ea4',
+  processing: '\u5904\u7406\u4e2d',
+  succeeded: '\u6210\u529f',
+  failed: '\u5931\u8d25',
+  pending: '\u5f85\u5904\u7406',
+  queued: '\u6392\u961f\u4e2d',
+  running: '\u5904\u7406\u4e2d',
+  cancelled: '\u5df2\u53d6\u6d88',
+})
+
+const TASK_EXPORT_HEADERS = Object.freeze([
+  '\u65f6\u95f4',
+  '\u7528\u6237',
+  '\u90ae\u7bb1',
+  '\u901a\u9053',
+  '\u6a21\u578b',
+  '\u6a21\u5f0f',
+  '\u63d0\u793a\u8bcd',
+  '\u56fe\u7247(\u6570\u91cf/\u5927\u5c0f)',
+  '\u89c6\u9891(\u6570\u91cf/\u5927\u5c0f)',
+  '\u97f3\u9891(\u6570\u91cf/\u5927\u5c0f)',
+  '\u72b6\u6001',
+  'engine_task_id',
+  'upstream_url',
+  '\u8d39\u7528',
+])
+
+function formatChannelLabel(channel) {
+  return CHANNEL_LABELS[channel] || channel || ''
+}
+
+function formatStatusLabel(status) {
+  return STATUS_LABELS[status] || status || ''
+}
+
+function formatBytes(bytes) {
+  const value = Math.max(0, Number(bytes) || 0)
+  if (!value) return ''
+  if (value >= 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${value} B`
+}
+
+function formatMediaMetric(count, bytes) {
+  const safeCount = Math.max(0, Number(count) || 0)
+  const sizeLabel = formatBytes(bytes)
+  return sizeLabel ? `${safeCount} (${sizeLabel})` : String(safeCount)
+}
+
+function escapeCsvCell(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`
+}
+
+function formatCsvTimestamp(value) {
+  if (!value) return ''
+  if (value instanceof Date) {
+    return value.toISOString()
+  }
+  return String(value)
+}
+
+function createBadRequest(message) {
+  const error = new Error(message)
+  error.statusCode = 400
+  return error
+}
+
+function getCostImportErrorStatus(error) {
+  if (error?.statusCode) return error.statusCode
+  if (error?.name === 'MulterError' || error?.code === 'LIMIT_FILE_SIZE') return 400
+  if (typeof error?.code === 'string') return 500
+  return 400
+}
+
+function normalizeImportChannel(value) {
+  const channel = String(value ?? '').trim()
+  if (!channel) {
+    throw createBadRequest('请选择要导入的具体通道')
+  }
+  if (channel === 'zhouzong') {
+    throw createBadRequest('费用导入必须选择具体通道，不能使用聚合通道')
+  }
+  return channel
+}
+
+function cleanupExpiredCostImportPreviews() {
+  const now = Date.now()
+  for (const [token, entry] of costImportPreviewCache.entries()) {
+    if (!entry || entry.expiresAt <= now) {
+      costImportPreviewCache.delete(token)
+    }
+  }
+}
+
+function createCostImportPreviewToken(payload) {
+  cleanupExpiredCostImportPreviews()
+  const token = crypto.randomUUID()
+  costImportPreviewCache.set(token, {
+    ...payload,
+    expiresAt: Date.now() + COST_IMPORT_PREVIEW_TTL_MS,
+  })
+  return token
+}
+
+function readCostImportPreviewToken(token) {
+  cleanupExpiredCostImportPreviews()
+  const entry = costImportPreviewCache.get(token)
+  if (!entry) {
+    throw createBadRequest('预检令牌不存在或已过期，请重新预检')
+  }
+  return entry
+}
+
+function deleteCostImportPreviewToken(token) {
+  if (!token) return
+  costImportPreviewCache.delete(token)
+}
+
+function runCostImportUpload(req, res) {
+  return new Promise((resolve, reject) => {
+    costImportUpload.single('file')(req, res, (error) => {
+      if (error) {
+        reject(error)
+        return
+      }
+      resolve()
+    })
+  })
+}
+
+function getAdminActor(req) {
+  const user = req.videoSiteSession?.user || {}
+  return (
+    user.id
+    || user.userId
+    || user.account
+    || user.email
+    || user.nickname
+    || user.name
+    || 'admin'
+  )
+}
+
+function buildCostImportResponse(preview, extra = {}) {
+  return {
+    channel: extra.channel,
+    fileName: preview.fileName,
+    sheetName: preview.sheetName,
+    recognizedColumns: preview.recognizedColumns,
+    summary: preview.summary,
+    duplicateTaskIds: preview.duplicateTaskIds,
+    detailRows: extra.detailRows ?? preview.detailRows,
+    previewToken: extra.previewToken || null,
+    ...extra.meta,
+  }
+}
+
+function buildUsageLogWhereClause(query = {}) {
+  const conditions = ['1=1']
+  const params = []
+  let paramIdx = 1
+
+  if (query.userId) {
+    conditions.push(`user_id = $${paramIdx++}`)
+    params.push(query.userId)
+  }
+  if (query.channel === 'zhouzong') {
+    conditions.push(`channel = ANY($${paramIdx++})`)
+    params.push(['veo_fast', 'image'])
+  } else if (query.channel) {
+    conditions.push(`channel = $${paramIdx++}`)
+    params.push(query.channel)
+  }
+  if (query.model) {
+    conditions.push(`model ILIKE $${paramIdx++}`)
+    params.push(`%${query.model}%`)
+  }
+  if (query.status) {
+    conditions.push(`status = $${paramIdx++}`)
+    params.push(query.status)
+  }
+  if (query.dateFrom) {
+    conditions.push(`created_at >= $${paramIdx++}`)
+    params.push(query.dateFrom)
+  }
+  if (query.dateTo) {
+    conditions.push(`created_at <= $${paramIdx++}`)
+    params.push(query.dateTo)
+  }
+
+  return {
+    where: conditions.join(' AND '),
+    params,
+  }
+}
+
+function appendUsageDateWindowClause(query, conditions, params, paramIdx, fallbackDays = null) {
+  if (query.dateFrom) {
+    conditions.push(`created_at >= $${paramIdx++}`)
+    params.push(query.dateFrom)
+  } else if (fallbackDays !== null && fallbackDays !== undefined) {
+    conditions.push(`created_at >= CURRENT_DATE - $${paramIdx++}::int`)
+    params.push(fallbackDays)
+  }
+
+  if (query.dateTo) {
+    conditions.push(`created_at <= $${paramIdx++}`)
+    params.push(query.dateTo)
+  }
+
+  return paramIdx
+}
+
+function buildUsageCsv(logs) {
+  const rows = logs.map((log) => [
+    formatCsvTimestamp(log.created_at),
+    log.user_nickname || '',
+    log.user_email || '',
+    formatChannelLabel(log.channel),
+    log.model || '',
+    log.generation_mode || '',
+    (log.promptText || '').replace(/[\n\r,]/g, ' '),
+    formatMediaMetric(log.imageCount, log.imageBytes),
+    formatMediaMetric(log.videoCount, log.videoBytes),
+    formatMediaMetric(log.audioCount, log.audioBytes),
+    formatStatusLabel(log.status),
+    log.engine_task_id || '',
+    log.upstream_url || '',
+    log.estimated_cost ?? '',
+  ])
+
+  return `\uFEFF${[TASK_EXPORT_HEADERS, ...rows]
+    .map((row) => row.map(escapeCsvCell).join(','))
+    .join('\n')}`
+}
+
 router.use((req, res, next) => {
   const adminPassword = process.env.ADMIN_PASSWORD || ''
   if (!adminPassword) {
     res.status(503).json({ error: 'ADMIN_PASSWORD not configured' })
     return
   }
-
   const auth = req.headers.authorization || ''
   const token = req.query.token || ''
   if (auth === `Bearer ${adminPassword}` || token === adminPassword) {
     next()
     return
   }
-
   res.status(401).json({ error: 'Unauthorized' })
 })
 
@@ -275,6 +540,12 @@ router.get('/by-user', async (req, res) => {
 
   const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50))
+  const conditions = ['1=1']
+  const params = []
+  let paramIdx = 1
+
+  paramIdx = appendUsageDateWindowClause(req.query, conditions, params, paramIdx, days)
+  const where = conditions.join(' AND ')
 
   try {
     const result = await db.query(`
@@ -288,11 +559,11 @@ router.get('/by-user', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
-      WHERE created_at >= CURRENT_DATE - $1::int
+      WHERE ${where}
       GROUP BY user_id, user_nickname, user_email, user_group
       ORDER BY requests DESC
-      LIMIT $2
-    `, [days, limit])
+      LIMIT $${paramIdx}
+    `, [...params, limit])
 
     res.json(result.rows)
   } catch (err) {
@@ -332,46 +603,15 @@ router.get('/tasks', async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1)
   const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 50))
   const offset = (page - 1) * pageSize
-
-  const conditions = ['1=1']
-  const params = []
-  let paramIdx = 1
-
-  if (req.query.userId) {
-    conditions.push(`user_id = $${paramIdx++}`)
-    params.push(req.query.userId)
-  }
-  if (req.query.channel === 'zhouzong') {
-    conditions.push(`channel = ANY($${paramIdx++})`)
-    params.push(['veo_fast', 'image'])
-  } else if (req.query.channel) {
-    conditions.push(`channel = $${paramIdx++}`)
-    params.push(req.query.channel)
-  }
-  if (req.query.model) {
-    conditions.push(`model ILIKE $${paramIdx++}`)
-    params.push(`%${req.query.model}%`)
-  }
-  if (req.query.status) {
-    conditions.push(`status = $${paramIdx++}`)
-    params.push(req.query.status)
-  }
-  if (req.query.dateFrom) {
-    conditions.push(`created_at >= $${paramIdx++}`)
-    params.push(req.query.dateFrom)
-  }
-  if (req.query.dateTo) {
-    conditions.push(`created_at <= $${paramIdx++}`)
-    params.push(req.query.dateTo)
-  }
-
-  const where = conditions.join(' AND ')
+  const { where, params } = buildUsageLogWhereClause(req.query)
+  const limitParamIndex = params.length + 1
+  const offsetParamIndex = params.length + 2
 
   try {
     const [countResult, dataResult] = await Promise.all([
       db.query(`SELECT COUNT(*)::int AS total FROM video_usage_logs WHERE ${where}`, params),
       db.query(
-        `SELECT * FROM video_usage_logs WHERE ${where} ORDER BY created_at DESC LIMIT $${paramIdx++} OFFSET $${paramIdx++}`,
+        `SELECT * FROM video_usage_logs WHERE ${where} ORDER BY created_at DESC LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}`,
         [...params, pageSize, offset]
       ),
     ])
@@ -384,6 +624,197 @@ router.get('/tasks', async (req, res) => {
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/tasks/export', async (req, res) => {
+  const db = getPool()
+  if (!db) {
+    return res.status(503).json({ error: 'Database not available' })
+  }
+
+  const { where, params } = buildUsageLogWhereClause(req.query)
+
+  try {
+    const result = await db.query(
+      `SELECT * FROM video_usage_logs WHERE ${where} ORDER BY created_at DESC`,
+      params
+    )
+
+    const csv = buildUsageCsv(result.rows.map(enhanceUsageLog))
+    const exportDate = new Date().toISOString().slice(0, 10)
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    res.setHeader('Content-Disposition', `attachment; filename="usage_${exportDate}.csv"`)
+    res.send(csv)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/cost-import/preview', async (req, res) => {
+  const db = getPool()
+  if (!db) {
+    return res.status(503).json({ error: 'Database not available' })
+  }
+
+  try {
+    await runCostImportUpload(req, res)
+
+    const channel = normalizeImportChannel(req.body?.channel)
+    if (!req.file) {
+      throw createBadRequest('请上传待导入的 Excel 或 CSV 文件')
+    }
+
+    const parsedFile = parseCostImportFile(req.file)
+    const preview = await buildCostImportPreview({
+      db,
+      channel,
+      parsedFile,
+    })
+    const previewToken = createCostImportPreviewToken({
+      channel,
+      parsedFile,
+      createdBy: getAdminActor(req),
+    })
+
+    console.info('[cost-import][preview]', {
+      actor: getAdminActor(req),
+      channel,
+      fileName: parsedFile.fileName,
+      ...preview.summary,
+    })
+
+    res.json(buildCostImportResponse(preview, {
+      channel,
+      previewToken,
+    }))
+  } catch (err) {
+    const status = getCostImportErrorStatus(err)
+    res.status(status).json({ error: err.message || '费用导入预检失败' })
+  }
+})
+
+router.post('/cost-import/apply', async (req, res) => {
+  const db = getPool()
+  if (!db) {
+    return res.status(503).json({ error: 'Database not available' })
+  }
+
+  let previewToken = ''
+
+  try {
+    await runCostImportUpload(req, res)
+
+    previewToken = String(req.body?.importToken || '').trim()
+    const actor = getAdminActor(req)
+
+    let channel = ''
+    let parsedFile = null
+
+    if (previewToken) {
+      const cachedPreview = readCostImportPreviewToken(previewToken)
+      channel = cachedPreview.channel
+      parsedFile = cachedPreview.parsedFile
+    } else {
+      channel = normalizeImportChannel(req.body?.channel)
+      if (!req.file) {
+        throw createBadRequest('请先上传文件预检，或提交有效的预检令牌')
+      }
+      parsedFile = parseCostImportFile(req.file)
+    }
+
+    const preview = await buildCostImportPreview({
+      db,
+      channel,
+      parsedFile,
+    })
+
+    let updatedRows = 0
+    let overwrittenRows = 0
+    const appliedRowNumbers = new Set()
+
+    if (preview.actions.length > 0) {
+      const client = await db.connect()
+      try {
+        await client.query('BEGIN')
+        for (const action of preview.actions) {
+          const result = await client.query(
+            `
+              UPDATE video_usage_logs
+              SET estimated_cost = $1, updated_at = NOW()
+              WHERE id = $2::uuid
+            `,
+            [action.amount, action.targetId]
+          )
+
+          if (result.rowCount === 1) {
+            updatedRows += 1
+            appliedRowNumbers.add(action.rowNumber)
+            if (action.existingCost !== null) {
+              overwrittenRows += 1
+            }
+          }
+        }
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    const actionByRowNumber = new Map(preview.actions.map((action) => [action.rowNumber, action]))
+    const appliedDetailRows = preview.detailRows.map((row) => {
+      if (row.status !== 'writable') {
+        return row
+      }
+
+      const action = actionByRowNumber.get(row.rowNumber)
+      if (!action || !appliedRowNumbers.has(row.rowNumber)) {
+        return {
+          ...row,
+          status: 'skipped',
+          reason: '写入时未找到目标记录，请重新预检后再导入',
+        }
+      }
+
+      return {
+        ...row,
+        status: action.existingCost === null ? 'applied' : 'overwritten',
+        reason: action.existingCost === null ? '已写入费用' : '已覆盖原有费用',
+      }
+    })
+
+    deleteCostImportPreviewToken(previewToken)
+
+    console.info('[cost-import][apply]', {
+      actor,
+      channel,
+      fileName: parsedFile.fileName,
+      updatedRows,
+      overwrittenRows,
+      invalidRows: preview.summary.invalidRows,
+      unmatchedRows: preview.summary.unmatchedRows,
+      conflictRows: preview.summary.conflictRows,
+      duplicateRowCount: preview.summary.duplicateRowCount,
+    })
+
+    res.json(buildCostImportResponse(preview, {
+      channel,
+      detailRows: appliedDetailRows,
+      meta: {
+        applyResult: {
+          updatedRows,
+          overwrittenRows,
+          skippedRows: preview.actions.length - updatedRows,
+        },
+      },
+    }))
+  } catch (err) {
+    const status = getCostImportErrorStatus(err)
+    res.status(status).json({ error: err.message || '费用导入失败' })
   }
 })
 
@@ -430,6 +861,12 @@ router.get('/user-detail', async (req, res) => {
   if (!userId) return res.status(400).json({ error: 'userId is required' })
 
   const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const conditions = ['user_id = $1']
+  const params = [userId]
+  let paramIdx = 2
+
+  paramIdx = appendUsageDateWindowClause(req.query, conditions, params, paramIdx, days)
+  const where = conditions.join(' AND ')
 
   try {
     const result = await db.query(`
@@ -439,12 +876,48 @@ router.get('/user-detail', async (req, res) => {
         upstream_request_id, upstream_trace_id, upstream_url, status, error_message,
         video_url, estimated_cost, created_at, completed_at
       FROM video_usage_logs
-      WHERE user_id = $1 AND created_at >= CURRENT_DATE - $2::int
+      WHERE ${where}
       ORDER BY created_at DESC
-      LIMIT 200
-    `, [userId, days])
+      LIMIT $${paramIdx}
+    `, [...params, 200])
 
     res.json(result.rows.map(enhanceUsageLog))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/user-detail/export', async (req, res) => {
+  const db = getPool()
+  if (!db) {
+    return res.status(503).json({ error: 'Database not available' })
+  }
+
+  const userId = req.query.userId
+  if (!userId) {
+    return res.status(400).json({ error: 'userId is required' })
+  }
+
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const conditions = ['user_id = $1']
+  const params = [userId]
+  let paramIdx = 2
+
+  paramIdx = appendUsageDateWindowClause(req.query, conditions, params, paramIdx, days)
+  const where = conditions.join(' AND ')
+
+  try {
+    const result = await db.query(
+      `SELECT * FROM video_usage_logs WHERE ${where} ORDER BY created_at DESC`,
+      params
+    )
+
+    const csv = buildUsageCsv(result.rows.map(enhanceUsageLog))
+    const exportDate = new Date().toISOString().slice(0, 10)
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    res.setHeader('Content-Disposition', `attachment; filename="user_usage_${exportDate}.csv"`)
+    res.send(csv)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

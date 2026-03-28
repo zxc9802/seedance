@@ -1,9 +1,22 @@
 import { getPool } from './postgres.js'
 
+function extractDevUserInfo() {
+  const userId = process.env.DEV_USAGE_USER_ID?.trim()
+  if (!userId) return { userId: null, email: null, nickname: null, group: null }
+
+  return {
+    userId,
+    email: process.env.DEV_USAGE_USER_EMAIL?.trim() || `${userId}@local.dev`,
+    nickname: process.env.DEV_USAGE_USER_NICKNAME?.trim() || userId,
+    group: process.env.DEV_USAGE_USER_GROUP?.trim() || 'local-dev',
+  }
+}
+
 function extractUserInfo(session) {
   if (!session?.user) {
-    return { userId: null, email: null, nickname: null, group: null }
+    return extractDevUserInfo()
   }
+
   const user = session.user
   const userId = (
     user.id
@@ -15,6 +28,7 @@ function extractUserInfo(session) {
     || user.email
     || null
   )
+
   return {
     userId,
     email: user.account || user.email || user.username || user.userName || user.login || null,
@@ -134,5 +148,45 @@ export async function updateUsageLogByTaskId(engineTaskId, updates) {
     )
   } catch (err) {
     console.error('[usage-db] updateUsageLogByTaskId failed:', err.message)
+  }
+}
+
+export async function updateUsageLogById(logId, updates) {
+  const db = getPool()
+  if (!db || !logId) return
+
+  const setClauses = []
+  const values = []
+  let paramIndex = 1
+
+  for (const [key, value] of Object.entries(updates)) {
+    const columnMap = {
+      status: 'status',
+      videoUrl: 'video_url',
+      errorMessage: 'error_message',
+      completedAt: 'completed_at',
+      engineTaskId: 'engine_task_id',
+      upstreamRequestId: 'upstream_request_id',
+      upstreamTraceId: 'upstream_trace_id',
+    }
+    const col = columnMap[key]
+    if (col) {
+      setClauses.push(`${col} = $${paramIndex++}`)
+      values.push(value)
+    }
+  }
+
+  if (setClauses.length === 0) return
+
+  setClauses.push(`updated_at = NOW()`)
+  values.push(logId)
+
+  try {
+    await db.query(
+      `UPDATE video_usage_logs SET ${setClauses.join(', ')} WHERE id = $${paramIndex}::uuid`,
+      values
+    )
+  } catch (err) {
+    console.error('[usage-db] updateUsageLogById failed:', err.message)
   }
 }
