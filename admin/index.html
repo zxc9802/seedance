@@ -218,6 +218,10 @@
           <input id="f-model" class="block mt-1" placeholder="模型名">
         </div>
         <div>
+          <label class="text-xs text-gray-400">task_id</label>
+          <input id="f-task-id" class="block mt-1" placeholder="engine_task_id">
+        </div>
+        <div>
           <label class="text-xs text-gray-400">状态</label>
           <select id="f-status" class="block mt-1">
             <option value="">全部</option>
@@ -246,7 +250,7 @@
             <button type="button" class="btn btn-secondary quick-range-btn" data-quick-range="yesterday" aria-pressed="false" onclick="toggleQuickDateRange('yesterday')">&#26152;&#22825;</button>
           </div>
         </div>
-        <button class="btn btn-primary mt-auto" onclick="loadTasks()">查询</button>
+        <button class="btn btn-primary mt-auto" onclick="loadTasks(1)">查询</button>
         <button id="export-btn" class="btn btn-secondary mt-auto" onclick="exportCSV()">导出 CSV</button>
       </div>
     </div>
@@ -1040,6 +1044,7 @@ function buildTaskQueryParams(options = {}) {
   const params = new URLSearchParams()
   const channel = document.getElementById('f-channel').value
   const model = document.getElementById('f-model').value
+  const taskId = document.getElementById('f-task-id').value.trim()
   const status = document.getElementById('f-status').value
   const userId = document.getElementById('f-user').value
   const from = document.getElementById('f-from').value
@@ -1051,6 +1056,7 @@ function buildTaskQueryParams(options = {}) {
   }
   if (channel) params.set('channel', channel)
   if (model) params.set('model', model)
+  if (taskId) params.set('taskId', taskId)
   if (status) params.set('status', status)
   if (userId) params.set('userId', userId)
   if (from) params.set('dateFrom', from)

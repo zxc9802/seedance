@@ -352,10 +352,15 @@ function buildUsageLogWhereClause(query = {}) {
   const conditions = ['1=1']
   const params = []
   let paramIdx = 1
+  const taskId = String(query.taskId ?? query.engineTaskId ?? '').trim()
 
   if (query.userId) {
     conditions.push(`user_id = $${paramIdx++}`)
     params.push(query.userId)
+  }
+  if (taskId) {
+    conditions.push(`engine_task_id ILIKE $${paramIdx++}`)
+    params.push(`%${taskId}%`)
   }
   if (query.channel === 'zhouzong') {
     conditions.push(`channel = ANY($${paramIdx++})`)
