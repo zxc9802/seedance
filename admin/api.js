@@ -1,0 +1,926 @@
+import crypto from 'node:crypto'
+import express from 'express'
+import multer from 'multer'
+import { getPool } from '../db/postgres.js'
+import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
+
+const router = express.Router()
+const costImportUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+  },
+  fileFilter: (_, file, callback) => {
+    if (/\.(xlsx|xls|csv)$/i.test(file?.originalname || '')) {
+      callback(null, true)
+      return
+    }
+    callback(new Error('仅支持上传 .xlsx / .xls / .csv 文件'))
+  },
+})
+const COST_IMPORT_PREVIEW_TTL_MS = 30 * 60 * 1000
+const costImportPreviewCache = new Map()
+
+function asArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
+function normalizeText(value) {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+
+  const escapedMatch = trimmed.match(/\\"text\\":\\"([^"]*)\\"/)
+  if (escapedMatch?.[1]) {
+    return escapedMatch[1]
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, '\n')
+      .trim()
+  }
+
+  const directMatch = trimmed.match(/"text":"([^"]*)"/)
+  if (directMatch?.[1]) {
+    return directMatch[1].trim()
+  }
+
+  return trimmed
+}
+
+function extractPromptFromContent(content) {
+  if (typeof content === 'string') {
+    return content.trim()
+  }
+
+  if (!Array.isArray(content)) {
+    return ''
+  }
+
+  return content
+    .filter((item) => item?.type === 'text' && typeof item.text === 'string')
+    .map((item) => item.text.trim())
+    .filter(Boolean)
+    .join('\n')
+}
+
+function normalizeMediaCounts(counts) {
+  return {
+    images: Math.max(0, Number(counts?.images) || 0),
+    videos: Math.max(0, Number(counts?.videos) || 0),
+    audios: Math.max(0, Number(counts?.audios) || 0),
+  }
+}
+
+function normalizeMediaSummary(summary) {
+  if (!summary || typeof summary !== 'object') {
+    return null
+  }
+
+  return {
+    images: {
+      count: Math.max(0, Number(summary?.images?.count) || 0),
+      bytes: Math.max(0, Number(summary?.images?.bytes) || 0),
+    },
+    videos: {
+      count: Math.max(0, Number(summary?.videos?.count) || 0),
+      bytes: Math.max(0, Number(summary?.videos?.bytes) || 0),
+    },
+    audios: {
+      count: Math.max(0, Number(summary?.audios?.count) || 0),
+      bytes: Math.max(0, Number(summary?.audios?.bytes) || 0),
+    },
+  }
+}
+
+function extractMediaCounts(log) {
+  const requestParams = log?.request_params || {}
+  const mediaSummary = normalizeMediaSummary(requestParams.mediaSummary)
+  if (mediaSummary) {
+    return {
+      images: mediaSummary.images.count,
+      videos: mediaSummary.videos.count,
+      audios: mediaSummary.audios.count,
+    }
+  }
+
+  if (requestParams.mediaCounts || requestParams.referenceCounts) {
+    return normalizeMediaCounts(requestParams.mediaCounts || requestParams.referenceCounts)
+  }
+
+  if (requestParams.payload) {
+    return {
+      images: asArray(requestParams.payload.resources).length,
+      videos: asArray(requestParams.payload.referVideoUrl).length,
+      audios: asArray(requestParams.payload.referAudioUrl).length,
+    }
+  }
+
+  if (requestParams.references) {
+    return {
+      images: asArray(requestParams.references.images).length,
+      videos: asArray(requestParams.references.videos).length,
+      audios: asArray(requestParams.references.audios).length,
+    }
+  }
+
+  const firstInstance = asArray(requestParams.instances)[0]
+  if (firstInstance) {
+    return {
+      images: [
+        firstInstance.image,
+        firstInstance.lastFrame,
+        ...asArray(firstInstance.referenceImages).map((item) => item?.image),
+      ].filter(Boolean).length,
+      videos: 0,
+      audios: 0,
+    }
+  }
+
+  const content = asArray(requestParams.messages).at(-1)?.content
+  if (Array.isArray(content)) {
+    return {
+      images: content.filter((item) => item?.type === 'image_base64' || item?.type === 'image_url').length,
+      videos: 0,
+      audios: 0,
+    }
+  }
+
+  return { images: 0, videos: 0, audios: 0 }
+}
+
+function extractMediaSizes(log) {
+  const requestParams = log?.request_params || {}
+  const mediaSummary = normalizeMediaSummary(requestParams.mediaSummary)
+  if (mediaSummary) {
+    return {
+      images: mediaSummary.images.bytes,
+      videos: mediaSummary.videos.bytes,
+      audios: mediaSummary.audios.bytes,
+    }
+  }
+
+  return { images: 0, videos: 0, audios: 0 }
+}
+
+function enhanceUsageLog(log) {
+  const requestParams = log?.request_params || {}
+  const promptText = normalizeText(requestParams.rawPrompt)
+    || normalizeText(requestParams.prompt)
+    || normalizeText(log?.prompt)
+    || extractPromptFromContent(asArray(requestParams.messages).at(-1)?.content)
+
+  const mediaCounts = extractMediaCounts(log)
+  const mediaSizes = extractMediaSizes(log)
+
+  return {
+    ...log,
+    promptText,
+    imageCount: mediaCounts.images,
+    videoCount: mediaCounts.videos,
+    audioCount: mediaCounts.audios,
+    imageBytes: mediaSizes.images,
+    videoBytes: mediaSizes.videos,
+    audioBytes: mediaSizes.audios,
+  }
+}
+
+const CHANNEL_LABELS = Object.freeze({
+  aggregation: '\u56fd\u8fbe\u4e30',
+  veo_fast: '\u5468\u603b',
+  image: '\u5468\u603b',
+})
+
+const STATUS_LABELS = Object.freeze({
+  submitted: '\u5df2\u63d0\u4ea4',
+  processing: '\u5904\u7406\u4e2d',
+  succeeded: '\u6210\u529f',
+  failed: '\u5931\u8d25',
+  pending: '\u5f85\u5904\u7406',
+  queued: '\u6392\u961f\u4e2d',
+  running: '\u5904\u7406\u4e2d',
+  cancelled: '\u5df2\u53d6\u6d88',
+})
+
+const TASK_EXPORT_HEADERS = Object.freeze([
+  '\u65f6\u95f4',
+  '\u7528\u6237',
+  '\u90ae\u7bb1',
+  '\u901a\u9053',
+  '\u6a21\u578b',
+  '\u6a21\u5f0f',
+  '\u63d0\u793a\u8bcd',
+  '\u56fe\u7247(\u6570\u91cf/\u5927\u5c0f)',
+  '\u89c6\u9891(\u6570\u91cf/\u5927\u5c0f)',
+  '\u97f3\u9891(\u6570\u91cf/\u5927\u5c0f)',
+  '\u72b6\u6001',
+  'engine_task_id',
+  'upstream_url',
+  '\u8d39\u7528',
+])
+
+function formatChannelLabel(channel) {
+  return CHANNEL_LABELS[channel] || channel || ''
+}
+
+function formatStatusLabel(status) {
+  return STATUS_LABELS[status] || status || ''
+}
+
+function formatBytes(bytes) {
+  const value = Math.max(0, Number(bytes) || 0)
+  if (!value) return ''
+  if (value >= 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${value} B`
+}
+
+function formatMediaMetric(count, bytes) {
+  const safeCount = Math.max(0, Number(count) || 0)
+  const sizeLabel = formatBytes(bytes)
+  return sizeLabel ? `${safeCount} (${sizeLabel})` : String(safeCount)
+}
+
+function escapeCsvCell(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`
+}
+
+function formatCsvTimestamp(value) {
+  if (!value) return ''
+  if (value instanceof Date) {
+    return value.toISOString()
+  }
+  return String(value)
+}
+
+function createBadRequest(message) {
+  const error = new Error(message)
+  error.statusCode = 400
+  return error
+}
+
+function getCostImportErrorStatus(error) {
+  if (error?.statusCode) return error.statusCode
+  if (error?.name === 'MulterError' || error?.code === 'LIMIT_FILE_SIZE') return 400
+  if (typeof error?.code === 'string') return 500
+  return 400
+}
+
+function normalizeImportChannel(value) {
+  const channel = String(value ?? '').trim()
+  if (!channel) {
+    throw createBadRequest('请选择要导入的具体通道')
+  }
+  if (channel === 'zhouzong') {
+    throw createBadRequest('费用导入必须选择具体通道，不能使用聚合通道')
+  }
+  return channel
+}
+
+function cleanupExpiredCostImportPreviews() {
+  const now = Date.now()
+  for (const [token, entry] of costImportPreviewCache.entries()) {
+    if (!entry || entry.expiresAt <= now) {
+      costImportPreviewCache.delete(token)
+    }
+  }
+}
+
+function createCostImportPreviewToken(payload) {
+  cleanupExpiredCostImportPreviews()
+  const token = crypto.randomUUID()
+  costImportPreviewCache.set(token, {
+    ...payload,
+    expiresAt: Date.now() + COST_IMPORT_PREVIEW_TTL_MS,
+  })
+  return token
+}
+
+function readCostImportPreviewToken(token) {
+  cleanupExpiredCostImportPreviews()
+  const entry = costImportPreviewCache.get(token)
+  if (!entry) {
+    throw createBadRequest('预检令牌不存在或已过期，请重新预检')
+  }
+  return entry
+}
+
+function deleteCostImportPreviewToken(token) {
+  if (!token) return
+  costImportPreviewCache.delete(token)
+}
+
+function runCostImportUpload(req, res) {
+  return new Promise((resolve, reject) => {
+    costImportUpload.single('file')(req, res, (error) => {
+      if (error) {
+        reject(error)
+        return
+      }
+      resolve()
+    })
+  })
+}
+
+function getAdminActor(req) {
+  const user = req.videoSiteSession?.user || {}
+  return (
+    user.id
+    || user.userId
+    || user.account
+    || user.email
+    || user.nickname
+    || user.name
+    || 'admin'
+  )
+}
+
+function buildCostImportResponse(preview, extra = {}) {
+  return {
+    channel: extra.channel,
+    fileName: preview.fileName,
+    sheetName: preview.sheetName,
+    recognizedColumns: preview.recognizedColumns,
+    summary: preview.summary,
+    duplicateTaskIds: preview.duplicateTaskIds,
+    detailRows: extra.detailRows ?? preview.detailRows,
+    previewToken: extra.previewToken || null,
+    ...extra.meta,
+  }
+}
+
+function buildUsageLogWhereClause(query = {}) {
+  const conditions = ['1=1']
+  const params = []
+  let paramIdx = 1
+
+  if (query.userId) {
+    conditions.push(`user_id = $${paramIdx++}`)
+    params.push(query.userId)
+  }
+  if (query.channel === 'zhouzong') {
+    conditions.push(`channel = ANY($${paramIdx++})`)
+    params.push(['veo_fast', 'image'])
+  } else if (query.channel) {
+    conditions.push(`channel = $${paramIdx++}`)
+    params.push(query.channel)
+  }
+  if (query.model) {
+    conditions.push(`model ILIKE $${paramIdx++}`)
+    params.push(`%${query.model}%`)
+  }
+  if (query.status) {
+    conditions.push(`status = $${paramIdx++}`)
+    params.push(query.status)
+  }
+  if (query.dateFrom) {
+    conditions.push(`created_at >= $${paramIdx++}`)
+    params.push(query.dateFrom)
+  }
+  if (query.dateTo) {
+    conditions.push(`created_at <= $${paramIdx++}`)
+    params.push(query.dateTo)
+  }
+
+  return {
+    where: conditions.join(' AND '),
+    params,
+  }
+}
+
+function appendUsageDateWindowClause(query, conditions, params, paramIdx, fallbackDays = null) {
+  if (query.dateFrom) {
+    conditions.push(`created_at >= $${paramIdx++}`)
+    params.push(query.dateFrom)
+  } else if (fallbackDays !== null && fallbackDays !== undefined) {
+    conditions.push(`created_at >= CURRENT_DATE - $${paramIdx++}::int`)
+    params.push(fallbackDays)
+  }
+
+  if (query.dateTo) {
+    conditions.push(`created_at <= $${paramIdx++}`)
+    params.push(query.dateTo)
+  }
+
+  return paramIdx
+}
+
+function buildUsageCsv(logs) {
+  const rows = logs.map((log) => [
+    formatCsvTimestamp(log.created_at),
+    log.user_nickname || '',
+    log.user_email || '',
+    formatChannelLabel(log.channel),
+    log.model || '',
+    log.generation_mode || '',
+    (log.promptText || '').replace(/[\n\r,]/g, ' '),
+    formatMediaMetric(log.imageCount, log.imageBytes),
+    formatMediaMetric(log.videoCount, log.videoBytes),
+    formatMediaMetric(log.audioCount, log.audioBytes),
+    formatStatusLabel(log.status),
+    log.engine_task_id || '',
+    log.upstream_url || '',
+    log.estimated_cost ?? '',
+  ])
+
+  return `\uFEFF${[TASK_EXPORT_HEADERS, ...rows]
+    .map((row) => row.map(escapeCsvCell).join(','))
+    .join('\n')}`
+}
+
+router.use((req, res, next) => {
+  const adminPassword = process.env.ADMIN_PASSWORD || ''
+  if (!adminPassword) {
+    res.status(503).json({ error: 'ADMIN_PASSWORD not configured' })
+    return
+  }
+  const auth = req.headers.authorization || ''
+  const token = req.query.token || ''
+  if (auth === `Bearer ${adminPassword}` || token === adminPassword) {
+    next()
+    return
+  }
+  res.status(401).json({ error: 'Unauthorized' })
+})
+
+router.get('/overview', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json({})
+
+  try {
+    const [totals, today, users] = await Promise.all([
+      db.query(`
+        SELECT
+          COUNT(*)::int AS total_requests,
+          COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+          COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
+          COALESCE(SUM(estimated_cost), 0)::float AS total_cost
+        FROM video_usage_logs
+      `),
+      db.query(`
+        SELECT COUNT(*)::int AS today_requests
+        FROM video_usage_logs
+        WHERE created_at >= CURRENT_DATE
+      `),
+      db.query(`
+        SELECT COUNT(DISTINCT user_id)::int AS active_users
+        FROM video_usage_logs
+      `),
+    ])
+
+    const t = totals.rows[0]
+    res.json({
+      totalRequests: t.total_requests,
+      succeeded: t.succeeded,
+      failed: t.failed,
+      successRate: t.total_requests > 0 ? ((t.succeeded / t.total_requests) * 100).toFixed(1) : '0',
+      totalCost: t.total_cost,
+      todayRequests: today.rows[0].today_requests,
+      activeUsers: users.rows[0].active_users,
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/trend', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json([])
+
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+
+  try {
+    const result = await db.query(`
+      SELECT
+        DATE(created_at) AS date,
+        COUNT(*)::int AS requests,
+        COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+        COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
+        COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
+      FROM video_usage_logs
+      WHERE created_at >= CURRENT_DATE - $1::int
+      GROUP BY DATE(created_at)
+      ORDER BY date
+    `, [days])
+
+    res.json(result.rows)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/by-model', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json([])
+
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+
+  try {
+    const result = await db.query(`
+      SELECT
+        COALESCE(model, 'unknown') AS model,
+        channel,
+        COUNT(*)::int AS requests,
+        COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+        COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
+      FROM video_usage_logs
+      WHERE created_at >= CURRENT_DATE - $1::int
+      GROUP BY model, channel
+      ORDER BY requests DESC
+    `, [days])
+
+    res.json(result.rows)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/by-user', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json([])
+
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50))
+  const conditions = ['1=1']
+  const params = []
+  let paramIdx = 1
+
+  paramIdx = appendUsageDateWindowClause(req.query, conditions, params, paramIdx, days)
+  const where = conditions.join(' AND ')
+
+  try {
+    const result = await db.query(`
+      SELECT
+        user_id,
+        COALESCE(user_nickname, user_email, user_id) AS user_name,
+        user_email,
+        user_group,
+        COUNT(*)::int AS requests,
+        COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+        COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
+        COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
+      FROM video_usage_logs
+      WHERE ${where}
+      GROUP BY user_id, user_nickname, user_email, user_group
+      ORDER BY requests DESC
+      LIMIT $${paramIdx}
+    `, [...params, limit])
+
+    res.json(result.rows)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/by-channel', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json([])
+
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+
+  try {
+    const result = await db.query(`
+      SELECT
+        channel,
+        COUNT(*)::int AS requests,
+        COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+        COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
+      FROM video_usage_logs
+      WHERE created_at >= CURRENT_DATE - $1::int
+      GROUP BY channel
+      ORDER BY requests DESC
+    `, [days])
+
+    res.json(result.rows)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/tasks', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json({ items: [], total: 0 })
+
+  const page = Math.max(1, Number(req.query.page) || 1)
+  const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 50))
+  const offset = (page - 1) * pageSize
+  const { where, params } = buildUsageLogWhereClause(req.query)
+  const limitParamIndex = params.length + 1
+  const offsetParamIndex = params.length + 2
+
+  try {
+    const [countResult, dataResult] = await Promise.all([
+      db.query(`SELECT COUNT(*)::int AS total FROM video_usage_logs WHERE ${where}`, params),
+      db.query(
+        `SELECT * FROM video_usage_logs WHERE ${where} ORDER BY created_at DESC LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}`,
+        [...params, pageSize, offset]
+      ),
+    ])
+
+    res.json({
+      items: dataResult.rows.map(enhanceUsageLog),
+      total: countResult.rows[0].total,
+      page,
+      pageSize,
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/tasks/export', async (req, res) => {
+  const db = getPool()
+  if (!db) {
+    return res.status(503).json({ error: 'Database not available' })
+  }
+
+  const { where, params } = buildUsageLogWhereClause(req.query)
+
+  try {
+    const result = await db.query(
+      `SELECT * FROM video_usage_logs WHERE ${where} ORDER BY created_at DESC`,
+      params
+    )
+
+    const csv = buildUsageCsv(result.rows.map(enhanceUsageLog))
+    const exportDate = new Date().toISOString().slice(0, 10)
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    res.setHeader('Content-Disposition', `attachment; filename="usage_${exportDate}.csv"`)
+    res.send(csv)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/cost-import/preview', async (req, res) => {
+  const db = getPool()
+  if (!db) {
+    return res.status(503).json({ error: 'Database not available' })
+  }
+
+  try {
+    await runCostImportUpload(req, res)
+
+    const channel = normalizeImportChannel(req.body?.channel)
+    if (!req.file) {
+      throw createBadRequest('请上传待导入的 Excel 或 CSV 文件')
+    }
+
+    const parsedFile = parseCostImportFile(req.file)
+    const preview = await buildCostImportPreview({
+      db,
+      channel,
+      parsedFile,
+    })
+    const previewToken = createCostImportPreviewToken({
+      channel,
+      parsedFile,
+      createdBy: getAdminActor(req),
+    })
+
+    console.info('[cost-import][preview]', {
+      actor: getAdminActor(req),
+      channel,
+      fileName: parsedFile.fileName,
+      ...preview.summary,
+    })
+
+    res.json(buildCostImportResponse(preview, {
+      channel,
+      previewToken,
+    }))
+  } catch (err) {
+    const status = getCostImportErrorStatus(err)
+    res.status(status).json({ error: err.message || '费用导入预检失败' })
+  }
+})
+
+router.post('/cost-import/apply', async (req, res) => {
+  const db = getPool()
+  if (!db) {
+    return res.status(503).json({ error: 'Database not available' })
+  }
+
+  let previewToken = ''
+
+  try {
+    await runCostImportUpload(req, res)
+
+    previewToken = String(req.body?.importToken || '').trim()
+    const actor = getAdminActor(req)
+
+    let channel = ''
+    let parsedFile = null
+
+    if (previewToken) {
+      const cachedPreview = readCostImportPreviewToken(previewToken)
+      channel = cachedPreview.channel
+      parsedFile = cachedPreview.parsedFile
+    } else {
+      channel = normalizeImportChannel(req.body?.channel)
+      if (!req.file) {
+        throw createBadRequest('请先上传文件预检，或提交有效的预检令牌')
+      }
+      parsedFile = parseCostImportFile(req.file)
+    }
+
+    const preview = await buildCostImportPreview({
+      db,
+      channel,
+      parsedFile,
+    })
+
+    let updatedRows = 0
+    let overwrittenRows = 0
+    const appliedRowNumbers = new Set()
+
+    if (preview.actions.length > 0) {
+      const client = await db.connect()
+      try {
+        await client.query('BEGIN')
+        for (const action of preview.actions) {
+          const result = await client.query(
+            `
+              UPDATE video_usage_logs
+              SET estimated_cost = $1, updated_at = NOW()
+              WHERE id = $2::uuid
+            `,
+            [action.amount, action.targetId]
+          )
+
+          if (result.rowCount === 1) {
+            updatedRows += 1
+            appliedRowNumbers.add(action.rowNumber)
+            if (action.existingCost !== null) {
+              overwrittenRows += 1
+            }
+          }
+        }
+        await client.query('COMMIT')
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    const actionByRowNumber = new Map(preview.actions.map((action) => [action.rowNumber, action]))
+    const appliedDetailRows = preview.detailRows.map((row) => {
+      if (row.status !== 'writable') {
+        return row
+      }
+
+      const action = actionByRowNumber.get(row.rowNumber)
+      if (!action || !appliedRowNumbers.has(row.rowNumber)) {
+        return {
+          ...row,
+          status: 'skipped',
+          reason: '写入时未找到目标记录，请重新预检后再导入',
+        }
+      }
+
+      return {
+        ...row,
+        status: action.existingCost === null ? 'applied' : 'overwritten',
+        reason: action.existingCost === null ? '已写入费用' : '已覆盖原有费用',
+      }
+    })
+
+    deleteCostImportPreviewToken(previewToken)
+
+    console.info('[cost-import][apply]', {
+      actor,
+      channel,
+      fileName: parsedFile.fileName,
+      updatedRows,
+      overwrittenRows,
+      invalidRows: preview.summary.invalidRows,
+      unmatchedRows: preview.summary.unmatchedRows,
+      conflictRows: preview.summary.conflictRows,
+      duplicateRowCount: preview.summary.duplicateRowCount,
+    })
+
+    res.json(buildCostImportResponse(preview, {
+      channel,
+      detailRows: appliedDetailRows,
+      meta: {
+        applyResult: {
+          updatedRows,
+          overwrittenRows,
+          skippedRows: preview.actions.length - updatedRows,
+        },
+      },
+    }))
+  } catch (err) {
+    const status = getCostImportErrorStatus(err)
+    res.status(status).json({ error: err.message || '费用导入失败' })
+  }
+})
+
+router.get('/pricing', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json([])
+
+  try {
+    const result = await db.query('SELECT * FROM model_pricing ORDER BY channel, model')
+    res.json(result.rows)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/pricing', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.status(503).json({ error: 'Database not available' })
+
+  const { channel, model, priceType, unitPrice, currency, note } = req.body || {}
+  if (!channel || !model) {
+    return res.status(400).json({ error: 'channel and model are required' })
+  }
+
+  try {
+    await db.query(`
+      INSERT INTO model_pricing (channel, model, price_type, unit_price, currency, note, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      ON CONFLICT (channel, model)
+      DO UPDATE SET price_type = $3, unit_price = $4, currency = $5, note = $6, updated_at = NOW()
+    `, [channel, model, priceType || 'per_call', unitPrice || 0, currency || 'CNY', note || null])
+
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/user-detail', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json([])
+
+  const userId = req.query.userId
+  if (!userId) return res.status(400).json({ error: 'userId is required' })
+
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const conditions = ['user_id = $1']
+  const params = [userId]
+  let paramIdx = 2
+
+  paramIdx = appendUsageDateWindowClause(req.query, conditions, params, paramIdx, days)
+  const where = conditions.join(' AND ')
+
+  try {
+    const result = await db.query(`
+      SELECT
+        id, channel, provider_id, model, generation_mode, prompt,
+        aspect_ratio, resolution, duration, request_params, engine_task_id,
+        upstream_request_id, upstream_trace_id, upstream_url, status, error_message,
+        video_url, estimated_cost, created_at, completed_at
+      FROM video_usage_logs
+      WHERE ${where}
+      ORDER BY created_at DESC
+      LIMIT $${paramIdx}
+    `, [...params, 200])
+
+    res.json(result.rows.map(enhanceUsageLog))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/user-detail/export', async (req, res) => {
+  const db = getPool()
+  if (!db) {
+    return res.status(503).json({ error: 'Database not available' })
+  }
+
+  const userId = req.query.userId
+  if (!userId) {
+    return res.status(400).json({ error: 'userId is required' })
+  }
+
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const conditions = ['user_id = $1']
+  const params = [userId]
+  let paramIdx = 2
+
+  paramIdx = appendUsageDateWindowClause(req.query, conditions, params, paramIdx, days)
+  const where = conditions.join(' AND ')
+
+  try {
+    const result = await db.query(
+      `SELECT * FROM video_usage_logs WHERE ${where} ORDER BY created_at DESC`,
+      params
+    )
+
+    const csv = buildUsageCsv(result.rows.map(enhanceUsageLog))
+    const exportDate = new Date().toISOString().slice(0, 10)
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+    res.setHeader('Content-Disposition', `attachment; filename="user_usage_${exportDate}.csv"`)
+    res.send(csv)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+export default router
