@@ -156,7 +156,7 @@
 
   <div id="tab-overview">
     <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-      <div class="card"><div class="text-sm text-gray-400 mb-1">今日请求</div><div class="stat-value text-blue-400" id="s-today">-</div></div>
+      <div class="card"><div class="text-sm text-gray-400 mb-1" id="s-range-label">今日请求</div><div class="stat-value text-blue-400" id="s-today">-</div></div>
       <div class="card"><div class="text-sm text-gray-400 mb-1">总请求数</div><div class="stat-value text-white" id="s-total">-</div></div>
       <div class="card"><div class="text-sm text-gray-400 mb-1">成功率</div><div class="stat-value text-green-400" id="s-rate">-</div></div>
       <div class="card"><div class="text-sm text-gray-400 mb-1">预估费用</div><div class="stat-value text-yellow-400" id="s-cost">-</div></div>
@@ -484,8 +484,17 @@ function switchTab(name, btn) {
   if (name === 'users') loadUsers()
 }
 
+function getSelectedOverviewDays() {
+  return Math.max(1, Number(document.getElementById('dayRange')?.value || 30))
+}
+
+function getOverviewRangeLabel(days) {
+  return days <= 1 ? '今日请求' : `最近 ${days} 天请求`
+}
+
 async function refreshAll() {
   try {
+    const selectedDays = getSelectedOverviewDays()
     const [overview, trend, models, channels, users] = await Promise.all([
       api('/overview'),
       api('/trend'),
@@ -494,7 +503,8 @@ async function refreshAll() {
       api('/by-user?limit=20'),
     ])
 
-    document.getElementById('s-today').textContent = overview.todayRequests ?? 0
+    document.getElementById('s-range-label').textContent = getOverviewRangeLabel(selectedDays)
+    document.getElementById('s-today').textContent = overview.rangeRequests ?? overview.todayRequests ?? 0
     document.getElementById('s-total').textContent = overview.totalRequests ?? 0
     document.getElementById('s-rate').textContent = `${overview.successRate ?? 0}%`
     document.getElementById('s-cost').textContent = `¥${Number(overview.totalCost ?? 0).toFixed(2)}`

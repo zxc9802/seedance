@@ -394,7 +394,7 @@ function appendUsageDateWindowClause(query, conditions, params, paramIdx, fallba
     conditions.push(`created_at >= $${paramIdx++}`)
     params.push(query.dateFrom)
   } else if (fallbackDays !== null && fallbackDays !== undefined) {
-    conditions.push(`created_at >= CURRENT_DATE - $${paramIdx++}::int`)
+    conditions.push(`created_at >= CURRENT_DATE - GREATEST($${paramIdx++}::int - 1, 0)`)
     params.push(fallbackDays)
   }
 
@@ -447,37 +447,38 @@ router.use((req, res, next) => {
 router.get('/overview', async (req, res) => {
   const db = getPool()
   if (!db) return res.json({})
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
 
   try {
-    const [totals, today, users] = await Promise.all([
+    const [totals, ranged] = await Promise.all([
       db.query(`
         SELECT
-          COUNT(*)::int AS total_requests,
+          COUNT(*)::int AS total_requests
+        FROM video_usage_logs
+      `),
+      db.query(`
+        SELECT
+          COUNT(*)::int AS range_requests,
           COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
           COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
-          COALESCE(SUM(estimated_cost), 0)::float AS total_cost
+          COALESCE(SUM(estimated_cost), 0)::float AS total_cost,
+          COUNT(DISTINCT user_id)::int AS active_users
         FROM video_usage_logs
-      `),
-      db.query(`
-        SELECT COUNT(*)::int AS today_requests
-        FROM video_usage_logs
-        WHERE created_at >= CURRENT_DATE
-      `),
-      db.query(`
-        SELECT COUNT(DISTINCT user_id)::int AS active_users
-        FROM video_usage_logs
-      `),
+        WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)
+      `, [days]),
     ])
 
     const t = totals.rows[0]
+    const r = ranged.rows[0]
     res.json({
       totalRequests: t.total_requests,
-      succeeded: t.succeeded,
-      failed: t.failed,
-      successRate: t.total_requests > 0 ? ((t.succeeded / t.total_requests) * 100).toFixed(1) : '0',
-      totalCost: t.total_cost,
-      todayRequests: today.rows[0].today_requests,
-      activeUsers: users.rows[0].active_users,
+      rangeRequests: r.range_requests,
+      succeeded: r.succeeded,
+      failed: r.failed,
+      successRate: r.range_requests > 0 ? ((r.succeeded / r.range_requests) * 100).toFixed(1) : '0',
+      totalCost: r.total_cost,
+      todayRequests: r.range_requests,
+      activeUsers: r.active_users,
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -499,7 +500,7 @@ router.get('/trend', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
-      WHERE created_at >= CURRENT_DATE - $1::int
+      WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)
       GROUP BY DATE(created_at)
       ORDER BY date
     `, [days])
@@ -525,7 +526,7 @@ router.get('/by-model', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
-      WHERE created_at >= CURRENT_DATE - $1::int
+      WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)
       GROUP BY model, channel
       ORDER BY requests DESC
     `, [days])
@@ -587,7 +588,7 @@ router.get('/by-channel', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
-      WHERE created_at >= CURRENT_DATE - $1::int
+      WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)
       GROUP BY channel
       ORDER BY requests DESC
     `, [days])
