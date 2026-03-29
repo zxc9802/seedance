@@ -65,12 +65,17 @@ export async function initDatabase() {
       )
     `)
 
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS lark_backup_record_id TEXT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS lark_backup_synced_at TIMESTAMPTZ`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS lark_backup_error TEXT`)
+
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_user_id ON video_usage_logs(user_id)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_channel ON video_usage_logs(channel)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_model ON video_usage_logs(model)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_status ON video_usage_logs(status)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_created_at ON video_usage_logs(created_at)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_engine_task_id ON video_usage_logs(engine_task_id)`)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_lark_backup_record_id ON video_usage_logs(lark_backup_record_id)`)
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS model_pricing (

@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import express from 'express'
 import multer from 'multer'
 import { getPool } from '../db/postgres.js'
+import { syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
 
 const router = express.Router()
@@ -736,6 +737,7 @@ router.post('/cost-import/apply', async (req, res) => {
     let updatedRows = 0
     let overwrittenRows = 0
     const appliedRowNumbers = new Set()
+    const updatedUsageLogIds = []
 
     if (preview.actions.length > 0) {
       const client = await db.connect()
@@ -754,6 +756,7 @@ router.post('/cost-import/apply', async (req, res) => {
           if (result.rowCount === 1) {
             updatedRows += 1
             appliedRowNumbers.add(action.rowNumber)
+            updatedUsageLogIds.push(action.targetId)
             if (action.existingCost !== null) {
               overwrittenRows += 1
             }
@@ -765,6 +768,14 @@ router.post('/cost-import/apply', async (req, res) => {
         throw error
       } finally {
         client.release()
+      }
+    }
+
+    if (updatedUsageLogIds.length > 0) {
+      try {
+        await syncUsageLogBackupByIds(updatedUsageLogIds)
+      } catch (error) {
+        console.error('[cost-import] Lark backup sync failed:', error.message)
       }
     }
 

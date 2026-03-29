@@ -1,4 +1,5 @@
 import { getPool } from './postgres.js'
+import { scheduleUsageLogBackupSyncById, syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 
 function extractDevUserInfo() {
   const userId = process.env.DEV_USAGE_USER_ID?.trim()
@@ -88,14 +89,9 @@ export async function insertUsageLog({
       ]
     )
     const insertedId = result.rows[0]?.id || null
-    console.log('[usage-db] insertUsageLog success:', {
-      id: insertedId,
-      userId,
-      channel,
-      model: model || null,
-      engineTaskId: engineTaskId || null,
-      status,
-    })
+    if (insertedId) {
+      scheduleUsageLogBackupSyncById(insertedId).catch(() => {})
+    }
     return insertedId
   } catch (err) {
     console.error('[usage-db] insertUsageLog failed:', err.message)
@@ -135,6 +131,14 @@ export async function updateUsageLogByTaskId(engineTaskId, updates) {
     setClauses.push(`upstream_trace_id = $${paramIndex++}`)
     values.push(updates.upstreamTraceId)
   }
+  if (updates.estimatedCost !== undefined) {
+    setClauses.push(`estimated_cost = $${paramIndex++}`)
+    values.push(updates.estimatedCost)
+  }
+  if (updates.unitPrice !== undefined) {
+    setClauses.push(`unit_price = $${paramIndex++}`)
+    values.push(updates.unitPrice)
+  }
 
   if (setClauses.length === 0) return
 
@@ -142,10 +146,13 @@ export async function updateUsageLogByTaskId(engineTaskId, updates) {
   values.push(engineTaskId)
 
   try {
-    await db.query(
-      `UPDATE video_usage_logs SET ${setClauses.join(', ')} WHERE engine_task_id = $${paramIndex}`,
+    const result = await db.query(
+      `UPDATE video_usage_logs SET ${setClauses.join(', ')} WHERE engine_task_id = $${paramIndex} RETURNING id`,
       values
     )
+    if (result.rows.length > 0) {
+      syncUsageLogBackupByIds(result.rows.map((row) => row.id)).catch(() => {})
+    }
   } catch (err) {
     console.error('[usage-db] updateUsageLogByTaskId failed:', err.message)
   }
@@ -168,6 +175,8 @@ export async function updateUsageLogById(logId, updates) {
       engineTaskId: 'engine_task_id',
       upstreamRequestId: 'upstream_request_id',
       upstreamTraceId: 'upstream_trace_id',
+      estimatedCost: 'estimated_cost',
+      unitPrice: 'unit_price',
     }
     const col = columnMap[key]
     if (col) {
@@ -182,10 +191,13 @@ export async function updateUsageLogById(logId, updates) {
   values.push(logId)
 
   try {
-    await db.query(
-      `UPDATE video_usage_logs SET ${setClauses.join(', ')} WHERE id = $${paramIndex}::uuid`,
+    const result = await db.query(
+      `UPDATE video_usage_logs SET ${setClauses.join(', ')} WHERE id = $${paramIndex}::uuid RETURNING id`,
       values
     )
+    if (result.rows[0]?.id) {
+      scheduleUsageLogBackupSyncById(result.rows[0].id).catch(() => {})
+    }
   } catch (err) {
     console.error('[usage-db] updateUsageLogById failed:', err.message)
   }
