@@ -139,6 +139,7 @@
     <h1 class="text-2xl font-bold">VEO Studio 用量监控</h1>
     <div class="flex gap-2">
       <select id="dayRange" onchange="refreshAll()" class="text-sm">
+        <option value="1">今天</option>
         <option value="7">最近 7 天</option>
         <option value="30" selected>最近 30 天</option>
         <option value="90">最近 90 天</option>
@@ -177,7 +178,7 @@
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h3 class="text-lg font-bold">费用导入</h3>
-            <p class="text-sm text-gray-400 mt-1">先固定具体通道，再上传供应商 Excel/CSV。系统按当前通道内的 engine_task_id 预检，确认后覆盖写入现有费用列。</p>
+            <p class="text-sm text-gray-400 mt-1">先选择通道，再上传供应商 Excel/CSV。系统按当前通道内的 engine_task_id 预检，确认后覆盖写入现有费用列。</p>
           </div>
           <div id="cost-import-state" class="text-sm text-gray-400">请选择通道并上传文件后预检</div>
         </div>
@@ -185,10 +186,9 @@
           <div>
             <label class="text-xs text-gray-400">导入通道</label>
             <select id="ci-channel" class="block mt-1" onchange="handleCostImportSourceChange()">
-              <option value="">请选择具体通道</option>
+              <option value="">请选择通道</option>
               <option value="aggregation">国达丰</option>
-              <option value="veo_fast">周总视频</option>
-              <option value="image">周总图片</option>
+              <option value="zhouzong">周总</option>
             </select>
           </div>
           <div class="min-w-[260px]">
@@ -368,6 +368,7 @@ let costImportLastResult = null
 
 const CHANNEL_LABELS = {
   aggregation: '国达丰',
+  zhouzong: '周总',
   veo_fast: '周总',
   image: '周总',
 }
@@ -813,7 +814,7 @@ function updateCostImportIdleState() {
     return
   }
   if (file) {
-    setCostImportStateText(`已选择文件 ${file.name}，请补充具体通道`, 'text-gray-400')
+    setCostImportStateText(`已选择文件 ${file.name}，请补充通道`, 'text-gray-400')
     return
   }
   setCostImportStateText('请选择通道并上传文件后预检', 'text-gray-400')
@@ -943,7 +944,7 @@ function renderCostImportResult(result, mode) {
 async function previewCostImport() {
   const { channel, file } = getCostImportSelection()
   if (!channel) {
-    alert('请选择具体通道')
+    alert('请选择通道')
     return
   }
   if (!file) {

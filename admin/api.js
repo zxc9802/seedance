@@ -268,10 +268,7 @@ function getCostImportErrorStatus(error) {
 function normalizeImportChannel(value) {
   const channel = String(value ?? '').trim()
   if (!channel) {
-    throw createBadRequest('请选择要导入的具体通道')
-  }
-  if (channel === 'zhouzong') {
-    throw createBadRequest('费用导入必须选择具体通道，不能使用聚合通道')
+    throw createBadRequest('请选择要导入的通道')
   }
   return channel
 }
