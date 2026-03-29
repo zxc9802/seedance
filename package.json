@@ -12,6 +12,7 @@
     "db:restore:append": "node scripts/db-restore.mjs --append-only"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "framer-motion": "^11.15.0",
     "lucide-react": "^0.460.0",

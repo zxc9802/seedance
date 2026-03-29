@@ -247,7 +247,7 @@
           </div>
         </div>
         <button class="btn btn-primary mt-auto" onclick="loadTasks()">查询</button>
-        <button id="export-btn" class="btn btn-secondary mt-auto" onclick="exportCSV()">导出 CSV</button>
+        <button id="export-btn" class="btn btn-secondary mt-auto" onclick="exportCSV()">导出 Excel</button>
       </div>
     </div>
     <div class="card table-wrap">
@@ -322,7 +322,7 @@
     <div id="user-detail-section" style="display:none">
       <h3 class="text-lg font-bold mb-3" id="user-detail-title">用户明细</h3>
       <div class="flex justify-end mb-3">
-        <button id="user-detail-export-btn" class="btn btn-secondary" onclick="exportUserDetailCSV()" disabled>&#23548;&#20986;&#24403;&#21069;&#29992;&#25143; CSV</button>
+        <button id="user-detail-export-btn" class="btn btn-secondary" onclick="exportUserDetailCSV()" disabled>&#23548;&#20986;&#24403;&#21069;&#29992;&#25143; Excel</button>
       </div>
       <div class="card table-wrap">
         <table>
@@ -1136,7 +1136,7 @@ async function exportCSV() {
     const link = document.createElement('a')
     const objectUrl = URL.createObjectURL(blob)
     link.href = objectUrl
-    link.download = `usage_${new Date().toISOString().slice(0, 10)}.csv`
+    link.download = `usage_${new Date().toISOString().slice(0, 10)}.xlsx`
     link.click()
     setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
   } catch (error) {
@@ -1289,7 +1289,7 @@ async function exportUserDetailCSV() {
     const link = document.createElement('a')
     const safeName = sanitizeFilename(currentUserDetailName || currentUserDetailId) || 'user'
     link.href = objectUrl
-    link.download = `${safeName}_${new Date().toISOString().slice(0, 10)}.csv`
+    link.download = `${safeName}_${new Date().toISOString().slice(0, 10)}.xlsx`
     link.click()
     setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
   } catch (error) {

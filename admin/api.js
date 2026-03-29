@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import ExcelJS from 'exceljs'
 import express from 'express'
 import multer from 'multer'
 import { getPool } from '../db/postgres.js'
@@ -200,21 +201,28 @@ const STATUS_LABELS = Object.freeze({
   cancelled: '\u5df2\u53d6\u6d88',
 })
 
-const TASK_EXPORT_HEADERS = Object.freeze([
-  '\u65f6\u95f4',
-  '\u7528\u6237',
-  '\u90ae\u7bb1',
-  '\u901a\u9053',
-  '\u6a21\u578b',
-  '\u6a21\u5f0f',
-  '\u63d0\u793a\u8bcd',
-  '\u56fe\u7247(\u6570\u91cf/\u5927\u5c0f)',
-  '\u89c6\u9891(\u6570\u91cf/\u5927\u5c0f)',
-  '\u97f3\u9891(\u6570\u91cf/\u5927\u5c0f)',
-  '\u72b6\u6001',
-  'engine_task_id',
-  'upstream_url',
-  '\u8d39\u7528',
+const EXCEL_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+const EXCEL_BORDER = Object.freeze({
+  top: { style: 'thin', color: { argb: 'FFB8C7DB' } },
+  left: { style: 'thin', color: { argb: 'FFB8C7DB' } },
+  bottom: { style: 'thin', color: { argb: 'FFB8C7DB' } },
+  right: { style: 'thin', color: { argb: 'FFB8C7DB' } },
+})
+const TASK_EXPORT_COLUMNS = Object.freeze([
+  { header: '\u65f6\u95f4', width: 22, align: 'center', value: (log) => formatExcelTimestamp(log.created_at) },
+  { header: '\u7528\u6237', width: 16, value: (log) => log.user_nickname || log.user_email || log.user_id || '' },
+  { header: '\u90ae\u7bb1', width: 28, value: (log) => log.user_email || '' },
+  { header: '\u901a\u9053', width: 12, align: 'center', value: (log) => formatChannelLabel(log.channel) },
+  { header: '\u6a21\u578b', width: 30, value: (log) => log.model || '' },
+  { header: '\u6a21\u5f0f', width: 12, align: 'center', value: (log) => log.generation_mode || '' },
+  { header: '\u63d0\u793a\u8bcd', width: 64, value: (log) => log.promptText || '' },
+  { header: '\u56fe\u7247(\u6570\u91cf/\u5927\u5c0f)', width: 18, align: 'center', value: (log) => formatMediaMetric(log.imageCount, log.imageBytes) },
+  { header: '\u89c6\u9891(\u6570\u91cf/\u5927\u5c0f)', width: 18, align: 'center', value: (log) => formatMediaMetric(log.videoCount, log.videoBytes) },
+  { header: '\u97f3\u9891(\u6570\u91cf/\u5927\u5c0f)', width: 18, align: 'center', value: (log) => formatMediaMetric(log.audioCount, log.audioBytes) },
+  { header: '\u72b6\u6001', width: 12, align: 'center', value: (log) => formatStatusLabel(log.status) },
+  { header: 'engine_task_id', width: 32, value: (log) => log.engine_task_id || '' },
+  { header: 'upstream_url', width: 52, value: (log) => log.upstream_url || '' },
+  { header: '\u8d39\u7528', width: 14, align: 'right', type: 'amount', value: (log) => safeExcelAmount(log.estimated_cost) },
 ])
 
 function formatChannelLabel(channel) {
@@ -240,16 +248,154 @@ function formatMediaMetric(count, bytes) {
   return sizeLabel ? `${safeCount} (${sizeLabel})` : String(safeCount)
 }
 
-function escapeCsvCell(value) {
-  return `"${String(value ?? '').replace(/"/g, '""')}"`
+function formatExcelTimestamp(value) {
+  if (!value) return ''
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return String(value)
+  }
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).replace(/\//g, '-')
 }
 
-function formatCsvTimestamp(value) {
-  if (!value) return ''
-  if (value instanceof Date) {
-    return value.toISOString()
+function safeExcelAmount(value) {
+  if (value === null || value === undefined || value === '') return null
+  const amount = Number(value)
+  return Number.isFinite(amount) ? Number(amount.toFixed(4)) : null
+}
+
+function excelColumnName(index) {
+  let dividend = index
+  let columnName = ''
+
+  while (dividend > 0) {
+    const modulo = (dividend - 1) % 26
+    columnName = String.fromCharCode(65 + modulo) + columnName
+    dividend = Math.floor((dividend - modulo) / 26)
   }
-  return String(value)
+
+  return columnName
+}
+
+function measureDisplayWidth(value) {
+  const text = String(value ?? '')
+  let width = 0
+  for (const char of text) {
+    width += /[^\u0000-\u00ff]/.test(char) ? 2 : 1
+  }
+  return width
+}
+
+function estimateRowHeight(values, columns) {
+  let maxLines = 1
+
+  values.forEach((value, index) => {
+    if (value === null || value === undefined || typeof value === 'number') return
+    const text = String(value)
+    if (!text) return
+
+    const width = Math.max(8, Number(columns[index]?.width) || 12)
+    const lines = text
+      .split(/\r?\n/)
+      .reduce((sum, line) => sum + Math.max(1, Math.ceil(measureDisplayWidth(line) / Math.max(6, width - 2))), 0)
+    maxLines = Math.max(maxLines, lines)
+  })
+
+  return Math.min(320, Math.max(24, maxLines * 18))
+}
+
+async function buildUsageWorkbook(logs, sheetName) {
+  const workbook = new ExcelJS.Workbook()
+  workbook.creator = 'VEO Studio'
+  workbook.created = new Date()
+
+  const worksheet = workbook.addWorksheet(sheetName)
+  worksheet.views = [{ state: 'frozen', ySplit: 1 }]
+  worksheet.columns = TASK_EXPORT_COLUMNS.map((column) => ({
+    header: column.header,
+    key: column.header,
+    width: column.width,
+  }))
+
+  const headerRow = worksheet.getRow(1)
+  headerRow.height = 28
+
+  TASK_EXPORT_COLUMNS.forEach((column, index) => {
+    const cell = headerRow.getCell(index + 1)
+    cell.value = column.header
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } }
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF2F5EA8' },
+    }
+    cell.alignment = {
+      vertical: 'middle',
+      horizontal: 'center',
+      wrapText: true,
+    }
+    cell.border = EXCEL_BORDER
+  })
+
+  logs.forEach((log) => {
+    const rowValues = TASK_EXPORT_COLUMNS.map((column) => column.value(log))
+    const row = worksheet.addRow(rowValues)
+    row.height = estimateRowHeight(rowValues, TASK_EXPORT_COLUMNS)
+
+    TASK_EXPORT_COLUMNS.forEach((column, index) => {
+      const cell = row.getCell(index + 1)
+      cell.alignment = {
+        vertical: 'top',
+        horizontal: column.align || 'left',
+        wrapText: true,
+      }
+      cell.border = EXCEL_BORDER
+
+      if (column.type === 'amount') {
+        cell.numFmt = '\u00a5#,##0.00'
+      }
+    })
+  })
+
+  const totalRow = worksheet.addRow(new Array(TASK_EXPORT_COLUMNS.length).fill(''))
+  totalRow.height = 26
+  totalRow.eachCell({ includeEmpty: true }, (cell) => {
+    cell.border = EXCEL_BORDER
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFF4F7FB' },
+    }
+  })
+
+  const labelCell = totalRow.getCell(TASK_EXPORT_COLUMNS.length - 1)
+  labelCell.value = '\u603b\u91d1\u989d'
+  labelCell.font = { bold: true }
+  labelCell.alignment = { vertical: 'middle', horizontal: 'right' }
+
+  const amountColumn = excelColumnName(TASK_EXPORT_COLUMNS.length)
+  const amountCell = totalRow.getCell(TASK_EXPORT_COLUMNS.length)
+  amountCell.value = {
+    formula: `SUM(${amountColumn}2:${amountColumn}${Math.max(2, totalRow.number - 1)})`,
+  }
+  amountCell.numFmt = '\u00a5#,##0.00'
+  amountCell.font = { bold: true }
+  amountCell.alignment = { vertical: 'middle', horizontal: 'right' }
+  amountCell.border = EXCEL_BORDER
+
+  worksheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: Math.max(1, totalRow.number - 1), column: TASK_EXPORT_COLUMNS.length },
+  }
+
+  return workbook.xlsx.writeBuffer()
 }
 
 function createBadRequest(message) {
@@ -402,29 +548,6 @@ function appendUsageDateWindowClause(query, conditions, params, paramIdx, fallba
   }
 
   return paramIdx
-}
-
-function buildUsageCsv(logs) {
-  const rows = logs.map((log) => [
-    formatCsvTimestamp(log.created_at),
-    log.user_nickname || '',
-    log.user_email || '',
-    formatChannelLabel(log.channel),
-    log.model || '',
-    log.generation_mode || '',
-    (log.promptText || '').replace(/[\n\r,]/g, ' '),
-    formatMediaMetric(log.imageCount, log.imageBytes),
-    formatMediaMetric(log.videoCount, log.videoBytes),
-    formatMediaMetric(log.audioCount, log.audioBytes),
-    formatStatusLabel(log.status),
-    log.engine_task_id || '',
-    log.upstream_url || '',
-    log.estimated_cost ?? '',
-  ])
-
-  return `\uFEFF${[TASK_EXPORT_HEADERS, ...rows]
-    .map((row) => row.map(escapeCsvCell).join(','))
-    .join('\n')}`
 }
 
 router.use((req, res, next) => {
@@ -641,12 +764,12 @@ router.get('/tasks/export', async (req, res) => {
       params
     )
 
-    const csv = buildUsageCsv(result.rows.map(enhanceUsageLog))
+    const buffer = await buildUsageWorkbook(result.rows.map(enhanceUsageLog), '\u5bf9\u8d26\u660e\u7ec6')
     const exportDate = new Date().toISOString().slice(0, 10)
 
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-    res.setHeader('Content-Disposition', `attachment; filename="usage_${exportDate}.csv"`)
-    res.send(csv)
+    res.setHeader('Content-Type', EXCEL_CONTENT_TYPE)
+    res.setHeader('Content-Disposition', `attachment; filename="usage_${exportDate}.xlsx"`)
+    res.send(Buffer.from(buffer))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -912,12 +1035,12 @@ router.get('/user-detail/export', async (req, res) => {
       params
     )
 
-    const csv = buildUsageCsv(result.rows.map(enhanceUsageLog))
+    const buffer = await buildUsageWorkbook(result.rows.map(enhanceUsageLog), '\u7528\u6237\u660e\u7ec6')
     const exportDate = new Date().toISOString().slice(0, 10)
 
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-    res.setHeader('Content-Disposition', `attachment; filename="user_usage_${exportDate}.csv"`)
-    res.send(csv)
+    res.setHeader('Content-Type', EXCEL_CONTENT_TYPE)
+    res.setHeader('Content-Disposition', `attachment; filename="user_usage_${exportDate}.xlsx"`)
+    res.send(Buffer.from(buffer))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
