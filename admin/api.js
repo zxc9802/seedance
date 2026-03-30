@@ -21,6 +21,7 @@ const costImportUpload = multer({
   },
 })
 const COST_IMPORT_PREVIEW_TTL_MS = 30 * 60 * 1000
+const COST_IMPORT_APPLY_BATCH_SIZE = 500
 const costImportPreviewCache = new Map()
 
 function asArray(value) {
@@ -463,6 +464,40 @@ function runCostImportUpload(req, res) {
   })
 }
 
+async function applyCostImportActions(client, actions) {
+  const appliedTargetIds = new Set()
+
+  for (let index = 0; index < actions.length; index += COST_IMPORT_APPLY_BATCH_SIZE) {
+    const batch = actions.slice(index, index + COST_IMPORT_APPLY_BATCH_SIZE)
+    const targetIds = batch.map((action) => action.targetId)
+    const amounts = batch.map((action) => String(action.amount))
+
+    const result = await client.query(
+      `
+        WITH input AS (
+          SELECT *
+          FROM unnest($1::uuid[], $2::numeric[]) AS item(target_id, amount)
+        )
+        UPDATE video_usage_logs AS logs
+        SET estimated_cost = input.amount,
+            updated_at = NOW()
+        FROM input
+        WHERE logs.id = input.target_id
+        RETURNING logs.id
+      `,
+      [targetIds, amounts]
+    )
+
+    result.rows.forEach((row) => {
+      if (row?.id) {
+        appliedTargetIds.add(row.id)
+      }
+    })
+  }
+
+  return appliedTargetIds
+}
+
 function getAdminActor(req) {
   const user = req.videoSiteSession?.user || {}
   return (
@@ -859,23 +894,17 @@ router.post('/cost-import/apply', async (req, res) => {
     let overwrittenRows = 0
     const appliedRowNumbers = new Set()
     const updatedUsageLogIds = []
+    const applyStartedAt = Date.now()
 
     if (preview.actions.length > 0) {
       const client = await db.connect()
       try {
         await client.query('BEGIN')
-        for (const action of preview.actions) {
-          const result = await client.query(
-            `
-              UPDATE video_usage_logs
-              SET estimated_cost = $1, updated_at = NOW()
-              WHERE id = $2::uuid
-            `,
-            [action.amount, action.targetId]
-          )
+        const appliedTargetIds = await applyCostImportActions(client, preview.actions)
+        updatedRows = appliedTargetIds.size
 
-          if (result.rowCount === 1) {
-            updatedRows += 1
+        for (const action of preview.actions) {
+          if (appliedTargetIds.has(action.targetId)) {
             appliedRowNumbers.add(action.rowNumber)
             updatedUsageLogIds.push(action.targetId)
             if (action.existingCost !== null) {
@@ -930,6 +959,7 @@ router.post('/cost-import/apply', async (req, res) => {
       fileName: parsedFile.fileName,
       updatedRows,
       overwrittenRows,
+      durationMs: Date.now() - applyStartedAt,
       invalidRows: preview.summary.invalidRows,
       unmatchedRows: preview.summary.unmatchedRows,
       conflictRows: preview.summary.conflictRows,
