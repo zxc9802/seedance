@@ -2011,6 +2011,33 @@ async function requestJson(baseUrl, endpoint, headers, body) {
   return payload
 }
 
+function appendQueryParams(url, query) {
+  if (!query || typeof query !== 'object') {
+    return url
+  }
+
+  const parsed = new URL(url)
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') {
+      continue
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item === undefined || item === null || item === '') {
+          continue
+        }
+        parsed.searchParams.append(key, String(item))
+      }
+      continue
+    }
+
+    parsed.searchParams.set(key, String(value))
+  }
+
+  return parsed.toString()
+}
+
 async function requestDashScope(spec) {
   const url = appendQueryParams(`${dashScopeBaseUrl}${spec.path}`, spec.query)
   const headers = {
