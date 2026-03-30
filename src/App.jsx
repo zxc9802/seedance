@@ -357,7 +357,7 @@ function App() {
         const initialTask = normalizeWanTask(data?.data)
         if (initialTask.videoUrl) {
           window.clearInterval(progressTimer)
-          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl)
+          const previewUrl = await resolveWanPreviewUrl(initialTask)
           updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
           return
         }
@@ -390,7 +390,7 @@ function App() {
           if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
             finished = true
             window.clearInterval(progressTimer)
-            const previewUrl = await resolvePreviewUrl(task.videoUrl)
+            const previewUrl = await resolveWanPreviewUrl(task)
             updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
             return
           }
@@ -979,7 +979,16 @@ function normalizeWanTask(data) {
     status: typeof data?.status === 'string' ? data.status : null,
     message: typeof data?.message === 'string' ? data.message : null,
     videoUrl: typeof data?.videoUrl === 'string' ? data.videoUrl : null,
+    previewUrl: typeof data?.previewUrl === 'string' ? data.previewUrl : null,
   }
+}
+
+async function resolveWanPreviewUrl(task) {
+  if (typeof task?.previewUrl === 'string' && task.previewUrl.length > 0) {
+    return task.previewUrl
+  }
+
+  return resolvePreviewUrl(task?.videoUrl || null)
 }
 
 function buildImageRequest(params, prompt, mode, mediaList) {

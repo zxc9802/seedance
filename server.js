@@ -7,7 +7,7 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createViteServer, loadEnv } from 'vite'
-import { initDatabase, closePool } from './db/postgres.js'
+import { getPool, initDatabase, closePool } from './db/postgres.js'
 import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
 import adminRouter from './admin/api.js'
 
@@ -504,7 +504,7 @@ app.post('/api/wan/generate', async (req, res) => {
     applyUpstreamTraceHeaders(res, traceMetadata)
     res.json({
       success: true,
-      data: normalized,
+      data: buildWanClientTask(normalized),
       ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
       ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
     })
@@ -539,21 +539,23 @@ app.post('/api/wan/query', async (req, res) => {
     if (normalized.status === 'succeeded' || normalized.status === 'failed' || normalized.status === 'cancelled') {
       const taskId = normalized.taskId || req.body?.taskId
       if (taskId) {
-        updateUsageLogByTaskId(taskId, {
-          status: normalized.status,
-          videoUrl: normalized.videoUrl || null,
-          errorMessage: normalized.status === 'succeeded' ? null : (normalized.message || null),
-          completedAt: new Date().toISOString(),
-          upstreamRequestId: traceMetadata?.requestId || null,
-          upstreamTraceId: traceMetadata?.traceId || null,
-        }).catch(() => {})
+        try {
+          await updateUsageLogByTaskId(taskId, {
+            status: normalized.status,
+            videoUrl: normalized.videoUrl || null,
+            errorMessage: normalized.status === 'succeeded' ? null : (normalized.message || null),
+            completedAt: new Date().toISOString(),
+            upstreamRequestId: traceMetadata?.requestId || null,
+            upstreamTraceId: traceMetadata?.traceId || null,
+          })
+        } catch (_) {}
       }
     }
 
     applyUpstreamTraceHeaders(res, traceMetadata)
     res.json({
       success: true,
-      data: normalized,
+      data: buildWanClientTask(normalized),
       ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
       ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
     })
@@ -563,6 +565,54 @@ app.post('/api/wan/query', async (req, res) => {
     res.status(statusCode).json({
       success: false,
       message: error.message || 'DashScope Wan query failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
+app.get('/api/wan/content/:taskId', async (req, res) => {
+  const taskId = normalizeTaskIdValue(req.params.taskId)
+  if (!taskId) {
+    res.status(400).json({
+      success: false,
+      message: 'Missing taskId',
+    })
+    return
+  }
+
+  try {
+    const videoUrl = await resolveWanContentUrl(taskId)
+    if (!videoUrl) {
+      res.status(404).json({
+        success: false,
+        message: 'Wan task video URL not found yet.',
+      })
+      return
+    }
+
+    const upstreamHeaders = {}
+    if (typeof req.headers.range === 'string' && req.headers.range.trim()) {
+      upstreamHeaders.Range = req.headers.range
+    }
+
+    const response = await fetch(videoUrl, {
+      method: 'GET',
+      headers: upstreamHeaders,
+    })
+
+    res.status(response.status)
+    copyUpstreamResponseHeaders(res, response.headers)
+    res.setHeader('Cache-Control', 'private, max-age=300')
+
+    const buffer = Buffer.from(await response.arrayBuffer())
+    res.end(buffer)
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Wan content proxy failed',
       ...(error.requestId ? { requestId: error.requestId } : {}),
       ...(error.traceId ? { traceId: error.traceId } : {}),
     })
@@ -2296,6 +2346,19 @@ function normalizeDashScopeWanTask(payload) {
   }
 }
 
+function buildWanPreviewProxyPath(taskId) {
+  const normalizedTaskId = normalizeTaskIdValue(taskId)
+  if (!normalizedTaskId) return null
+  return `/api/wan/content/${encodeURIComponent(normalizedTaskId)}`
+}
+
+function buildWanClientTask(task) {
+  return {
+    ...task,
+    previewUrl: buildWanPreviewProxyPath(task?.taskId),
+  }
+}
+
 function extractDashScopeTaskId(payload) {
   return normalizeTaskIdValue(findFirstPathValue(payload, [
     'task_id',
@@ -2371,6 +2434,61 @@ function extractDashScopeVideoUrl(payload) {
     'data.output.file_infos.0.file_url',
     'data.output.fileInfos.0.fileUrl',
   ], isLikelyRemoteVideoUrl)
+}
+
+async function findWanUsageVideoRecord(taskId) {
+  const db = getPool()
+  if (!db || !taskId) return null
+
+  const result = await db.query(
+    `
+      SELECT status, video_url AS "videoUrl", error_message AS "errorMessage"
+      FROM video_usage_logs
+      WHERE channel = 'wan'
+        AND engine_task_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [taskId],
+  )
+
+  return result.rows[0] || null
+}
+
+async function resolveWanContentUrl(taskId) {
+  const existing = await findWanUsageVideoRecord(taskId).catch(() => null)
+  if (existing?.videoUrl) {
+    return existing.videoUrl
+  }
+
+  const upstream = await requestDashScope(buildDashScopeWanQueryRequest({ taskId }))
+  const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
+  const normalized = normalizeDashScopeWanTask(upstream.payload)
+
+  if (normalized.taskId || normalized.status === 'succeeded' || normalized.status === 'failed' || normalized.status === 'cancelled') {
+    try {
+      await updateUsageLogByTaskId(taskId, {
+        status: normalized.status || existing?.status || 'submitted',
+        videoUrl: normalized.videoUrl || null,
+        errorMessage: normalized.status === 'succeeded' ? null : (normalized.message || existing?.errorMessage || null),
+        completedAt: normalized.status === 'succeeded' || normalized.status === 'failed' || normalized.status === 'cancelled'
+          ? new Date().toISOString()
+          : undefined,
+        upstreamRequestId: traceMetadata?.requestId || null,
+        upstreamTraceId: traceMetadata?.traceId || null,
+      })
+    } catch (_) {}
+  }
+
+  if (normalized.videoUrl) {
+    return normalized.videoUrl
+  }
+
+  if (normalized.status === 'failed' || normalized.status === 'cancelled') {
+    throw createHttpError(409, normalized.message || 'Wan video generation failed.', traceMetadata)
+  }
+
+  return null
 }
 
 function resolveBaseUrl(req) {
