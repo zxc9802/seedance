@@ -18,6 +18,13 @@ import {
 } from 'lucide-react'
 import './PromptInput.css'
 
+let referenceAssetOrderCounter = 0
+
+function nextReferenceAssetOrder() {
+  referenceAssetOrderCounter += 1
+  return Date.now() * 1000 + referenceAssetOrderCounter
+}
+
 export default function PromptInput({
   prompt,
   onPromptChange,
@@ -564,6 +571,7 @@ function hasRequiredVideoAssets(mode, references) {
 function createLocalAsset(file) {
   return {
     id: crypto.randomUUID(),
+    order: nextReferenceAssetOrder(),
     file,
     name: file.name,
     size: file.size,

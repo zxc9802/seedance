@@ -221,6 +221,73 @@ export const PROVIDERS = {
     },
     referenceHelpText: '参考模式最多上传 7 张图片；如果带参考视频，图片最多 4 张且仅支持无声。参考视频仅支持 1 段 MP4/MOV，时长不少于 3 秒，文件不超过 200MB。',
   },
+  wan1: {
+    id: 'wan1',
+    typeId: 'wan',
+    typeLabel: '万象',
+    selectorLabel: 'wan1',
+    name: '万象',
+    vendor: 'DashScope',
+    color: '#0ea5e9',
+    models: [
+      { value: 'wan2.6-r2v-flash', label: 'Wan 2.6 R2V Flash', tag: 'DashScope' },
+    ],
+    aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4'],
+    resolutions: {
+      default: ['720P'],
+    },
+    durations: [2, 3, 4, 5, 6, 7, 8, 9, 10],
+    sampleCounts: [1],
+    features: {
+      generateAudio: true,
+      negativePrompt: true,
+      referenceImage: true,
+      referenceVideo: true,
+      referenceAudio: false,
+      watermark: true,
+      shotType: true,
+    },
+    generationModes: [
+      { value: 'fusion', label: '角色参考' },
+    ],
+    referenceInputMode: 'url',
+    maxReferenceImages: {
+      fusion: 5,
+    },
+    maxReferenceVideos: {
+      fusion: 3,
+    },
+    defaults: {
+      model: 'wan2.6-r2v-flash',
+      aspectRatio: '16:9',
+      resolution: '720P',
+      duration: 5,
+      sampleCount: 1,
+      generateAudio: true,
+      watermark: false,
+      shotType: 'single',
+      negativePrompt: '',
+    },
+    shotTypeOptions: [
+      { value: 'single', label: '单镜头' },
+      { value: 'multi', label: '多镜头' },
+    ],
+    imageMimeTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/bmp'],
+    imageMimeTypeLabel: 'JPG/JPEG、PNG、WebP、BMP',
+    imageMaxSizeMb: 10,
+    imageValidation: {
+      minWidth: 240,
+      minHeight: 240,
+    },
+    videoMimeTypes: ['video/mp4', 'video/quicktime'],
+    videoMimeTypeLabel: 'MP4、MOV',
+    videoMaxSizeMb: 100,
+    videoValidation: {
+      minDurationSec: 1,
+    },
+    referenceHelpText: '角色绑定顺序会按照图片/视频的添加顺序生效，请按 character1、character2 需要的顺序上传参考素材。',
+    backendKind: 'dashscope-wan',
+  },
   'gemini-image': {
     id: 'gemini-image',
     typeId: 'image',
@@ -289,7 +356,7 @@ export const PROVIDERS = {
   },
 }
 
-export const PROVIDER_ORDER = ['veo', 've31p', 'veo31fast', 'kling', 'gemini-image']
+export const PROVIDER_ORDER = ['veo', 've31p', 'veo31fast', 'kling', 'wan1', 'gemini-image']
 
 export const MODEL_TYPES = PROVIDER_ORDER.reduce((acc, providerId) => {
   const config = PROVIDERS[providerId]
