@@ -196,9 +196,29 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
     const expiresAtMs = Date.now() + uploadTtlMinutes * 60 * 1000
     const expiresAt = new Date(expiresAtMs).toISOString()
     const materialType = parseMaterialType(req.body?.materialType)
+    const storageBackend = parseUploadStorageBackend(req.body?.storageBackend)
+    const dashscopeModel = normalizeDashScopeUploadModel(req.body?.dashscopeModel)
     const payload = []
 
-    if (materialType !== null) {
+    if (storageBackend === 'dashscope') {
+      const missing = getMissingDashScopeConfig()
+      if (missing.length > 0) {
+        res.status(500).json({
+          success: false,
+          message: `Missing backend config: ${missing.join(', ')}`,
+        })
+        return
+      }
+      if (!dashscopeModel) {
+        res.status(400).json({
+          success: false,
+          message: 'dashscopeModel is required when storageBackend=dashscope.',
+        })
+        return
+      }
+    }
+
+    if (materialType !== null && storageBackend !== 'dashscope') {
       const missing = getMissingMaterialConfig()
       if (missing.length > 0) {
         res.status(500).json({
@@ -220,7 +240,17 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
         expiresAt,
       }
 
-      if (materialType !== null && publiclyReachable && file.mimetype.startsWith('image/')) {
+      if (storageBackend === 'dashscope') {
+        const uploaded = await createDashScopeTemporaryReference({
+          file,
+          model: dashscopeModel,
+        })
+        item.url = uploaded.resourceRef
+        item.resourceRef = uploaded.resourceRef
+        item.expiresAt = uploaded.expiresAt
+        item.storageBackend = 'dashscope'
+        registerUploadedReference(item.resourceRef, file.size, uploaded.expiresAtMs)
+      } else if (materialType !== null && publiclyReachable && file.mimetype.startsWith('image/')) {
         const material = await createMaterialReference({
           name: buildMaterialName(file.originalname),
           originalUrl: url,
@@ -229,18 +259,23 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
         item.materialId = material.materialId
         item.materialStatus = material.status
         item.resourceRef = material.resourceRef
+        registerUploadedReference(item.url, file.size, expiresAtMs)
+        registerUploadedReference(item.resourceRef, file.size, expiresAtMs)
+      } else {
+        registerUploadedReference(item.url, file.size, expiresAtMs)
+        registerUploadedReference(item.resourceRef, file.size, expiresAtMs)
       }
 
-      registerUploadedReference(item.url, file.size, expiresAtMs)
-      registerUploadedReference(item.resourceRef, file.size, expiresAtMs)
       payload.push(item)
     }
 
     res.json({
       success: true,
       files: payload,
-      publiclyReachable,
-      message: publiclyReachable
+      publiclyReachable: storageBackend === 'dashscope' ? true : publiclyReachable,
+      message: storageBackend === 'dashscope'
+        ? 'Upload succeeded.'
+        : publiclyReachable
         ? 'Upload succeeded.'
         : 'Upload succeeded. Set PUBLIC_BASE_URL to a public domain or tunnel before using these files as generation references.',
     })
@@ -1927,13 +1962,19 @@ async function requestJson(baseUrl, endpoint, headers, body) {
 }
 
 async function requestDashScope(spec) {
+  const url = appendQueryParams(`${dashScopeBaseUrl}${spec.path}`, spec.query)
   const headers = {
     Accept: 'application/json',
     Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY}`,
+    ...(spec.headers || {}),
   }
 
   if (spec.async) {
     headers['X-DashScope-Async'] = 'enable'
+  }
+
+  if (spec.resolveOssResource) {
+    headers['X-DashScope-OssResourceResolve'] = 'enable'
   }
 
   if (spec.body !== undefined) {
@@ -1944,7 +1985,7 @@ async function requestDashScope(spec) {
   let lastError = null
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      response = await fetch(`${dashScopeBaseUrl}${spec.path}`, {
+      response = await fetch(url, {
         method: spec.method || 'POST',
         headers,
         body: spec.body !== undefined ? JSON.stringify(spec.body) : undefined,
@@ -2023,6 +2064,105 @@ function getMissingDashScopeConfig() {
   ].filter(Boolean)
 }
 
+async function createDashScopeTemporaryReference({ file, model }) {
+  const policy = await getDashScopeUploadPolicy(model)
+  const key = buildDashScopeUploadKey(policy.uploadDir, file.originalname)
+  await uploadFileToDashScope({ file, policy, key })
+
+  const expiresAtMs = Date.now() + 48 * 60 * 60 * 1000
+
+  return {
+    resourceRef: `oss://${key}`,
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    expiresAtMs,
+  }
+}
+
+async function getDashScopeUploadPolicy(model) {
+  const upstream = await requestDashScope({
+    method: 'GET',
+    path: '/api/v1/uploads',
+    query: {
+      action: 'getPolicy',
+      model,
+    },
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  })
+
+  const data = upstream.payload?.data
+  if (!data?.upload_dir || !data?.upload_host || !data?.policy || !data?.signature || !data?.oss_access_key_id) {
+    throw createHttpError(502, 'DashScope upload policy response is incomplete.', extractUpstreamTraceMetadata(upstream.response, upstream.payload))
+  }
+
+  return {
+    uploadDir: String(data.upload_dir),
+    uploadHost: String(data.upload_host),
+    policy: String(data.policy),
+    signature: String(data.signature),
+    ossAccessKeyId: String(data.oss_access_key_id),
+    objectAcl: String(data.x_oss_object_acl || 'private'),
+    forbidOverwrite: String(data.x_oss_forbid_overwrite || 'true'),
+    maxFileSizeMb: Number(data.max_file_size_mb || 0),
+  }
+}
+
+async function uploadFileToDashScope({ file, policy, key }) {
+  if (policy.maxFileSizeMb > 0 && file.size > policy.maxFileSizeMb * 1024 * 1024) {
+    throw createHttpError(400, `Reference file exceeds DashScope upload limit of ${policy.maxFileSizeMb}MB.`)
+  }
+
+  const fileBuffer = await fsp.readFile(file.path)
+  const formData = new FormData()
+  formData.append('OSSAccessKeyId', policy.ossAccessKeyId)
+  formData.append('policy', policy.policy)
+  formData.append('Signature', policy.signature)
+  formData.append('key', key)
+  formData.append('x-oss-object-acl', policy.objectAcl)
+  formData.append('x-oss-forbid-overwrite', policy.forbidOverwrite)
+  formData.append('success_action_status', '200')
+  formData.append(
+    'file',
+    new Blob([fileBuffer], { type: file.mimetype || 'application/octet-stream' }),
+    sanitizeDashScopeUploadFileName(file.originalname),
+  )
+
+  const response = await fetch(policy.uploadHost, {
+    method: 'POST',
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const message = (await response.text()) || 'DashScope temp file upload failed.'
+    throw createHttpError(response.status, message)
+  }
+}
+
+function buildDashScopeUploadKey(uploadDir, originalName) {
+  const safeName = sanitizeDashScopeUploadFileName(originalName)
+  return `${String(uploadDir || '').replace(/\/+$/, '')}/${randomUUID()}-${safeName}`
+}
+
+function sanitizeDashScopeUploadFileName(originalName) {
+  const parsed = path.parse(path.basename(String(originalName || '').trim()))
+  const baseName = (parsed.name || 'reference').replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'reference'
+  const extension = (parsed.ext || '').replace(/[^\w.]+/g, '')
+  return `${baseName.slice(0, 80)}${extension.slice(0, 16)}`
+}
+
+function parseUploadStorageBackend(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return 'local'
+  if (normalized === 'dashscope') return 'dashscope'
+  return 'local'
+}
+
+function normalizeDashScopeUploadModel(value) {
+  const normalized = String(value || '').trim()
+  return normalized || ''
+}
+
 function buildDashScopeWanGenerateRequest(input) {
   const providerId = String(input.providerId || 'wan1')
   if (providerId !== 'wan1') {
@@ -2060,6 +2200,7 @@ function buildDashScopeWanGenerateRequest(input) {
     method: 'POST',
     path: '/api/v1/services/aigc/video-generation/video-synthesis',
     async: true,
+    resolveOssResource: referenceUrls.some((item) => isDashScopeOssResource(item)),
     body: {
       model: String(params.model || 'wan2.6-r2v-flash'),
       input: {
@@ -2112,6 +2253,10 @@ function collectDashScopeWanReferenceUrls(references) {
   }
 
   return [...references.images, ...references.videos].slice(0, 5)
+}
+
+function isDashScopeOssResource(value) {
+  return typeof value === 'string' && value.startsWith('oss://')
 }
 
 function resolveDashScopeWanSize(params) {

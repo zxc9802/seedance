@@ -1204,9 +1204,10 @@ function validateKlingReferenceInput(provider, params, mode, references) {
 
 async function uploadVideoReferences(provider, params, references) {
   const imageMaterialType = resolveImageMaterialType(provider, params)
-  const images = await uploadReferenceBatch(references.images, { materialType: imageMaterialType })
-  const videos = await uploadReferenceBatch(references.videos)
-  const audios = await uploadReferenceBatch(references.audios)
+  const uploadOptions = resolveReferenceUploadOptions(provider, params)
+  const images = await uploadReferenceBatch(references.images, { materialType: imageMaterialType, ...uploadOptions })
+  const videos = await uploadReferenceBatch(references.videos, uploadOptions)
+  const audios = await uploadReferenceBatch(references.audios, uploadOptions)
   const orderedVisualRefs = [...images.items, ...videos.items]
     .sort((left, right) => left.order - right.order)
     .map((item) => item.resourceRef)
@@ -1231,6 +1232,12 @@ async function uploadReferenceBatch(assets, options = {}) {
   }
   if (options.materialType && options.materialType !== 'direct') {
     formData.append('materialType', options.materialType)
+  }
+  if (options.storageBackend) {
+    formData.append('storageBackend', options.storageBackend)
+  }
+  if (options.dashscopeModel) {
+    formData.append('dashscopeModel', options.dashscopeModel)
   }
 
   const response = await fetch('/api/upload', {
@@ -1261,6 +1268,20 @@ async function uploadReferenceBatch(assets, options = {}) {
 function resolveImageMaterialType(provider, params) {
   if (provider !== 'veo') return 'direct'
   return params.imageMaterialType || 'role'
+}
+
+function resolveReferenceUploadOptions(provider, params) {
+  if (!isWanProvider(provider)) {
+    return {}
+  }
+
+  const configuredModel = typeof params?.model === 'string' ? params.model.trim() : ''
+  const fallbackModel = PROVIDERS[provider]?.defaults?.model || 'wan2.6-r2v-flash'
+
+  return {
+    storageBackend: 'dashscope',
+    dashscopeModel: configuredModel || fallbackModel,
+  }
 }
 
 function createEmptyVideoReferences() {
