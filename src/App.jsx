@@ -1331,7 +1331,7 @@ async function resolvePreviewUrl(url) {
     && !contentType.includes('application/octet-stream')
   ) {
     const body = await response.text()
-    throw new Error(`预览内容类型异常: ${contentType || 'unknown'}${body ? `，返回内容：${body.slice(0, 120)}` : ''}`)
+    throw new Error(formatPreviewContentTypeError(contentType, body))
   }
 
   const blob = await response.blob()
@@ -1349,6 +1349,26 @@ async function resolvePreviewUrl(url) {
   }
 
   return URL.createObjectURL(blob)
+}
+
+function formatPreviewContentTypeError(contentType, body) {
+  const normalizedType = (contentType || 'unknown').toLowerCase()
+  const previewBody = typeof body === 'string' ? body.slice(0, 240) : ''
+  const normalizedBody = previewBody.toLowerCase()
+
+  if (
+    normalizedType.includes('text/html')
+    && normalizedBody.includes('cloudflare')
+    && (normalizedBody.includes('502') || normalizedBody.includes('5xx'))
+  ) {
+    return '预览地址返回了 Cloudflare 502 错误页，不是视频文件。通常是上游结果地址暂时不可用，或者后端拿错了预览地址。'
+  }
+
+  if (normalizedType.includes('text/html')) {
+    return '预览地址返回的是 HTML 网页，不是视频文件。通常是结果地址失效，或者后端拿错了预览地址。'
+  }
+
+  return `预览内容类型异常: ${normalizedType}${previewBody ? `，返回内容：${previewBody}` : ''}`
 }
 
 function normalizeTaskState(value) {

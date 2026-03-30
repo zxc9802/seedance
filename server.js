@@ -2340,10 +2340,11 @@ function normalizeDashScopeTaskStatus(value) {
 
 function extractDashScopeTaskMessage(payload) {
   return readFirstString(findFirstPathValue(payload, [
-    'message',
-    'msg',
     'output.message',
     'output.msg',
+    'output.code',
+    'message',
+    'msg',
     'error.message',
     'error',
     'data.message',
@@ -2352,22 +2353,24 @@ function extractDashScopeTaskMessage(payload) {
 }
 
 function extractDashScopeVideoUrl(payload) {
-  return (
-    findFirstMatchingPathValue(payload, [
-      'video_url',
-      'videoUrl',
-      'url',
-      'output.video_url',
-      'output.videoUrl',
-      'output.url',
-      'output.result_url',
-      'output.resultUrl',
-      'data.video_url',
-      'data.videoUrl',
-      'data.url',
-    ], isLikelyRemoteVideoUrl)
-    || findFirstMediaUrlDeep(payload)
-  )
+  return findFirstMatchingPathValue(payload, [
+    'output.video_url',
+    'output.videoUrl',
+    'output.result.video_url',
+    'output.result.videoUrl',
+    'output.results.0.video_url',
+    'output.results.0.videoUrl',
+    'output.results.0.url',
+    'output.file_infos.0.file_url',
+    'output.fileInfos.0.fileUrl',
+    'data.output.video_url',
+    'data.output.videoUrl',
+    'data.output.results.0.video_url',
+    'data.output.results.0.videoUrl',
+    'data.output.results.0.url',
+    'data.output.file_infos.0.file_url',
+    'data.output.fileInfos.0.fileUrl',
+  ], isLikelyRemoteVideoUrl)
 }
 
 function resolveBaseUrl(req) {
