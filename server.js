@@ -32,6 +32,7 @@ const videoApiBaseUrl = stripTrailingSlash(process.env.VIDEO_API_BASE_URL || 'ht
 const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const imageApiBaseUrl = normalizeOpenAiBaseUrl(process.env.IMAGE_API_BASE_URL || 'http://47.77.198.47:3001/v1')
 const yunwuApiBaseUrl = stripTrailingSlash(process.env.YUNWU_API_BASE_URL || 'https://yunwu.ai')
+const dashScopeBaseUrl = stripTrailingSlash(process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com')
 const materialThirdChannel = Number(process.env.MATERIAL_THIRD_CHANNEL || 1)
 const materialPollIntervalMs = Math.max(1000, Number(process.env.MATERIAL_POLL_INTERVAL_MS || 3000))
 const materialPollTimeoutMs = Math.max(materialPollIntervalMs, Number(process.env.MATERIAL_POLL_TIMEOUT_MS || 180000))
@@ -340,12 +341,31 @@ app.post('/api/veo/queryResult', async (req, res) => {
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
   }, ({ payload, traceMetadata }) => {
     const taskId = extractAggregationTaskId(payload) || normalizeTaskIdValue(req.body?.taskId)
+    const queryFailedMessage = payload?.success === false
+      ? (extractAggregationTerminalMessage(payload) || '查询任务状态失败')
+      : null
+
+    if (taskId && queryFailedMessage) {
+      updateUsageLogByTaskId(taskId, {
+        status: 'failed',
+        videoUrl: null,
+        errorMessage: queryFailedMessage,
+        completedAt: new Date().toISOString(),
+        upstreamRequestId: traceMetadata?.requestId || null,
+        upstreamTraceId: traceMetadata?.traceId || null,
+      }).catch(() => {})
+      return
+    }
+
     const finalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
+    const finalMessage = finalStatus && finalStatus !== 'succeeded'
+      ? extractAggregationTerminalMessage(payload)
+      : null
     if (!taskId || !finalStatus) return
     updateUsageLogByTaskId(taskId, {
       status: finalStatus,
       videoUrl: finalStatus === 'succeeded' ? extractAggregationVideoUrl(payload) : null,
-      errorMessage: finalStatus === 'failed' ? extractAggregationMessage(payload) : null,
+      errorMessage: finalMessage,
       completedAt: new Date().toISOString(),
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
@@ -487,6 +507,109 @@ app.post('/api/yunwu/query', async (req, res) => {
     res.status(statusCode).json({
       success: false,
       message: error.message || 'Yunwu query failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
+app.post('/api/wan/generate', async (req, res) => {
+  const missing = getMissingDashScopeConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  try {
+    const body = req.body || {}
+    const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
+    const requestSpec = buildDashScopeWanGenerateRequest(body)
+    const upstream = await requestDashScope(requestSpec)
+    const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
+    const normalized = normalizeYunwuGenerateResponse(upstream.payload, requestSpec, traceMetadata)
+
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'wan',
+      providerId: body.providerId || 'wan1',
+      model: body.params?.model || requestSpec.body?.model || null,
+      generationMode: body.mode || 'fusion',
+      prompt: body.prompt || null,
+      aspectRatio: body.params?.aspectRatio || null,
+      resolution: body.params?.resolution || null,
+      duration: body.params?.duration || null,
+      requestParams: attachUsageMediaSummary(body, mediaSummary),
+      engineTaskId: normalized.taskId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: `${dashScopeBaseUrl}${requestSpec.path}`,
+    }).catch(() => {})
+
+    applyUpstreamTraceHeaders(res, traceMetadata)
+    res.json({
+      success: true,
+      data: normalized,
+      ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+      ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'DashScope Wan generate failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
+app.post('/api/wan/query', async (req, res) => {
+  const missing = getMissingDashScopeConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  try {
+    const requestSpec = buildDashScopeWanQueryRequest(req.body || {})
+    const upstream = await requestDashScope(requestSpec)
+    const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
+    const normalized = normalizeYunwuQueryResponse(upstream.payload, requestSpec, traceMetadata)
+
+    if (normalized.status === 'succeeded' || normalized.status === 'failed') {
+      const taskId = normalized.taskId || req.body?.taskId
+      if (taskId) {
+        updateUsageLogByTaskId(taskId, {
+          status: normalized.status,
+          videoUrl: normalized.videoUrl || null,
+          errorMessage: normalized.status === 'failed' ? (normalized.message || null) : null,
+          completedAt: new Date().toISOString(),
+          upstreamRequestId: traceMetadata?.requestId || null,
+          upstreamTraceId: traceMetadata?.traceId || null,
+        }).catch(() => {})
+      }
+    }
+
+    applyUpstreamTraceHeaders(res, traceMetadata)
+    res.json({
+      success: true,
+      data: normalized,
+      ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+      ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'DashScope Wan query failed',
       ...(error.requestId ? { requestId: error.requestId } : {}),
       ...(error.traceId ? { traceId: error.traceId } : {}),
     })
@@ -716,67 +839,120 @@ function normalizeAggregationFinalStatus(value) {
 
   if (
     normalized === '3'
-    || normalized === '4'
     || normalized === 'failed'
     || normalized === 'failure'
     || normalized === 'error'
+  ) {
+    return 'failed'
+  }
+
+  if (
+    normalized === '4'
     || normalized === 'cancelled'
     || normalized === 'canceled'
   ) {
-    return 'failed'
+    return 'cancelled'
   }
 
   return null
 }
 
 function extractAggregationVideoUrl(payload) {
-  return readFirstString(findFirstPathValue(payload, [
-    'videoUrl',
-    'video_url',
-    'resultUrl',
-    'url',
-    'content',
-    'message',
-    'data.videoUrl',
-    'data.video_url',
-    'data.resultUrl',
-    'data.url',
-    'data.content',
-    'data.message',
-    'data.result.videoUrl',
-    'data.result.video_url',
-    'data.result.resultUrl',
-    'data.result.url',
-    'data.result.content',
-    'data.result.message',
-    'result.videoUrl',
-    'result.video_url',
-    'result.resultUrl',
-    'result.url',
-    'result.content',
-    'result.message',
-  ]))
+  return (
+    findFirstMatchingPathValue(payload, [
+      'videoUrl',
+      'video_url',
+      'resultUrl',
+      'url',
+      'content',
+      'message',
+      'data.videoUrl',
+      'data.video_url',
+      'data.resultUrl',
+      'data.url',
+      'data.content',
+      'data.message',
+      'data.result.videoUrl',
+      'data.result.video_url',
+      'data.result.resultUrl',
+      'data.result.url',
+      'data.result.content',
+      'data.result.message',
+      'result.videoUrl',
+      'result.video_url',
+      'result.resultUrl',
+      'result.url',
+      'result.content',
+      'result.message',
+    ], isLikelyRemoteVideoUrl)
+    || findFirstMediaUrlDeep(payload)
+  )
 }
 
-function extractAggregationMessage(payload) {
-  return readFirstString(findFirstPathValue(payload, [
-    'message',
-    'msg',
+function normalizeComparableMessageText(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[！!。.\s]+/g, '')
+}
+
+function isGenericSuccessMessage(value) {
+  const normalized = normalizeComparableMessageText(value)
+  if (!normalized) return false
+
+  return [
+    '操作成功',
+    '请求成功',
+    '调用成功',
+    'success',
+    'ok',
+  ].includes(normalized)
+}
+
+function extractAggregationTerminalMessage(payload) {
+  const preferredMessage = readFirstString(findFirstPathValue(payload, [
     'error',
     'errorMessage',
-    'data.message',
-    'data.msg',
+    'failureReason',
+    'failReason',
+    'reason',
     'data.error',
     'data.errorMessage',
-    'data.result.message',
-    'data.result.msg',
+    'data.failureReason',
+    'data.failReason',
+    'data.reason',
     'data.result.error',
     'data.result.errorMessage',
-    'result.message',
-    'result.msg',
+    'data.result.failureReason',
+    'data.result.failReason',
+    'data.result.reason',
+    'data.result.message',
+    'data.result.msg',
     'result.error',
     'result.errorMessage',
+    'result.failureReason',
+    'result.failReason',
+    'result.reason',
+    'result.message',
+    'result.msg',
   ]))
+
+  if (preferredMessage && !isGenericSuccessMessage(preferredMessage)) {
+    return preferredMessage
+  }
+
+  const fallbackMessage = readFirstString(findFirstPathValue(payload, [
+    'message',
+    'msg',
+    'data.message',
+    'data.msg',
+  ]))
+
+  if (fallbackMessage && !isGenericSuccessMessage(fallbackMessage)) {
+    return fallbackMessage
+  }
+
+  return null
 }
 
 function extractVeoFastReferenceCounts(normalizedBody) {
@@ -1094,6 +1270,187 @@ function getMissingYunwuConfig() {
   ].filter(Boolean)
 }
 
+const DASHSCOPE_WAN_SIZE_MAP = {
+  '720P': {
+    '16:9': '1280*720',
+    '9:16': '720*1280',
+    '1:1': '960*960',
+    '4:3': '1088*832',
+    '3:4': '832*1088',
+  },
+  '1080P': {
+    '16:9': '1920*1080',
+    '9:16': '1080*1920',
+    '1:1': '1440*1440',
+    '4:3': '1632*1248',
+    '3:4': '1248*1632',
+  },
+}
+
+function getMissingDashScopeConfig() {
+  return [
+    !process.env.DASHSCOPE_API_KEY && 'DASHSCOPE_API_KEY',
+  ].filter(Boolean)
+}
+
+function buildDashScopeWanGenerateRequest(input) {
+  const providerId = String(input.providerId || 'wan1')
+  if (providerId !== 'wan1') {
+    throw createHttpError(400, `Unsupported DashScope Wan provider: ${providerId || 'unknown'}`)
+  }
+
+  const prompt = String(input.prompt || '').trim()
+  if (!prompt) {
+    throw createHttpError(400, 'Prompt is required.')
+  }
+
+  const params = input.params && typeof input.params === 'object' ? input.params : {}
+  const references = normalizeDashScopeWanReferences(input.references)
+
+  if (references.images.length > 5) {
+    throw createHttpError(400, 'DashScope Wan supports at most 5 reference images.')
+  }
+
+  if (references.videos.length > 3) {
+    throw createHttpError(400, 'DashScope Wan supports at most 3 reference videos.')
+  }
+
+  if (references.images.length + references.videos.length > 5) {
+    throw createHttpError(400, 'DashScope Wan requires reference images and videos to total 5 or fewer items.')
+  }
+
+  const referenceUrls = collectDashScopeWanReferenceUrls(references)
+  if (referenceUrls.length === 0) {
+    throw createHttpError(400, 'At least one DashScope Wan reference image or video is required.')
+  }
+
+  const negativePrompt = typeof params.negativePrompt === 'string' ? params.negativePrompt.trim() : ''
+  const seed = normalizeDashScopeWanSeed(params.seed)
+
+  return {
+    method: 'POST',
+    path: '/api/v1/services/aigc/video-generation/video-synthesis',
+    async: true,
+    body: {
+      model: String(params.model || 'wan2.6-r2v-flash'),
+      input: {
+        prompt,
+        ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+        reference_urls: referenceUrls,
+      },
+      parameters: {
+        size: resolveDashScopeWanSize(params),
+        duration: resolveDashScopeWanDuration(params),
+        shot_type: resolveDashScopeWanShotType(params),
+        audio: Boolean(params.generateAudio),
+        watermark: Boolean(params.watermark),
+        ...(seed !== null ? { seed } : {}),
+      },
+    },
+  }
+}
+
+function buildDashScopeWanQueryRequest(input) {
+  const providerId = String(input.providerId || 'wan1')
+  if (providerId !== 'wan1') {
+    throw createHttpError(400, `Unsupported DashScope Wan provider: ${providerId || 'unknown'}`)
+  }
+
+  const taskId = String(input.taskId || '').trim()
+  if (!taskId) {
+    throw createHttpError(400, 'taskId is required.')
+  }
+
+  return {
+    method: 'GET',
+    path: `/api/v1/tasks/${encodeURIComponent(taskId)}`,
+  }
+}
+
+function normalizeDashScopeWanReferences(references) {
+  return {
+    images: Array.isArray(references?.images) ? references.images.filter((item) => typeof item === 'string' && item) : [],
+    videos: Array.isArray(references?.videos) ? references.videos.filter((item) => typeof item === 'string' && item) : [],
+    orderedVisualRefs: Array.isArray(references?.orderedVisualRefs)
+      ? references.orderedVisualRefs.filter((item) => typeof item === 'string' && item)
+      : [],
+  }
+}
+
+function collectDashScopeWanReferenceUrls(references) {
+  const ordered = references.orderedVisualRefs.slice(0, 5)
+  if (ordered.length > 0) {
+    return ordered
+  }
+
+  return [...references.images, ...references.videos].slice(0, 5)
+}
+
+function resolveDashScopeWanSize(params) {
+  const explicitSize = normalizeDashScopeWanSize(params?.size)
+  if (explicitSize) {
+    return explicitSize
+  }
+
+  const resolution = String(params?.resolution || '720P').trim().toUpperCase()
+  const aspectRatio = String(params?.aspectRatio || '16:9').trim()
+  const size = DASHSCOPE_WAN_SIZE_MAP[resolution]?.[aspectRatio]
+
+  if (!size) {
+    throw createHttpError(400, `Unsupported DashScope Wan size mapping: ${resolution} / ${aspectRatio}`)
+  }
+
+  return size
+}
+
+function normalizeDashScopeWanSize(value) {
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  const normalized = value.trim()
+  if (!normalized) {
+    return null
+  }
+
+  for (const sizes of Object.values(DASHSCOPE_WAN_SIZE_MAP)) {
+    if (Object.values(sizes).includes(normalized)) {
+      return normalized
+    }
+  }
+
+  throw createHttpError(400, `Unsupported DashScope Wan size: ${normalized}`)
+}
+
+function resolveDashScopeWanDuration(params) {
+  const duration = Math.trunc(coercePositiveNumber(params?.duration, 5))
+  if (duration < 2 || duration > 10) {
+    throw createHttpError(400, 'DashScope Wan duration must be an integer between 2 and 10 seconds.')
+  }
+  return duration
+}
+
+function resolveDashScopeWanShotType(params) {
+  const shotType = String(params?.shotType || 'single').trim().toLowerCase()
+  if (shotType !== 'single' && shotType !== 'multi') {
+    throw createHttpError(400, `Unsupported DashScope Wan shot_type: ${shotType}`)
+  }
+  return shotType
+}
+
+function normalizeDashScopeWanSeed(value) {
+  if (value === null || value === undefined || value === '') {
+    return null
+  }
+
+  const seed = Math.trunc(Number(value))
+  if (!Number.isFinite(seed) || seed < 0 || seed > 2147483647) {
+    throw createHttpError(400, 'DashScope Wan seed must be an integer between 0 and 2147483647.')
+  }
+
+  return seed
+}
+
 function getYunwuProviderConfig(providerId) {
   return YUNWU_VIDEO_PROVIDERS[providerId] || null
 }
@@ -1376,6 +1733,62 @@ async function requestYunwu(spec) {
   return { response, payload }
 }
 
+async function requestDashScope(spec) {
+  const url = appendQueryParams(`${dashScopeBaseUrl}${spec.path}`, spec.query)
+  const headers = {
+    Accept: 'application/json',
+    Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY}`,
+  }
+
+  if (spec.async) {
+    headers['X-DashScope-Async'] = 'enable'
+  }
+
+  if (spec.body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+  }
+
+  const options = {
+    method: spec.method || 'POST',
+    headers,
+    body: spec.body !== undefined ? JSON.stringify(spec.body) : undefined,
+  }
+
+  let response
+  let lastError = null
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await fetch(url, options)
+      break
+    } catch (error) {
+      lastError = error
+      if (attempt === 2) {
+        throw createHttpError(502, error?.message || 'DashScope upstream fetch failed.')
+      }
+      await sleep(800 * (attempt + 1))
+    }
+  }
+
+  if (!response) {
+    throw createHttpError(502, lastError?.message || 'DashScope upstream fetch failed.')
+  }
+
+  const contentType = response.headers.get('content-type') || ''
+  const payload = isJsonContentType(contentType)
+    ? await response.json()
+    : await response.text()
+  const traceMetadata = extractUpstreamTraceMetadata(response, payload)
+
+  if (!response.ok) {
+    const message = typeof payload === 'string'
+      ? payload
+      : payload?.message || payload?.msg || payload?.error?.message || JSON.stringify(payload)
+    throw createHttpError(response.status, message || 'DashScope upstream request failed.', traceMetadata)
+  }
+
+  return { response, payload }
+}
+
 function normalizeYunwuGenerateResponse(payload, requestSpec, traceMetadata) {
   return {
     taskId: extractYunwuTaskId(payload),
@@ -1555,6 +1968,8 @@ function extractYunwuTaskId(payload) {
     'taskId',
     'task_id',
     'id',
+    'output.taskId',
+    'output.task_id',
     'data.taskId',
     'data.task_id',
     'data.id',
@@ -1578,6 +1993,9 @@ function extractYunwuStatus(payload) {
       'status',
       'state',
       'task_status',
+      'output.status',
+      'output.state',
+      'output.task_status',
       'detail.status',
       'detail.state',
       'detail.task_status',
@@ -1596,6 +2014,8 @@ function extractYunwuMessage(payload) {
   const message = findFirstPathValue(payload, [
     'message',
     'msg',
+    'output.message',
+    'output.msg',
     'error.message',
     'error',
     'detail.error_message',
@@ -1630,41 +2050,38 @@ function extractYunwuMessage(payload) {
 }
 
 function extractYunwuVideoUrl(payload) {
-  const directValue = findFirstPathValue(payload, [
-    'videoUrl',
-    'video_url',
-    'url',
-    'content',
-    'data.videoUrl',
-    'data.video_url',
-    'data.url',
-    'data.content',
-    'data.output.video_url',
-    'data.output.url',
-    'data.result.video_url',
-    'data.result.videoUrl',
-    'data.result.url',
-    'data.file.download_url',
-    'data.data.file.download_url',
-    'output.video_url',
-    'output.url',
-    'result.video_url',
-    'result.videoUrl',
-    'result.url',
-    'assets.video',
-    'assets.video.url',
-    'data.assets.video',
-    'data.assets.video.url',
-    'video.url',
-    'Response.AigcVideoResult.Output.FileInfos.0.FileUrl',
-    'Response.AigcVideoTask.Output.FileInfos.0.FileUrl',
-  ])
-
-  if (typeof directValue === 'string' && /^https?:\/\//i.test(directValue)) {
-    return directValue
-  }
-
-  return findFirstMediaUrlDeep(payload)
+  return (
+    findFirstMatchingPathValue(payload, [
+      'videoUrl',
+      'video_url',
+      'url',
+      'content',
+      'data.videoUrl',
+      'data.video_url',
+      'data.url',
+      'data.content',
+      'data.output.video_url',
+      'data.output.url',
+      'data.result.video_url',
+      'data.result.videoUrl',
+      'data.result.url',
+      'data.file.download_url',
+      'data.data.file.download_url',
+      'output.video_url',
+      'output.url',
+      'result.video_url',
+      'result.videoUrl',
+      'result.url',
+      'assets.video',
+      'assets.video.url',
+      'data.assets.video',
+      'data.assets.video.url',
+      'video.url',
+      'Response.AigcVideoResult.Output.FileInfos.0.FileUrl',
+      'Response.AigcVideoTask.Output.FileInfos.0.FileUrl',
+    ], isLikelyRemoteVideoUrl)
+    || findFirstMediaUrlDeep(payload)
+  )
 }
 
 function normalizeYunwuStatus(value) {
@@ -1681,7 +2098,7 @@ function normalizeYunwuStatus(value) {
     return 'succeeded'
   }
 
-  if (['failed', 'failure', 'error', 'rejected', 'canceled', 'cancelled'].includes(normalized)) {
+  if (['failed', 'failure', 'error', 'rejected', 'canceled', 'cancelled', 'unknown'].includes(normalized)) {
     return 'failed'
   }
 
@@ -1727,21 +2144,22 @@ function getPathValue(target, pathExpression) {
   return current
 }
 
-function findFirstMediaUrlDeep(target, depth = 0) {
+function findFirstMediaUrlDeep(target, depth = 0, keyPath = '') {
   if (!target || depth > 6) {
     return null
   }
 
   if (typeof target === 'string') {
-    if (/^https?:\/\//i.test(target) && /\.(mp4|mov|webm|m3u8)(\?|$)/i.test(target)) {
-      return target
-    }
-    return null
+    return isLikelyRemoteVideoUrl(target, keyPath) ? target.trim() : null
   }
 
   if (Array.isArray(target)) {
-    for (const item of target) {
-      const match = findFirstMediaUrlDeep(item, depth + 1)
+    for (let index = 0; index < target.length; index += 1) {
+      const match = findFirstMediaUrlDeep(
+        target[index],
+        depth + 1,
+        keyPath ? `${keyPath}.${index}` : String(index),
+      )
       if (match) {
         return match
       }
@@ -1751,16 +2169,12 @@ function findFirstMediaUrlDeep(target, depth = 0) {
 
   if (typeof target === 'object') {
     for (const [key, value] of Object.entries(target)) {
-      if (typeof value === 'string' && /^https?:\/\//i.test(value)) {
-        if (
-          /\.(mp4|mov|webm|m3u8)(\?|$)/i.test(value)
-          || /video|download|fileurl|content/i.test(key)
-        ) {
-          return value
-        }
+      const nextKeyPath = keyPath ? `${keyPath}.${key}` : key
+      if (typeof value === 'string' && isLikelyRemoteVideoUrl(value, nextKeyPath)) {
+        return value.trim()
       }
 
-      const nestedMatch = findFirstMediaUrlDeep(value, depth + 1)
+      const nestedMatch = findFirstMediaUrlDeep(value, depth + 1, nextKeyPath)
       if (nestedMatch) {
         return nestedMatch
       }
@@ -1768,6 +2182,49 @@ function findFirstMediaUrlDeep(target, depth = 0) {
   }
 
   return null
+}
+
+function findFirstMatchingPathValue(target, paths, predicate) {
+  for (const path of paths) {
+    const value = getPathValue(target, path)
+    if (predicate(value, path)) {
+      return value.trim()
+    }
+  }
+
+  return null
+}
+
+function isLikelyRemoteVideoUrl(value, keyPath = '') {
+  if (typeof value !== 'string') {
+    return false
+  }
+
+  const normalized = value.trim()
+  if (!/^https?:\/\//i.test(normalized)) {
+    return false
+  }
+
+  try {
+    const parsed = new URL(normalized)
+    const searchable = `${parsed.pathname}${parsed.search}`.toLowerCase()
+    if (/\.(mp4|mov|webm|m3u8)(\?|$)/i.test(searchable)) {
+      return true
+    }
+
+    const normalizedKeyPath = keyPath.toLowerCase().replace(/[^a-z]/g, '')
+    if (/(videourl|downloadurl|download|fileurl|resulturl|outputurl|playurl|videofile)/.test(normalizedKeyPath)) {
+      return true
+    }
+
+    if (/\/(video|videos|download|downloads|file|files|play)\b/i.test(parsed.pathname)) {
+      return true
+    }
+  } catch {
+    return false
+  }
+
+  return false
 }
 
 function appendQueryParams(url, query) {

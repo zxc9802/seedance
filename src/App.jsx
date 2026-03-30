@@ -26,6 +26,10 @@ function isKlingProvider(id) {
   return id === 'kling'
 }
 
+function isWanProvider(id) {
+  return PROVIDERS[id]?.backendKind === 'dashscope-wan'
+}
+
 function isYunwuProvider(id) {
   return PROVIDERS[id]?.backendKind === 'yunwu'
 }
@@ -89,7 +93,7 @@ function App() {
   const currentState = providerState[provider] || { generating: false, progress: 0, videoUrl: null, error: null }
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
   const maxImages = resolveImageLimit(config, generationMode, videoReferences)
-  const maxVideos = resolveLimit(config.maxReferenceVideos, generationMode)
+  const maxVideos = resolveVideoLimit(config, generationMode, videoReferences)
   const maxAudios = resolveLimit(config.maxReferenceAudios, generationMode)
 
   const updateParam = useCallback((key, value) => {
@@ -337,6 +341,84 @@ function App() {
                 || pollData?.message
                 || '视频生成失败',
             )
+          }
+        }
+      } else if (isWanProvider(provider)) {
+        const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
+        if (uploadedReferences.requiresPublicBaseUrl) {
+          /*
+          throw new Error('鍙傝€冪礌鏉愬凡缁忎笂浼犲埌鏈湴鍚庣锛屼絾褰撳墠鍚庣鍦板潃涓嶆槸鍏綉鍙闂湴鍧€銆傝閮ㄧ讲鍚庣鍒板叕缃戯紝鎴栬缃?PUBLIC_BASE_URL 鎸囧悜鍏綉鍩熷悕/闅ч亾銆?)
+          */
+          throw new Error('Reference assets were uploaded locally, but the backend is not reachable from the public internet. Set PUBLIC_BASE_URL to a public host before using DashScope Wan references.')
+        }
+
+        const requestInfo = buildWanVideoRequest(provider, params, finalPrompt, generationMode, uploadedReferences)
+        updateProviderState(provider, { progress: 18 })
+
+        const response = await fetch(requestInfo.url, {
+          method: 'POST',
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
+          body: JSON.stringify(requestInfo.body),
+        })
+
+        if (!response.ok) {
+          throw new Error(await formatHttpError(response))
+        }
+
+        const data = await response.json()
+        if (!data?.success) {
+          throw new Error(data?.message || '瑙嗛鐢熸垚璇锋眰澶辫触')
+        }
+
+        const initialTask = normalizeYunwuTask(data?.data)
+        if (initialTask.videoUrl) {
+          window.clearInterval(progressTimer)
+          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl)
+          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          return
+        }
+
+        if (!initialTask.taskId) {
+          throw new Error('鎺ュ彛宸插搷搴旓紝浣嗘病鏈夎繑鍥?taskId')
+        }
+
+        let finished = false
+        while (!finished) {
+          await sleep(5000)
+          const pollRequest = buildWanQueryRequest(provider, initialTask.taskId)
+          const pollResponse = await fetch(pollRequest.url, {
+            method: 'POST',
+            headers: pollRequest.headers,
+            body: JSON.stringify(pollRequest.body),
+          })
+
+          if (!pollResponse.ok) {
+            throw new Error(await formatHttpError(pollResponse))
+          }
+
+          const pollData = await pollResponse.json()
+          if (!pollData?.success) {
+            /*
+            throw new Error(pollData?.message || '鏌ヨ浠诲姟鐘舵€佸け璐?)
+            */
+            throw new Error(pollData?.message || 'Failed to query Wan task status')
+          }
+
+          const task = normalizeYunwuTask(pollData.data)
+          const state = normalizeTaskState(task.status)
+          if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
+            finished = true
+            window.clearInterval(progressTimer)
+            const previewUrl = await resolvePreviewUrl(task.videoUrl)
+            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            return
+          }
+
+          if (state === 'failed') {
+            /*
+            throw new Error(task.message || '瑙嗛鐢熸垚澶辫触')
+            */
+            throw new Error(task.message || 'Wan video generation failed')
           }
         }
       } else if (isYunwuProvider(provider)) {
@@ -621,6 +703,13 @@ function mergeProviderRuntimeState(currentState, updates) {
   return next
 }
 
+let videoAssetOrderCounter = 0
+
+function nextVideoAssetOrder() {
+  videoAssetOrderCounter += 1
+  return Date.now() * 1000 + videoAssetOrderCounter
+}
+
 function serializeVideoReferences(references) {
   return {
     images: serializeVideoAssetList(references?.images),
@@ -636,6 +725,7 @@ function serializeVideoAssetList(list) {
     .filter((asset) => asset?.file)
     .map((asset) => ({
       id: asset.id,
+      order: asset.order,
       name: asset.name,
       size: asset.size,
       mimeType: asset.mimeType,
@@ -730,6 +820,7 @@ function hydrateVideoAsset(asset) {
 
   return {
     id: asset.id || crypto.randomUUID(),
+    order: typeof asset.order === 'number' ? asset.order : nextVideoAssetOrder(),
     file,
     name: asset.name || file.name,
     size: asset.size ?? file.size,
@@ -999,6 +1090,26 @@ function buildYunwuVideoRequest(provider, params, prompt, mode, references) {
   }
 }
 
+function buildWanVideoRequest(provider, params, prompt, mode, references) {
+  return {
+    url: '/api/wan/generate',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      prompt,
+      mode,
+      params: {
+        ...params,
+        generateAudio: Boolean(params.generateAudio),
+        watermark: Boolean(params.watermark),
+      },
+      references,
+    },
+  }
+}
+
 function buildYunwuQueryRequest(provider, taskId, queryContext) {
   return {
     url: '/api/yunwu/query',
@@ -1009,6 +1120,19 @@ function buildYunwuQueryRequest(provider, taskId, queryContext) {
       providerId: provider,
       taskId,
       queryContext,
+    },
+  }
+}
+
+function buildWanQueryRequest(provider, taskId) {
+  return {
+    url: '/api/wan/query',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      taskId,
     },
   }
 }
@@ -1167,13 +1291,25 @@ function resolveLimit(limitConfig, mode) {
 
 function resolveImageLimit(config, mode, references) {
   const baseLimit = resolveLimit(config?.maxReferenceImages, mode)
+  if (config?.id === 'wan1') {
+    return Math.max(0, Math.min(baseLimit, 5 - (references?.videos?.length || 0)))
+  }
   if (config?.id === 'kling' && mode === 'fusion' && references?.videos?.length > 0) {
     return Math.min(baseLimit, 4)
   }
   return baseLimit
 }
 
+function resolveVideoLimit(config, mode, references) {
+  const baseLimit = resolveLimit(config?.maxReferenceVideos, mode)
+  if (config?.id === 'wan1') {
+    return Math.max(0, Math.min(baseLimit, 5 - (references?.images?.length || 0)))
+  }
+  return baseLimit
+}
+
 function validateVideoReferenceInput(provider, params, mode, references) {
+  const wanValidationError = validateWanReferenceInput(provider, mode, references)
   const klingValidationError = validateKlingReferenceInput(provider, params, mode, references)
   if (mode === 't2v') return null
   if (mode === 'i2v' && references.images.length !== 1) return '图生视频模式需要 1 张参考图片'
@@ -1201,7 +1337,33 @@ function validateVideoReferenceInput(provider, params, mode, references) {
     }
   }
 
+  if (wanValidationError) {
+    return wanValidationError
+  }
+
   return klingValidationError
+}
+
+function validateWanReferenceInput(provider, mode, references) {
+  if (!isWanProvider(provider) || mode !== 'fusion') return null
+
+  const imageCount = references.images.length
+  const videoCount = references.videos.length
+  const totalVisualCount = imageCount + videoCount
+
+  if (videoCount > 3) {
+    return '\u4e07\u8c61\u53c2\u8003\u89c6\u9891\u6700\u591a 3 \u6bb5'
+  }
+
+  if (imageCount > 5) {
+    return '\u4e07\u8c61\u53c2\u8003\u56fe\u7247\u6700\u591a 5 \u5f20'
+  }
+
+  if (totalVisualCount > 5) {
+    return '\u4e07\u8c61\u53c2\u8003\u56fe\u7247\u548c\u89c6\u9891\u603b\u6570\u4e0d\u80fd\u8d85\u8fc7 5 \u4e2a'
+  }
+
+  return null
 }
 
 function validateKlingReferenceInput(provider, params, mode, references) {
@@ -1245,18 +1407,22 @@ async function uploadVideoReferences(provider, params, references) {
   const images = await uploadReferenceBatch(references.images, { materialType: imageMaterialType })
   const videos = await uploadReferenceBatch(references.videos)
   const audios = await uploadReferenceBatch(references.audios)
+  const orderedVisualRefs = [...images.items, ...videos.items]
+    .sort((left, right) => left.order - right.order)
+    .map((item) => item.resourceRef)
 
   return {
     images: images.resourceRefs,
     videos: videos.resourceRefs,
     audios: audios.resourceRefs,
+    orderedVisualRefs,
     requiresPublicBaseUrl: images.requiresPublicBaseUrl || videos.requiresPublicBaseUrl || audios.requiresPublicBaseUrl,
   }
 }
 
 async function uploadReferenceBatch(assets, options = {}) {
   if (!assets.length) {
-    return { resourceRefs: [], requiresPublicBaseUrl: false }
+    return { resourceRefs: [], items: [], requiresPublicBaseUrl: false }
   }
 
   const formData = new FormData()
@@ -1283,6 +1449,11 @@ async function uploadReferenceBatch(assets, options = {}) {
 
   return {
     resourceRefs: data.files.map((file) => file.resourceRef || file.url),
+    items: data.files.map((file, index) => ({
+      assetId: assets[index]?.id || null,
+      order: typeof assets[index]?.order === 'number' ? assets[index].order : index,
+      resourceRef: file.resourceRef || file.url,
+    })),
     requiresPublicBaseUrl: data.publiclyReachable === false,
   }
 }
@@ -1373,6 +1544,9 @@ function normalizeTaskState(value) {
     case 'failed':
     case 'failure':
     case 'error':
+    case 'canceled':
+    case 'cancelled':
+    case 'unknown':
       return 'failed'
     default:
       return normalized

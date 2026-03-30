@@ -225,6 +225,73 @@ const BASE_PROVIDERS = {
     },
     referenceHelpText: '参考模式最多上传 7 张图片；如果带参考视频，图片最多 4 张且仅支持无声。参考视频仅支持 1 段 MP4/MOV，时长不少于 3 秒，文件不超过 200MB。',
   },
+  wan1: {
+    id: 'wan1',
+    typeId: 'wan',
+    typeLabel: '\u4e07\u8c61',
+    selectorLabel: 'wan1',
+    name: '\u4e07\u8c61',
+    vendor: 'DashScope',
+    color: '#0ea5e9',
+    models: [
+      { value: 'wan2.6-r2v-flash', label: 'Wan 2.6 R2V Flash', tag: 'DashScope' },
+    ],
+    aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4'],
+    resolutions: {
+      default: ['720P'],
+    },
+    durations: [2, 3, 4, 5, 6, 7, 8, 9, 10],
+    sampleCounts: [1],
+    features: {
+      generateAudio: true,
+      negativePrompt: true,
+      referenceImage: true,
+      referenceVideo: true,
+      referenceAudio: false,
+      watermark: true,
+      shotType: true,
+    },
+    generationModes: [
+      { value: 'fusion', label: '\u89d2\u8272\u53c2\u8003' },
+    ],
+    referenceInputMode: 'url',
+    maxReferenceImages: {
+      fusion: 5,
+    },
+    maxReferenceVideos: {
+      fusion: 3,
+    },
+    defaults: {
+      model: 'wan2.6-r2v-flash',
+      aspectRatio: '16:9',
+      resolution: '720P',
+      duration: 5,
+      sampleCount: 1,
+      generateAudio: true,
+      watermark: false,
+      shotType: 'single',
+      negativePrompt: '',
+    },
+    shotTypeOptions: [
+      { value: 'single', label: '\u5355\u955c\u5934' },
+      { value: 'multi', label: '\u591a\u955c\u5934' },
+    ],
+    imageMimeTypes: ['image/jpeg', 'image/png', 'image/webp', 'image/bmp'],
+    imageMimeTypeLabel: 'JPG/JPEG\u3001PNG\u3001WebP\u3001BMP',
+    imageMaxSizeMb: 10,
+    imageValidation: {
+      minWidth: 240,
+      minHeight: 240,
+    },
+    videoMimeTypes: ['video/mp4', 'video/quicktime'],
+    videoMimeTypeLabel: 'MP4\u3001MOV',
+    videoMaxSizeMb: 100,
+    videoValidation: {
+      minDurationSec: 1,
+    },
+    referenceHelpText: '\u89d2\u8272\u7ed1\u5b9a\u987a\u5e8f\u4f1a\u6309\u7167\u56fe\u7247/\u89c6\u9891\u7684\u6dfb\u52a0\u987a\u5e8f\u751f\u6548\uff0c\u8bf7\u6309 character1\u3001character2 \u9700\u8981\u7684\u987a\u5e8f\u4e0a\u4f20\u53c2\u8003\u7d20\u6750\u3002',
+    backendKind: 'dashscope-wan',
+  },
   'gemini-image': {
     id: 'gemini-image',
     typeId: 'image',
@@ -298,7 +365,7 @@ export const PROVIDERS = {
   ...YUNWU_PROVIDERS,
 }
 
-const BASE_PROVIDER_ORDER = ['veo', 've31p', 'veo31fast', 'kling', 'gemini-image']
+const BASE_PROVIDER_ORDER = ['veo', 've31p', 'veo31fast', 'kling', 'wan1', 'gemini-image']
 
 export const PROVIDER_ORDER = [...BASE_PROVIDER_ORDER, ...YUNWU_PROVIDER_ORDER]
 
