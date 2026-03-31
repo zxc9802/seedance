@@ -1146,20 +1146,117 @@ function summarizeImageResponseShape(data) {
 }
 
 function extractImageTextFailureMessage(data) {
+  const candidates = []
   const content = data?.choices?.[0]?.message?.content
   if (typeof content === 'string') {
-    const trimmed = content.trim()
-    if (
-      trimmed
-      && !trimmed.startsWith('data:image/')
-      && !/!\[[^\]]*]\((?:data:image\/|https?:\/\/)/.test(trimmed)
-      && !/https?:\/\/[^\s"'`<>)]+/i.test(trimmed)
-    ) {
-      return trimmed.slice(0, 300)
+    candidates.push(content)
+  } else if (Array.isArray(content)) {
+    for (const item of content) {
+      if (typeof item?.text === 'string') {
+        candidates.push(item.text)
+      }
+    }
+  }
+
+  const messageParts = data?.choices?.[0]?.message?.parts
+  if (Array.isArray(messageParts)) {
+    for (const part of messageParts) {
+      if (typeof part?.text === 'string') {
+        candidates.push(part.text)
+      }
+    }
+  }
+
+  const geminiCandidates = Array.isArray(data?.candidates) ? data.candidates : []
+  for (const candidate of geminiCandidates) {
+    const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : []
+    for (const part of parts) {
+      if (typeof part?.text === 'string') {
+        candidates.push(part.text)
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    const normalizedMessage = normalizeImageTextFailureMessage(candidate)
+    if (normalizedMessage) {
+      return normalizedMessage
     }
   }
 
   return null
+}
+
+function normalizeImageTextFailureMessage(content) {
+  if (typeof content !== 'string') {
+    return null
+  }
+
+  const trimmed = content.trim()
+  if (!trimmed || isLikelyInlineImageText(trimmed)) {
+    return null
+  }
+
+  const collapsed = trimmed.replace(/\s+/g, ' ').trim()
+  if (!collapsed) {
+    return null
+  }
+
+  if (looksLikeHtmlErrorText(collapsed)) {
+    return 'Image upstream returned an HTML error page instead of image data. Check IMAGE_API_BASE_URL, upstream routing, or host status.'
+  }
+
+  return collapsed.slice(0, 300)
+}
+
+function isLikelyInlineImageText(content) {
+  if (typeof content !== 'string') {
+    return false
+  }
+
+  const trimmed = content.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  if (trimmed.startsWith('data:image/')) {
+    return true
+  }
+
+  const markdownMatch = trimmed.match(/!\[[^\]]*]\(([^)]+)\)/s)
+  if (markdownMatch?.[1]) {
+    return isLikelyImageTextUrl(markdownMatch[1])
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return isLikelyImageTextUrl(trimmed)
+  }
+
+  return false
+}
+
+function isLikelyImageTextUrl(url) {
+  if (typeof url !== 'string') {
+    return false
+  }
+
+  const trimmed = url.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  if (trimmed.startsWith('data:image/')) {
+    return true
+  }
+
+  return isLikelyRemoteImageUrl(trimmed)
+}
+
+function looksLikeHtmlErrorText(content) {
+  return (
+    /<(?:!doctype|html|head|body|div|span|title)\b/i.test(content)
+    || /(?:class=|cf-error-|host error|cloudflare|working<\/span>)/i.test(content)
+  )
 }
 
 function normalizeExtractedImageUrl(url) {
@@ -1206,6 +1303,9 @@ async function fetchRemoteImageAsDataUrl(url) {
 
   const buffer = Buffer.from(await response.arrayBuffer())
   const mimeType = resolveFetchedImageMimeType(response.headers.get('content-type'), url)
+  if (!mimeType) {
+    throw new Error('Generated asset URL did not return an image')
+  }
   return `data:${mimeType};base64,${buffer.toString('base64')}`
 }
 
@@ -1213,8 +1313,8 @@ function resolveFetchedImageMimeType(contentType, url) {
   const normalizedType = typeof contentType === 'string'
     ? contentType.split(';')[0].trim().toLowerCase()
     : ''
-  if (normalizedType.startsWith('image/')) {
-    return normalizedType
+  if (normalizedType) {
+    return normalizedType.startsWith('image/') ? normalizedType : null
   }
 
   try {
@@ -1232,10 +1332,10 @@ function resolveFetchedImageMimeType(contentType, url) {
       return 'image/png'
     }
   } catch {
-    // Ignore malformed URLs and fall back to PNG.
+    return null
   }
 
-  return 'image/png'
+  return null
 }
 
 function injectCanonicalImageResult(payload, imageResult) {
@@ -1349,7 +1449,7 @@ function extractImageUrlFromString(content, fallbackPrompt = '') {
   }
 
   const urlMatch = trimmed.match(/https?:\/\/[^\s"'`<>)]+/i)
-  if (urlMatch) {
+  if (urlMatch && isLikelyImageTextUrl(urlMatch[0])) {
     return {
       url: normalizeExtractedImageUrl(urlMatch[0]),
       revisedPrompt: fallbackPrompt,
@@ -1417,8 +1517,16 @@ function extractImageRecord(record, fallbackPrompt = '') {
 
   if (typeof record.url === 'string' && record.url) {
     const parsedUrl = extractImageUrlFromString(record.url, fallbackPrompt)
+    const normalizedUrl = parsedUrl?.url || (
+      isLikelyImageTextUrl(record.url)
+        ? normalizeExtractedImageUrl(record.url)
+        : null
+    )
+    if (!normalizedUrl) {
+      return null
+    }
     return {
-      url: parsedUrl?.url || normalizeExtractedImageUrl(record.url),
+      url: normalizedUrl,
       revisedPrompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
     }
   }

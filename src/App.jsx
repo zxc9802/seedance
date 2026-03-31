@@ -2459,6 +2459,11 @@ function buildImageResponseParseError(data) {
     return '图片接口返回的是网关状态，而不是模型生成结果。请检查部署路由是否把 /api/image/generate-content 转发到了本站后端，并确认 IMAGE_API_BASE_URL 填的是上游基础地址（例如 https://example.com），不要填当前站点地址，也不要重复带上 /v1beta/models/...:generateContent。'
   }
 
+  const textFailureMessage = extractImageTextFailureMessage(data)
+  if (textFailureMessage) {
+    return textFailureMessage
+  }
+
   const summary = summarizeImageResponseShape(data)
   if (!summary) {
     return '图片生成已完成，但没有在响应中找到图片数据'
@@ -2544,6 +2549,138 @@ function normalizeParsedImageUrl(url) {
     : trimmed
 }
 
+function extractImageTextFailureMessage(data) {
+  const candidates = []
+  const content = data?.choices?.[0]?.message?.content
+  if (typeof content === 'string') {
+    candidates.push(content)
+  } else if (Array.isArray(content)) {
+    for (const item of content) {
+      if (typeof item?.text === 'string') {
+        candidates.push(item.text)
+      }
+    }
+  }
+
+  const messageParts = data?.choices?.[0]?.message?.parts
+  if (Array.isArray(messageParts)) {
+    for (const part of messageParts) {
+      if (typeof part?.text === 'string') {
+        candidates.push(part.text)
+      }
+    }
+  }
+
+  const geminiCandidates = Array.isArray(data?.candidates) ? data.candidates : []
+  for (const candidate of geminiCandidates) {
+    const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : []
+    for (const part of parts) {
+      if (typeof part?.text === 'string') {
+        candidates.push(part.text)
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    const normalizedMessage = normalizeImageTextFailureMessage(candidate)
+    if (normalizedMessage) {
+      return normalizedMessage
+    }
+  }
+
+  return null
+}
+
+function normalizeImageTextFailureMessage(content) {
+  if (typeof content !== 'string') {
+    return null
+  }
+
+  const trimmed = content.trim()
+  if (!trimmed || isLikelyInlineImageText(trimmed)) {
+    return null
+  }
+
+  const collapsed = trimmed.replace(/\s+/g, ' ').trim()
+  if (!collapsed) {
+    return null
+  }
+
+  if (looksLikeHtmlErrorText(collapsed)) {
+    return '上游返回的是 HTML 报错页，不是图片数据。请检查 IMAGE_API_BASE_URL、上游路由或站点状态。'
+  }
+
+  return collapsed.slice(0, 300)
+}
+
+function isLikelyInlineImageText(content) {
+  if (typeof content !== 'string') {
+    return false
+  }
+
+  const trimmed = content.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  if (trimmed.startsWith('data:image/')) {
+    return true
+  }
+
+  const markdownMatch = trimmed.match(/!\[[^\]]*]\(([^)]+)\)/s)
+  if (markdownMatch?.[1]) {
+    return isLikelyImageTextUrl(markdownMatch[1])
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return isLikelyImageTextUrl(trimmed)
+  }
+
+  return false
+}
+
+function isLikelyImageTextUrl(url) {
+  if (typeof url !== 'string') {
+    return false
+  }
+
+  const trimmed = url.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  if (trimmed.startsWith('data:image/')) {
+    return true
+  }
+
+  try {
+    const parsed = new URL(trimmed)
+    const searchable = `${parsed.pathname}${parsed.search}`.toLowerCase()
+    if (/\.(png|jpe?g|webp|gif|bmp|svg)(\?|$)/i.test(searchable)) {
+      return true
+    }
+
+    if (/(?:format|image_format|img_format|response-content-type)=.*(?:png|jpe?g|webp|gif|bmp|svg|image%2f)/i.test(searchable)) {
+      return true
+    }
+
+    if (/\/(image|images|img|thumbnail|cover|poster|file|files)\b/i.test(parsed.pathname)) {
+      return true
+    }
+  } catch {
+    return false
+  }
+
+  return false
+}
+
+function looksLikeHtmlErrorText(content) {
+  return (
+    /<(?:!doctype|html|head|body|div|span|title)\b/i.test(content)
+    || /(?:class=|cf-error-|host error|cloudflare|working<\/span>)/i.test(content)
+  )
+}
+
 function tryParseStructuredImageString(content, fallbackPrompt) {
   if (typeof content !== 'string') {
     return null
@@ -2613,7 +2750,7 @@ function extractImageUrlFromString(content, fallbackPrompt) {
   }
 
   const urlMatch = trimmed.match(/https?:\/\/[^\s"'`<>)]+/i)
-  if (urlMatch) {
+  if (urlMatch && isLikelyImageTextUrl(urlMatch[0])) {
     return {
       url: normalizeParsedImageUrl(urlMatch[0]),
       revised_prompt: fallbackPrompt,
@@ -2681,8 +2818,16 @@ function parseImageRecord(record, fallbackPrompt) {
 
   if (typeof record.url === 'string' && record.url) {
     const parsedUrl = extractImageUrlFromString(record.url, fallbackPrompt)
+    const normalizedUrl = parsedUrl?.url || (
+      isLikelyImageTextUrl(record.url)
+        ? normalizeParsedImageUrl(record.url)
+        : null
+    )
+    if (!normalizedUrl) {
+      return null
+    }
     return {
-      url: parsedUrl?.url || normalizeParsedImageUrl(record.url),
+      url: normalizedUrl,
       revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
     }
   }
