@@ -1315,6 +1315,7 @@ function buildOpenAiImageSystemInstruction(params, explicitDimensions) {
 
   if (explicitDimensions) {
     rules.push(`Generate the final image at exactly ${explicitDimensions.width}x${explicitDimensions.height} pixels.`)
+    rules.push('Make the composition fill the entire canvas edge-to-edge.')
   }
 
   if (params?.aspectRatio) {
@@ -1332,6 +1333,7 @@ function buildOpenAiImageSystemInstruction(params, explicitDimensions) {
   return [
     'Image generation constraints:',
     ...rules,
+    'Do not add blank padding, borders, frames, letterboxing, pillarboxing, inset compositions, or empty margins around the main scene.',
     'Do not ignore these output constraints unless the request is impossible.',
   ].join(' ')
 }
@@ -1424,6 +1426,7 @@ async function cropImageToDimensions(imageUrl, dimensions) {
 
   try {
     const image = await loadImageElement(objectUrl)
+    const sourceBounds = detectImageContentBounds(image)
     const canvas = document.createElement('canvas')
     canvas.width = dimensions.width
     canvas.height = dimensions.height
@@ -1434,17 +1437,27 @@ async function cropImageToDimensions(imageUrl, dimensions) {
     }
 
     const scale = Math.max(
-      dimensions.width / image.naturalWidth,
-      dimensions.height / image.naturalHeight,
+      dimensions.width / sourceBounds.width,
+      dimensions.height / sourceBounds.height,
     )
-    const drawWidth = image.naturalWidth * scale
-    const drawHeight = image.naturalHeight * scale
+    const drawWidth = sourceBounds.width * scale
+    const drawHeight = sourceBounds.height * scale
     const drawX = (dimensions.width - drawWidth) / 2
     const drawY = (dimensions.height - drawHeight) / 2
 
     context.imageSmoothingEnabled = true
     context.imageSmoothingQuality = 'high'
-    context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
+    context.drawImage(
+      image,
+      sourceBounds.x,
+      sourceBounds.y,
+      sourceBounds.width,
+      sourceBounds.height,
+      drawX,
+      drawY,
+      drawWidth,
+      drawHeight,
+    )
 
     const outputType = blob.type && blob.type.startsWith('image/') ? blob.type : 'image/jpeg'
     return outputType === 'image/png'
@@ -1453,6 +1466,204 @@ async function cropImageToDimensions(imageUrl, dimensions) {
   } finally {
     URL.revokeObjectURL(objectUrl)
   }
+}
+
+function detectImageContentBounds(image) {
+  const width = image.naturalWidth
+  const height = image.naturalHeight
+  if (!width || !height) {
+    return { x: 0, y: 0, width: Math.max(width || 1, 1), height: Math.max(height || 1, 1) }
+  }
+
+  const scratchCanvas = document.createElement('canvas')
+  scratchCanvas.width = width
+  scratchCanvas.height = height
+
+  const scratchContext = scratchCanvas.getContext('2d', { willReadFrequently: true })
+  if (!scratchContext) {
+    return { x: 0, y: 0, width, height }
+  }
+
+  scratchContext.drawImage(image, 0, 0)
+  const imageData = scratchContext.getImageData(0, 0, width, height)
+  const cornerColors = sampleCornerColors(imageData, width, height)
+  const maxTrimX = Math.max(0, Math.floor(width * 0.35))
+  const maxTrimY = Math.max(0, Math.floor(height * 0.35))
+
+  const top = scanPaddingFromTop(imageData, width, height, cornerColors, maxTrimY)
+  const bottom = scanPaddingFromBottom(imageData, width, height, cornerColors, maxTrimY)
+  const left = scanPaddingFromLeft(imageData, width, height, cornerColors, maxTrimX, top, bottom)
+  const right = scanPaddingFromRight(imageData, width, height, cornerColors, maxTrimX, top, bottom)
+
+  const contentWidth = width - left - right
+  const contentHeight = height - top - bottom
+  if (contentWidth < width * 0.2 || contentHeight < height * 0.2) {
+    return { x: 0, y: 0, width, height }
+  }
+
+  if (left + right + top + bottom < 4) {
+    return { x: 0, y: 0, width, height }
+  }
+
+  return {
+    x: left,
+    y: top,
+    width: Math.max(1, contentWidth),
+    height: Math.max(1, contentHeight),
+  }
+}
+
+function sampleCornerColors(imageData, width, height) {
+  const sampleSize = Math.max(4, Math.min(24, Math.floor(Math.min(width, height) * 0.04)))
+  return [
+    sampleAverageColor(imageData, width, 0, 0, sampleSize, sampleSize),
+    sampleAverageColor(imageData, width, Math.max(0, width - sampleSize), 0, sampleSize, sampleSize),
+    sampleAverageColor(imageData, width, 0, Math.max(0, height - sampleSize), sampleSize, sampleSize),
+    sampleAverageColor(imageData, width, Math.max(0, width - sampleSize), Math.max(0, height - sampleSize), sampleSize, sampleSize),
+  ]
+}
+
+function sampleAverageColor(imageData, width, startX, startY, sampleWidth, sampleHeight) {
+  const endX = Math.min(width, startX + sampleWidth)
+  const endY = Math.min(imageData.height, startY + sampleHeight)
+  let totalR = 0
+  let totalG = 0
+  let totalB = 0
+  let totalA = 0
+  let count = 0
+
+  for (let y = startY; y < endY; y += 1) {
+    for (let x = startX; x < endX; x += 1) {
+      const offset = (y * width + x) * 4
+      totalR += imageData.data[offset]
+      totalG += imageData.data[offset + 1]
+      totalB += imageData.data[offset + 2]
+      totalA += imageData.data[offset + 3]
+      count += 1
+    }
+  }
+
+  if (count === 0) {
+    return { r: 255, g: 255, b: 255, a: 255 }
+  }
+
+  return {
+    r: totalR / count,
+    g: totalG / count,
+    b: totalB / count,
+    a: totalA / count,
+  }
+}
+
+function scanPaddingFromTop(imageData, width, height, cornerColors, maxTrim) {
+  let trimmed = 0
+  while (trimmed < maxTrim && trimmed < height - 1) {
+    if (!isPaddingRow(imageData, width, height, trimmed, cornerColors)) {
+      break
+    }
+    trimmed += 1
+  }
+  return trimmed
+}
+
+function scanPaddingFromBottom(imageData, width, height, cornerColors, maxTrim) {
+  let trimmed = 0
+  while (trimmed < maxTrim && trimmed < height - 1) {
+    const y = height - 1 - trimmed
+    if (!isPaddingRow(imageData, width, height, y, cornerColors)) {
+      break
+    }
+    trimmed += 1
+  }
+  return trimmed
+}
+
+function scanPaddingFromLeft(imageData, width, height, cornerColors, maxTrim, topTrim, bottomTrim) {
+  let trimmed = 0
+  while (trimmed < maxTrim && trimmed < width - 1) {
+    if (!isPaddingColumn(imageData, width, height, trimmed, cornerColors, topTrim, bottomTrim)) {
+      break
+    }
+    trimmed += 1
+  }
+  return trimmed
+}
+
+function scanPaddingFromRight(imageData, width, height, cornerColors, maxTrim, topTrim, bottomTrim) {
+  let trimmed = 0
+  while (trimmed < maxTrim && trimmed < width - 1) {
+    const x = width - 1 - trimmed
+    if (!isPaddingColumn(imageData, width, height, x, cornerColors, topTrim, bottomTrim)) {
+      break
+    }
+    trimmed += 1
+  }
+  return trimmed
+}
+
+function isPaddingRow(imageData, width, height, y, cornerColors) {
+  const sampleCount = Math.max(12, Math.min(72, width))
+  let matches = 0
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    const x = sampleCount === 1
+      ? 0
+      : Math.round((index / (sampleCount - 1)) * (width - 1))
+    if (matchesPaddingReference(readPixel(imageData, width, x, y), cornerColors)) {
+      matches += 1
+    }
+  }
+
+  return matches / sampleCount >= 0.94
+}
+
+function isPaddingColumn(imageData, width, height, x, cornerColors, topTrim, bottomTrim) {
+  const startY = Math.min(Math.max(0, topTrim), height - 1)
+  const endY = Math.max(startY, height - Math.max(0, bottomTrim))
+  const span = Math.max(1, endY - startY)
+  const sampleCount = Math.max(12, Math.min(72, span))
+  let matches = 0
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    const y = sampleCount === 1
+      ? startY
+      : Math.min(height - 1, Math.round(startY + (index / (sampleCount - 1)) * (span - 1)))
+    if (matchesPaddingReference(readPixel(imageData, width, x, y), cornerColors)) {
+      matches += 1
+    }
+  }
+
+  return matches / sampleCount >= 0.94
+}
+
+function readPixel(imageData, width, x, y) {
+  const offset = (y * width + x) * 4
+  return {
+    r: imageData.data[offset],
+    g: imageData.data[offset + 1],
+    b: imageData.data[offset + 2],
+    a: imageData.data[offset + 3],
+  }
+}
+
+function matchesPaddingReference(pixel, cornerColors) {
+  if (!pixel) {
+    return false
+  }
+
+  if (pixel.a <= 18) {
+    return true
+  }
+
+  return cornerColors.some((referenceColor) => colorDistance(pixel, referenceColor) <= 46)
+}
+
+function colorDistance(a, b) {
+  const dr = a.r - b.r
+  const dg = a.g - b.g
+  const db = a.b - b.b
+  const da = (a.a ?? 255) - (b.a ?? 255)
+  return Math.sqrt(dr * dr + dg * dg + db * db + da * da * 0.25)
 }
 
 function loadImageElement(src) {
