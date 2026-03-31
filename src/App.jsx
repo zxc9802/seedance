@@ -38,6 +38,18 @@ function isAggregationImageProvider(id) {
   return PROVIDERS[id]?.backendKind === 'aggregation-image'
 }
 
+function isOpenAiImageProvider(id) {
+  return PROVIDERS[id]?.backendKind === 'openai-image'
+}
+
+const OPENAI_IMAGE_DIMENSIONS = Object.freeze({
+  '1:1': { width: 1024, height: 1024 },
+  '16:9': { width: 1280, height: 720 },
+  '9:16': { width: 720, height: 1280 },
+  '3:4': { width: 768, height: 1024 },
+  '4:3': { width: 1024, height: 768 },
+})
+
 function App() {
   const [provider, setProvider] = useState('veo')
   const [allParams, setAllParams] = useState(createInitialParams)
@@ -670,7 +682,8 @@ function App() {
 
         const imageResult = parseImageChatResponse(data, finalPrompt)
         if (imageResult) {
-          updateProviderState(provider, { videoUrl: imageResult.url })
+          const finalImageUrl = await finalizeOpenAiImageOutput(provider, params, imageResult.url)
+          updateProviderState(provider, { videoUrl: finalImageUrl })
           return
         }
 
@@ -1272,13 +1285,15 @@ function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
   }
 
   const messages = []
-  const systemInstruction = buildOpenAiImageSystemInstruction(params)
+  const explicitDimensions = resolveOpenAiImageDimensions(params)
+  const systemInstruction = buildOpenAiImageSystemInstruction(params, explicitDimensions)
   if (systemInstruction) {
     messages.push({ role: 'system', content: systemInstruction })
   }
   messages.push({ role: 'user', content })
 
-  const generationConfig = buildGeminiImageGenerationConfig(params)
+  const generationConfig = buildGeminiImageGenerationConfig(params, explicitDimensions)
+  const explicitSize = explicitDimensions ? `${explicitDimensions.width}x${explicitDimensions.height}` : null
 
   return {
     url: '/api/image/chat/completions',
@@ -1289,13 +1304,18 @@ function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
       providerId: provider,
       model: params.model,
       messages,
+      ...(explicitSize ? { size: explicitSize } : {}),
       ...(generationConfig ? { generationConfig } : {}),
     },
   }
 }
 
-function buildOpenAiImageSystemInstruction(params) {
+function buildOpenAiImageSystemInstruction(params, explicitDimensions) {
   const rules = []
+
+  if (explicitDimensions) {
+    rules.push(`Generate the final image at exactly ${explicitDimensions.width}x${explicitDimensions.height} pixels.`)
+  }
 
   if (params?.aspectRatio) {
     rules.push(`Use an output aspect ratio of ${params.aspectRatio}.`)
@@ -1316,11 +1336,18 @@ function buildOpenAiImageSystemInstruction(params) {
   ].join(' ')
 }
 
-function buildGeminiImageGenerationConfig(params) {
+function buildGeminiImageGenerationConfig(params, explicitDimensions) {
   const imageConfig = {}
+  const explicitSize = explicitDimensions ? `${explicitDimensions.width}x${explicitDimensions.height}` : null
 
   if (params?.aspectRatio) {
     imageConfig.aspectRatio = params.aspectRatio
+  }
+
+  if (explicitSize) {
+    imageConfig.imageSize = explicitSize
+    imageConfig.width = explicitDimensions.width
+    imageConfig.height = explicitDimensions.height
   }
 
   if (params?.resolution) {
@@ -1335,6 +1362,106 @@ function buildGeminiImageGenerationConfig(params) {
     responseModalities: ['TEXT', 'IMAGE'],
     imageConfig,
   }
+}
+
+function resolveOpenAiImageDimensions(params) {
+  const explicitResolution = parseExplicitImageResolution(params?.resolution)
+  if (explicitResolution) {
+    return explicitResolution
+  }
+
+  return OPENAI_IMAGE_DIMENSIONS[params?.aspectRatio] || null
+}
+
+function parseExplicitImageResolution(value) {
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  const match = value.trim().match(/^(\d{2,5})\s*[xX]\s*(\d{2,5})$/)
+  if (!match) {
+    return null
+  }
+
+  const width = Number(match[1])
+  const height = Number(match[2])
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null
+  }
+
+  return { width, height }
+}
+
+async function finalizeOpenAiImageOutput(provider, params, imageUrl) {
+  if (!isOpenAiImageProvider(provider)) {
+    return imageUrl
+  }
+
+  const dimensions = resolveOpenAiImageDimensions(params)
+  if (!dimensions) {
+    return imageUrl
+  }
+
+  try {
+    return await cropImageToDimensions(imageUrl, dimensions)
+  } catch {
+    return imageUrl
+  }
+}
+
+async function cropImageToDimensions(imageUrl, dimensions) {
+  if (typeof imageUrl !== 'string' || !imageUrl.trim()) {
+    return imageUrl
+  }
+
+  const response = await fetch(imageUrl)
+  if (!response.ok) {
+    throw new Error('Failed to load generated image for resizing')
+  }
+
+  const blob = await response.blob()
+  const objectUrl = URL.createObjectURL(blob)
+
+  try {
+    const image = await loadImageElement(objectUrl)
+    const canvas = document.createElement('canvas')
+    canvas.width = dimensions.width
+    canvas.height = dimensions.height
+
+    const context = canvas.getContext('2d')
+    if (!context) {
+      throw new Error('Canvas 2D context is not available')
+    }
+
+    const scale = Math.max(
+      dimensions.width / image.naturalWidth,
+      dimensions.height / image.naturalHeight,
+    )
+    const drawWidth = image.naturalWidth * scale
+    const drawHeight = image.naturalHeight * scale
+    const drawX = (dimensions.width - drawWidth) / 2
+    const drawY = (dimensions.height - drawHeight) / 2
+
+    context.imageSmoothingEnabled = true
+    context.imageSmoothingQuality = 'high'
+    context.drawImage(image, drawX, drawY, drawWidth, drawHeight)
+
+    const outputType = blob.type && blob.type.startsWith('image/') ? blob.type : 'image/jpeg'
+    return outputType === 'image/png'
+      ? canvas.toDataURL(outputType)
+      : canvas.toDataURL(outputType, 0.92)
+  } finally {
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('Failed to decode generated image'))
+    image.src = src
+  })
 }
 
 function buildAggregationImageRequest(provider, params, prompt, mode, resourceRefs) {
