@@ -200,6 +200,7 @@ const STATUS_LABELS = Object.freeze({
   pending: '\u5f85\u5904\u7406',
   queued: '\u6392\u961f\u4e2d',
   running: '\u5904\u7406\u4e2d',
+  needs_review: '\u5f85\u6838\u5bf9',
   cancelled: '\u5df2\u53d6\u6d88',
 })
 

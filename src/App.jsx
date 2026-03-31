@@ -30,6 +30,14 @@ function isWanProvider(id) {
   return PROVIDERS[id]?.backendKind === 'dashscope-wan'
 }
 
+function isYunwuProvider(id) {
+  return PROVIDERS[id]?.backendKind === 'yunwu'
+}
+
+function isAggregationImageProvider(id) {
+  return PROVIDERS[id]?.backendKind === 'aggregation-image'
+}
+
 function App() {
   const [provider, setProvider] = useState('veo')
   const [allParams, setAllParams] = useState(createInitialParams)
@@ -83,8 +91,9 @@ function App() {
     }
   }, [])
 
-  const params = normalizeParamsForProvider(provider, allParams[provider])
+  const params = normalizeParamsForProvider(provider, allParams[provider], generationMode)
   const config = PROVIDERS[provider]
+  const panelConfig = getConfigForGenerationMode(config, generationMode)
   const currentState = providerState[provider] || { generating: false, progress: 0, videoUrl: null, error: null }
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
   const maxImages = resolveImageLimit(config, generationMode, videoReferences)
@@ -94,9 +103,9 @@ function App() {
   const updateParam = useCallback((key, value) => {
     setAllParams((prev) => ({
       ...prev,
-      [provider]: normalizeParamsForProvider(provider, { ...prev[provider], [key]: value }),
+      [provider]: normalizeParamsForProvider(provider, { ...prev[provider], [key]: value }, generationMode),
     }))
-  }, [provider])
+  }, [generationMode, provider])
 
   const updateProviderState = useCallback((targetProvider, updates) => {
     setProviderState((prev) => ({
@@ -223,14 +232,22 @@ function App() {
     setSelectedTemplate(null)
     const nextConfig = PROVIDERS[nextProvider]
     const firstMode = nextConfig.generationModes?.[0]?.value || 't2v'
+    setAllParams((prev) => ({
+      ...prev,
+      [nextProvider]: normalizeParamsForProvider(nextProvider, prev[nextProvider], firstMode),
+    }))
     setGenerationMode(firstMode)
     resetReferences()
   }, [resetReferences])
 
   const handleModeChange = useCallback((nextMode) => {
+    setAllParams((prev) => ({
+      ...prev,
+      [provider]: normalizeParamsForProvider(provider, prev[provider], nextMode),
+    }))
     setGenerationMode(nextMode)
     resetReferences()
-  }, [resetReferences])
+  }, [provider, resetReferences])
 
   const handleOpenAdmin = useCallback(() => {
     window.open('/admin', '_blank', 'noopener')
@@ -283,7 +300,7 @@ function App() {
         }
 
         const data = await response.json()
-        const taskId = data?.task_id || data?.data?.task_id || data?.taskId
+        const taskId = extractTaskId(data)
         if (!taskId) {
           throw new Error('接口已响应，但没有返回 task_id')
         }
@@ -333,7 +350,10 @@ function App() {
       } else if (isWanProvider(provider)) {
         const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
         if (uploadedReferences.requiresPublicBaseUrl) {
-          throw new Error('参考素材已经上传到本地后端，但当前后端地址不是公网可访问地址。请部署后端到公网，或设置 PUBLIC_BASE_URL 指向公网域名/隧道。')
+          /*
+          throw new Error('鍙傝€冪礌鏉愬凡缁忎笂浼犲埌鏈湴鍚庣锛屼絾褰撳墠鍚庣鍦板潃涓嶆槸鍏綉鍙闂湴鍧€銆傝閮ㄧ讲鍚庣鍒板叕缃戯紝鎴栬缃?PUBLIC_BASE_URL 鎸囧悜鍏綉鍩熷悕/闅ч亾銆?)
+          */
+          throw new Error('Reference assets were uploaded locally, but the backend is not reachable from the public internet. Set PUBLIC_BASE_URL to a public host before using DashScope Wan references.')
         }
 
         const requestInfo = buildWanVideoRequest(provider, params, finalPrompt, generationMode, uploadedReferences)
@@ -351,19 +371,19 @@ function App() {
 
         const data = await response.json()
         if (!data?.success) {
-          throw new Error(data?.message || '视频生成请求失败')
+          throw new Error(data?.message || '瑙嗛鐢熸垚璇锋眰澶辫触')
         }
 
-        const initialTask = normalizeWanTask(data?.data)
+        const initialTask = normalizeYunwuTask(data?.data)
         if (initialTask.videoUrl) {
           window.clearInterval(progressTimer)
-          const previewUrl = await resolveWanPreviewUrl(initialTask)
+          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl)
           updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
           return
         }
 
         if (!initialTask.taskId) {
-          throw new Error('接口已响应，但没有返回 taskId')
+          throw new Error('鎺ュ彛宸插搷搴旓紝浣嗘病鏈夎繑鍥?taskId')
         }
 
         let finished = false
@@ -382,15 +402,90 @@ function App() {
 
           const pollData = await pollResponse.json()
           if (!pollData?.success) {
-            throw new Error(pollData?.message || '查询任务状态失败')
+            /*
+            throw new Error(pollData?.message || '鏌ヨ浠诲姟鐘舵€佸け璐?)
+            */
+            throw new Error(pollData?.message || 'Failed to query Wan task status')
           }
 
-          const task = normalizeWanTask(pollData.data)
+          const task = normalizeYunwuTask(pollData.data)
           const state = normalizeTaskState(task.status)
           if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
             finished = true
             window.clearInterval(progressTimer)
-            const previewUrl = await resolveWanPreviewUrl(task)
+            const previewUrl = await resolvePreviewUrl(task.videoUrl)
+            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            return
+          }
+
+          if (state === 'failed') {
+            /*
+            throw new Error(task.message || '瑙嗛鐢熸垚澶辫触')
+            */
+            throw new Error(task.message || 'Wan video generation failed')
+          }
+        }
+      } else if (isYunwuProvider(provider)) {
+        const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
+        if (uploadedReferences.requiresPublicBaseUrl) {
+          throw new Error('参考素材已经上传到本地后端，但当前后端地址不是公网可访问地址。请部署后端到公网，或设置 PUBLIC_BASE_URL 指向公网域名/隧道。')
+        }
+
+        const requestInfo = buildYunwuVideoRequest(provider, params, finalPrompt, generationMode, uploadedReferences)
+        updateProviderState(provider, { progress: 18 })
+
+        const response = await fetch(requestInfo.url, {
+          method: 'POST',
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
+          body: JSON.stringify(requestInfo.body),
+        })
+
+        if (!response.ok) {
+          throw new Error(await formatHttpError(response))
+        }
+
+        const data = await response.json()
+        if (!data?.success) {
+          throw new Error(data?.message || '视频生成请求失败')
+        }
+
+        const initialTask = normalizeYunwuTask(data?.data)
+        if (initialTask.videoUrl) {
+          window.clearInterval(progressTimer)
+          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl)
+          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          return
+        }
+
+        if (!initialTask.taskId) {
+          throw new Error('接口已响应，但没有返回 taskId')
+        }
+
+        let finished = false
+        while (!finished) {
+          await sleep(5000)
+          const pollRequest = buildYunwuQueryRequest(provider, initialTask.taskId, initialTask.queryContext)
+          const pollResponse = await fetch(pollRequest.url, {
+            method: 'POST',
+            headers: pollRequest.headers,
+            body: JSON.stringify(pollRequest.body),
+          })
+
+          if (!pollResponse.ok) {
+            throw new Error(await formatHttpError(pollResponse))
+          }
+
+          const pollData = await pollResponse.json()
+          if (!pollData?.success) {
+            throw new Error(pollData?.message || '查询任务状态失败')
+          }
+
+          const task = normalizeYunwuTask(pollData.data)
+          const state = normalizeTaskState(task.status)
+          if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
+            finished = true
+            window.clearInterval(progressTimer)
+            const previewUrl = await resolvePreviewUrl(task.videoUrl)
             updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
             return
           }
@@ -425,7 +520,7 @@ function App() {
 
         const payload = data.data || {}
         const initialTask = {
-          taskId: payload.result?.taskId || payload.taskId,
+          taskId: extractTaskId(payload),
           status: payload.status ?? null,
           message: payload.result?.content || payload.message,
         }
@@ -480,7 +575,85 @@ function App() {
           }
         }
       } else if (!isVideoProvider(provider)) {
-        const requestInfo = buildImageRequest(params, finalPrompt, generationMode, referenceMedia)
+        if (isAggregationImageProvider(provider)) {
+          const uploadedReferences = await uploadImageReferences(referenceMedia)
+          if (uploadedReferences.requiresPublicBaseUrl) {
+            throw new Error('Reference images were uploaded locally, but the backend is not reachable from the public internet. Set PUBLIC_BASE_URL to a public host before using aggregation image references.')
+          }
+
+          const requestInfo = buildAggregationImageRequest(provider, params, finalPrompt, generationMode, uploadedReferences.resourceRefs)
+          updateProviderState(provider, { progress: 18 })
+
+          const response = await fetch(requestInfo.url, {
+            method: 'POST',
+            headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
+            body: JSON.stringify(requestInfo.body),
+          })
+
+          if (!response.ok) {
+            throw new Error(await formatHttpError(response))
+          }
+
+          const data = await response.json()
+          if (!data?.success) {
+            throw new Error(data?.msg || data?.message || 'Image generation request failed')
+          }
+
+          const initialTask = normalizeAggregationImageTask(data, finalPrompt)
+          const initialState = normalizeAggregationTaskState(initialTask.status)
+          if ((initialState === 'succeeded' || initialState === 'completed') && initialTask.imageUrl) {
+            window.clearInterval(progressTimer)
+            const previewUrl = await resolvePreviewUrl(initialTask.imageUrl)
+            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            return
+          }
+
+          if (initialState === 'failed' || initialState === 'cancelled') {
+            throw new Error(initialTask.message || 'Image generation failed')
+          }
+
+          if (!initialTask.taskId) {
+            throw new Error('The upstream request succeeded, but no taskId was returned')
+          }
+
+          let finished = false
+          while (!finished) {
+            await sleep(5000)
+            const pollRequest = buildAggregationImageQueryRequest(initialTask.taskId)
+            const pollResponse = await fetch(pollRequest.url, {
+              method: 'POST',
+              headers: pollRequest.headers,
+              body: JSON.stringify(pollRequest.body),
+            })
+
+            if (!pollResponse.ok) {
+              throw new Error(await formatHttpError(pollResponse))
+            }
+
+            const pollData = await pollResponse.json()
+            if (!pollData?.success) {
+              throw new Error(pollData?.msg || pollData?.message || 'Failed to query image task status')
+            }
+
+            const task = normalizeAggregationImageTask(pollData, finalPrompt)
+            const state = normalizeAggregationTaskState(task.status)
+            if ((state === 'succeeded' || state === 'completed') && task.imageUrl) {
+              finished = true
+              window.clearInterval(progressTimer)
+              const previewUrl = await resolvePreviewUrl(task.imageUrl)
+              updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+              return
+            }
+
+            if (state === 'failed' || state === 'cancelled') {
+              throw new Error(task.message || 'Image generation failed')
+            }
+          }
+
+          throw new Error('Image generation finished without a result URL')
+        }
+
+        const requestInfo = buildOpenAiImageRequest(provider, params, finalPrompt, generationMode, referenceMedia)
         const response = await fetch(requestInfo.url, {
           method: 'POST',
           headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
@@ -523,9 +696,9 @@ function App() {
   return (
     <div className="app-layout">
       <Header
-        onOpenAdmin={handleOpenAdmin}
         onSaveSnapshot={handleSaveSnapshot}
         onLoadSnapshot={handleLoadSnapshot}
+        onOpenAdmin={handleOpenAdmin}
         snapshotBusy={snapshotBusy}
         snapshotLoadDisabled={hasActiveGeneration}
         hasSnapshot={Boolean(snapshotMeta?.savedAt)}
@@ -559,7 +732,7 @@ function App() {
           />
           <ParameterPanel
             provider={provider}
-            config={config}
+            config={panelConfig}
             params={params}
             onUpdate={updateParam}
           />
@@ -569,7 +742,7 @@ function App() {
             videoUrl={currentState.videoUrl}
             generating={currentState.generating}
             progress={currentState.progress}
-            error={currentState.error}
+            error={formatRuntimeErrorMessage(provider, currentState.error)}
             params={params}
             provider={provider}
           />
@@ -798,20 +971,60 @@ function normalizeAllParams(allParams) {
   return changed ? next : allParams
 }
 
-function normalizeParamsForProvider(provider, params) {
+function normalizeParamsForProvider(provider, params, mode = 't2v') {
   const config = PROVIDERS[provider]
   if (!config) return params
 
-  const resolutionOptions = config.resolutions?.[params.model] || config.resolutions?.default || []
+  let nextParams = params
+  const availableModels = resolveAvailableModels(config, mode)
 
-  if (resolutionOptions.length > 0 && !resolutionOptions.includes(params.resolution)) {
+  if (availableModels.length > 0 && !availableModels.includes(nextParams.model)) {
+    nextParams = {
+      ...nextParams,
+      model: availableModels[0],
+    }
+  }
+
+  const resolutionOptions = config.resolutions?.[nextParams.model] || config.resolutions?.default || []
+
+  if (resolutionOptions.length > 0 && !resolutionOptions.includes(nextParams.resolution)) {
     return {
-      ...params,
+      ...nextParams,
       resolution: resolutionOptions[0],
     }
   }
 
-  return params
+  return nextParams
+}
+
+function getConfigForGenerationMode(config, mode) {
+  if (!config) return config
+
+  const availableModels = resolveAvailableModels(config, mode)
+  if (availableModels.length === config.models.length) {
+    return config
+  }
+
+  const allowedSet = new Set(availableModels)
+  return {
+    ...config,
+    models: config.models.filter((model) => allowedSet.has(model.value)),
+  }
+}
+
+function resolveAvailableModels(config, mode) {
+  const allModels = Array.isArray(config?.models) ? config.models : []
+  const scopedModels = config?.modeModels?.[mode]
+
+  if (!Array.isArray(scopedModels) || scopedModels.length === 0) {
+    return allModels.map((model) => model.value)
+  }
+
+  const allowedSet = new Set(scopedModels)
+  const filteredModels = allModels.filter((model) => allowedSet.has(model.value))
+  return filteredModels.length > 0
+    ? filteredModels.map((model) => model.value)
+    : allModels.map((model) => model.value)
 }
 
 function isSupportedProvider(value) {
@@ -940,6 +1153,25 @@ function buildVideoRequest(provider, params, prompt, mode, references) {
   }
 }
 
+function buildYunwuVideoRequest(provider, params, prompt, mode, references) {
+  return {
+    url: '/api/yunwu/generate',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      prompt,
+      mode,
+      params: {
+        ...params,
+        generateAudio: Boolean(params.generateAudio),
+      },
+      references,
+    },
+  }
+}
+
 function buildWanVideoRequest(provider, params, prompt, mode, references) {
   return {
     url: '/api/wan/generate',
@@ -960,6 +1192,20 @@ function buildWanVideoRequest(provider, params, prompt, mode, references) {
   }
 }
 
+function buildYunwuQueryRequest(provider, taskId, queryContext) {
+  return {
+    url: '/api/yunwu/query',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      taskId,
+      queryContext,
+    },
+  }
+}
+
 function buildWanQueryRequest(provider, taskId) {
   return {
     url: '/api/wan/query',
@@ -973,39 +1219,66 @@ function buildWanQueryRequest(provider, taskId) {
   }
 }
 
-function normalizeWanTask(data) {
+function normalizeYunwuTask(data) {
   return {
-    taskId: typeof data?.taskId === 'string' ? data.taskId : null,
-    status: typeof data?.status === 'string' ? data.status : null,
-    message: typeof data?.message === 'string' ? data.message : null,
-    videoUrl: typeof data?.videoUrl === 'string' ? data.videoUrl : null,
-    previewUrl: typeof data?.previewUrl === 'string' ? data.previewUrl : null,
+    taskId: extractTaskId(data),
+    status: data?.status || null,
+    message: data?.message || null,
+    videoUrl: data?.videoUrl || null,
+    queryContext: data?.queryContext || null,
   }
 }
 
-async function resolveWanPreviewUrl(task) {
-  if (typeof task?.previewUrl === 'string' && task.previewUrl.length > 0) {
-    return task.previewUrl
-  }
+function normalizeAggregationImageTask(payload, fallbackPrompt) {
+  const imageResult = parseImageChatResponse(payload, fallbackPrompt)
 
-  return resolvePreviewUrl(task?.videoUrl || null)
+  return {
+    taskId: extractTaskId(payload),
+    status: extractAggregationTaskStatus(payload),
+    message: extractAggregationTaskMessage(payload),
+    imageUrl: imageResult?.url || null,
+  }
 }
 
-function buildImageRequest(params, prompt, mode, mediaList) {
+function formatRuntimeErrorMessage(provider, message) {
+  if (typeof message !== 'string' || !message.trim()) {
+    return '生成失败'
+  }
+
+  if (
+    provider === 'yunwu-veo'
+    && message.toLowerCase().includes('download file failed')
+  ) {
+    return '云雾无法下载参考图片。请检查参考图链接是否能被外网直接访问，优先使用稳定的 HTTPS 公网图片链接，或确认 PUBLIC_BASE_URL 指向可公网访问的地址。'
+  }
+
+  return message
+}
+
+function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
   const content = [{ type: 'text', text: prompt }]
   if (mode === 'i2v') {
     for (const media of mediaList) {
-      const rawBase64 = extractImageBase64Payload(media)
-      if (!rawBase64) {
+      const imageUrl = extractImageDataUrlPayload(media)
+      if (!imageUrl) {
         throw new Error('参考图片格式无效，图生图仅支持 Base64 图片输入')
       }
 
       content.push({
-        type: 'image_base64',
-        image_base64: rawBase64,
+        type: 'image_url',
+        image_url: { url: imageUrl },
       })
     }
   }
+
+  const messages = []
+  const systemInstruction = buildOpenAiImageSystemInstruction(params)
+  if (systemInstruction) {
+    messages.push({ role: 'system', content: systemInstruction })
+  }
+  messages.push({ role: 'user', content })
+
+  const generationConfig = buildGeminiImageGenerationConfig(params)
 
   return {
     url: '/api/image/chat/completions',
@@ -1013,8 +1286,93 @@ function buildImageRequest(params, prompt, mode, mediaList) {
       'Content-Type': 'application/json',
     },
     body: {
+      providerId: provider,
       model: params.model,
-      messages: [{ role: 'user', content }],
+      messages,
+      ...(generationConfig ? { generationConfig } : {}),
+    },
+  }
+}
+
+function buildOpenAiImageSystemInstruction(params) {
+  const rules = []
+
+  if (params?.aspectRatio) {
+    rules.push(`Use an output aspect ratio of ${params.aspectRatio}.`)
+  }
+
+  if (params?.resolution) {
+    rules.push(`Target image size ${params.resolution}.`)
+  }
+
+  if (rules.length === 0) {
+    return ''
+  }
+
+  return [
+    'Image generation constraints:',
+    ...rules,
+    'Do not ignore these output constraints unless the request is impossible.',
+  ].join(' ')
+}
+
+function buildGeminiImageGenerationConfig(params) {
+  const imageConfig = {}
+
+  if (params?.aspectRatio) {
+    imageConfig.aspectRatio = params.aspectRatio
+  }
+
+  if (params?.resolution) {
+    imageConfig.imageSize = params.resolution
+  }
+
+  if (Object.keys(imageConfig).length === 0) {
+    return null
+  }
+
+  return {
+    responseModalities: ['TEXT', 'IMAGE'],
+    imageConfig,
+  }
+}
+
+function buildAggregationImageRequest(provider, params, prompt, mode, resourceRefs) {
+  const payload = {
+    params: {
+      resolution: params.resolution,
+      scale: params.aspectRatio,
+    },
+  }
+
+  if (mode === 'i2v' && resourceRefs.length > 0) {
+    payload.resources = resourceRefs
+  }
+
+  return {
+    url: '/api/image/aggregation/generate',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      modelId: params.model,
+      abilityType: 'IMAGE',
+      prompt,
+      payload,
+    },
+  }
+}
+
+function buildAggregationImageQueryRequest(taskId) {
+  return {
+    url: '/api/image/aggregation/queryResult',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      taskId,
+      abilityType: 'IMAGE',
     },
   }
 }
@@ -1033,6 +1391,26 @@ function extractImageBase64Payload(media) {
   }
 
   return null
+}
+
+function extractImageDataUrlPayload(media) {
+  if (typeof media !== 'string') return null
+
+  const trimmed = media.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  if (/^data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed)) {
+    return trimmed.replace(/\s/g, '')
+  }
+
+  const rawBase64 = extractImageBase64Payload(trimmed)
+  if (!rawBase64) {
+    return null
+  }
+
+  return `data:image/png;base64,${rawBase64}`
 }
 
 function mapVideoMode(mode) {
@@ -1112,6 +1490,68 @@ async function readVideoReferencesAsBase64(references) {
   return results
 }
 
+async function uploadImageReferences(mediaList) {
+  if (!Array.isArray(mediaList) || mediaList.length === 0) {
+    return { resourceRefs: [], requiresPublicBaseUrl: false }
+  }
+
+  const assets = mediaList.map((media, index) => ({
+    id: `image-${index}`,
+    order: index,
+    file: imageMediaToFile(media, index),
+  }))
+
+  const uploaded = await uploadReferenceBatch(assets)
+  return {
+    resourceRefs: uploaded.resourceRefs,
+    requiresPublicBaseUrl: uploaded.requiresPublicBaseUrl,
+  }
+}
+
+function imageMediaToFile(media, index) {
+  if (typeof media !== 'string') {
+    throw new Error('Reference image format is invalid')
+  }
+
+  const dataUrlMatch = media.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i)
+  if (dataUrlMatch) {
+    const mimeType = dataUrlMatch[1]
+    const base64 = dataUrlMatch[2].replace(/\s/g, '')
+    const extension = mimeTypeToFileExtension(mimeType)
+    return createFileFromBase64Data(base64, mimeType, `image-reference-${index + 1}.${extension}`)
+  }
+
+  const rawBase64 = extractImageBase64Payload(media)
+  if (!rawBase64) {
+    throw new Error('Reference image format is invalid')
+  }
+
+  return createFileFromBase64Data(rawBase64, 'image/png', `image-reference-${index + 1}.png`)
+}
+
+function createFileFromBase64Data(base64, mimeType, filename) {
+  const binary = window.atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return new File([bytes], filename, { type: mimeType })
+}
+
+function mimeTypeToFileExtension(mimeType) {
+  switch ((mimeType || '').toLowerCase()) {
+    case 'image/jpeg':
+      return 'jpg'
+    case 'image/webp':
+      return 'webp'
+    case 'image/gif':
+      return 'gif'
+    case 'image/png':
+    default:
+      return 'png'
+  }
+}
+
 function resolveLimit(limitConfig, mode) {
   if (typeof limitConfig === 'number') return limitConfig
   if (!limitConfig) return 0
@@ -1148,6 +1588,12 @@ function validateVideoReferenceInput(provider, params, mode, references) {
     if (references.images.length === 0) return '参考图片模式至少需要 1 张参考图片'
   }
 
+  if (mode === 'omni') {
+    if (references.images.length + references.videos.length === 0) {
+      return 'Omni 模式至少需要 1 张参考图片或 1 段参考视频'
+    }
+  }
+
   if (mode === 'fusion') {
     const imageCount = references.images.length
     const videoCount = references.videos.length
@@ -1175,22 +1621,36 @@ function validateWanReferenceInput(provider, mode, references) {
   const totalVisualCount = imageCount + videoCount
 
   if (videoCount > 3) {
-    return '万象参考视频最多 3 段'
+    return '\u4e07\u8c61\u53c2\u8003\u89c6\u9891\u6700\u591a 3 \u6bb5'
   }
 
   if (imageCount > 5) {
-    return '万象参考图片最多 5 张'
+    return '\u4e07\u8c61\u53c2\u8003\u56fe\u7247\u6700\u591a 5 \u5f20'
   }
 
   if (totalVisualCount > 5) {
-    return '万象参考图片和视频总数不能超过 5 个'
+    return '\u4e07\u8c61\u53c2\u8003\u56fe\u7247\u548c\u89c6\u9891\u603b\u6570\u4e0d\u80fd\u8d85\u8fc7 5 \u4e2a'
   }
 
   return null
 }
 
 function validateKlingReferenceInput(provider, params, mode, references) {
-  if (!isKlingProvider(provider) || mode !== 'fusion') return null
+  if (!isKlingProvider(provider) && provider !== 'yunwu-kling') return null
+
+  if (provider === 'yunwu-kling' && mode === 'omni') {
+    if (references.images.length > 1) {
+      return 'Yunwu Kling Omni 模式最多上传 1 张参考图片'
+    }
+
+    if (references.videos.length > 1) {
+      return 'Yunwu Kling Omni 模式最多上传 1 段参考视频'
+    }
+
+    return null
+  }
+
+  if (mode !== 'fusion') return null
 
   if (references.videos.length > 1) {
     return '可灵参考模式最多上传 1 段参考视频'
@@ -1340,7 +1800,7 @@ async function resolvePreviewUrl(url) {
     && !contentType.includes('application/octet-stream')
   ) {
     const body = await response.text()
-    throw new Error(formatPreviewContentTypeError(contentType, body))
+    throw new Error(`预览内容类型异常: ${contentType || 'unknown'}${body ? `，返回内容：${body.slice(0, 120)}` : ''}`)
   }
 
   const blob = await response.blob()
@@ -1360,37 +1820,34 @@ async function resolvePreviewUrl(url) {
   return URL.createObjectURL(blob)
 }
 
-function formatPreviewContentTypeError(contentType, body) {
-  const normalizedType = (contentType || 'unknown').toLowerCase()
-  const previewBody = typeof body === 'string' ? body.slice(0, 240) : ''
-  const normalizedBody = previewBody.toLowerCase()
-
-  if (
-    normalizedType.includes('text/html')
-    && normalizedBody.includes('cloudflare')
-    && (normalizedBody.includes('502') || normalizedBody.includes('5xx'))
-  ) {
-    return '预览地址返回了 Cloudflare 502 错误页，不是视频文件。通常是上游结果地址暂时不可用，或者后端拿错了预览地址。'
-  }
-
-  if (normalizedType.includes('text/html')) {
-    return '预览地址返回的是 HTML 网页，不是视频文件。通常是结果地址失效，或者后端拿错了预览地址。'
-  }
-
-  return `预览内容类型异常: ${normalizedType}${previewBody ? `，返回内容：${previewBody}` : ''}`
-}
-
 function normalizeTaskState(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    value = String(value)
+  }
+
   if (typeof value !== 'string') return ''
 
   const normalized = value.trim().toLowerCase()
   switch (normalized) {
+    case '2':
     case 'succeeded':
     case 'success':
       return 'succeeded'
+    case '0':
+    case '1':
+    case 'submitted':
+    case 'pending':
+    case 'queued':
+    case 'processing':
+    case 'running':
+    case 'inprogress':
+    case 'in_progress':
+      return 'submitted'
     case 'completed':
     case 'complete':
       return 'completed'
+    case '3':
+    case '4':
     case 'failed':
     case 'failure':
     case 'error':
@@ -1401,6 +1858,113 @@ function normalizeTaskState(value) {
     default:
       return normalized
   }
+}
+
+function normalizeAggregationTaskState(value) {
+  return normalizeTaskState(value)
+}
+
+function normalizeTaskIdValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(Math.trunc(value))
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim()
+  }
+
+  return null
+}
+
+function getPathValue(target, pathExpression) {
+  if (!target || typeof target !== 'object') {
+    return undefined
+  }
+
+  const segments = pathExpression.split('.')
+  let current = target
+
+  for (const rawSegment of segments) {
+    if (current === null || current === undefined) {
+      return undefined
+    }
+
+    if (/^\d+$/.test(rawSegment)) {
+      current = current[Number(rawSegment)]
+      continue
+    }
+
+    current = current[rawSegment]
+  }
+
+  return current
+}
+
+function findFirstPathValue(target, paths) {
+  for (const path of paths) {
+    const value = getPathValue(target, path)
+    if (value !== undefined && value !== null && value !== '') {
+      return value
+    }
+  }
+
+  return null
+}
+
+function extractAggregationTaskStatus(payload) {
+  return findFirstPathValue(payload, [
+    'status',
+    'state',
+    'task_status',
+    'data.status',
+    'data.state',
+    'data.task_status',
+    'data.result.status',
+    'data.result.state',
+    'data.result.task_status',
+    'result.status',
+    'result.state',
+    'result.task_status',
+  ])
+}
+
+function extractAggregationTaskMessage(payload) {
+  return findFirstPathValue(payload, [
+    'message',
+    'msg',
+    'content',
+    'data.message',
+    'data.msg',
+    'data.content',
+    'data.result.message',
+    'data.result.msg',
+    'data.result.content',
+    'result.message',
+    'result.msg',
+    'result.content',
+    'error.message',
+  ]) || null
+}
+
+function extractTaskId(payload) {
+  return normalizeTaskIdValue(findFirstPathValue(payload, [
+    'taskId',
+    'task_id',
+    'id',
+    'name',
+    'data.taskId',
+    'data.task_id',
+    'data.id',
+    'data.name',
+    'data.result.taskId',
+    'data.result.task_id',
+    'data.result.id',
+    'data.result.name',
+    'result.taskId',
+    'result.task_id',
+    'result.id',
+    'result.name',
+  ]))
 }
 
 function extractVeoFastVideoUrl(payload) {
@@ -1557,12 +2121,34 @@ function sleep(ms) {
 }
 
 function buildImageResponseParseError(data) {
+  if (isGatewayStatusPayload(data)) {
+    return '图片接口返回的是 New API 网关状态，而不是模型生成结果。请检查部署路由是否把 /api/image/chat/completions 转发到了本站后端，并确认 IMAGE_API_BASE_URL 填的是上游基础地址（例如 https://example.com/v1），不要填当前站点地址，也不要重复带上 /chat/completions。'
+  }
+
   const summary = summarizeImageResponseShape(data)
   if (!summary) {
     return '图片生成已完成，但没有在响应中找到图片数据'
   }
 
   return `图片生成已完成，但没有在响应中找到图片数据（响应字段: ${summary}）`
+}
+
+function isGatewayStatusPayload(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return false
+  }
+
+  const keys = Object.keys(data)
+  if (!keys.length || keys.some((key) => !['message', 'status', 'version'].includes(key))) {
+    return false
+  }
+
+  return (
+    typeof data.message === 'string'
+    && /new api gateway is running/i.test(data.message)
+    && typeof data.status === 'string'
+    && typeof data.version === 'string'
+  )
 }
 
 function summarizeImageResponseShape(data) {
@@ -1609,6 +2195,108 @@ function summarizeImageResponseShape(data) {
   return fields.filter(Boolean).join(' | ') || null
 }
 
+function normalizeParsedImageUrl(url) {
+  if (typeof url !== 'string') {
+    return null
+  }
+
+  const trimmed = url.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  return trimmed.startsWith('data:image/')
+    ? trimmed.replace(/\s/g, '')
+    : trimmed
+}
+
+function tryParseStructuredImageString(content, fallbackPrompt) {
+  if (typeof content !== 'string') {
+    return null
+  }
+
+  const candidates = [content]
+  const fencedMatch = content.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  if (fencedMatch?.[1]) {
+    candidates.unshift(fencedMatch[1])
+  }
+
+  for (const candidate of candidates) {
+    const trimmed = candidate.trim()
+    if (!trimmed || !/^[\[{"]/.test(trimmed)) {
+      continue
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed)
+      const parsedResponse = parseImageChatResponse(parsed, fallbackPrompt)
+      if (parsedResponse) {
+        return parsedResponse
+      }
+
+      const directRecord = parseImageRecord(parsed, fallbackPrompt)
+      if (directRecord) {
+        return directRecord
+      }
+    } catch {
+      // Ignore malformed JSON-like strings and continue with other strategies.
+    }
+  }
+
+  return null
+}
+
+function extractImageUrlFromString(content, fallbackPrompt) {
+  if (typeof content !== 'string') {
+    return null
+  }
+
+  const trimmed = content.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  const markdownMatch = trimmed.match(/!\[[^\]]*]\(([^)]+)\)/s)
+  if (markdownMatch?.[1]) {
+    const nestedMatch = extractImageUrlFromString(markdownMatch[1], fallbackPrompt)
+    if (nestedMatch) {
+      return nestedMatch
+    }
+  }
+
+  if (trimmed.startsWith('data:image/')) {
+    return { url: normalizeParsedImageUrl(trimmed), revised_prompt: fallbackPrompt }
+  }
+
+  const dataUrlMatch = trimmed.match(/data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)/)
+  if (dataUrlMatch) {
+    return { url: dataUrlMatch[0].replace(/\s/g, ''), revised_prompt: fallbackPrompt }
+  }
+
+  const structuredResult = tryParseStructuredImageString(trimmed, fallbackPrompt)
+  if (structuredResult) {
+    return structuredResult
+  }
+
+  const urlMatch = trimmed.match(/https?:\/\/[^\s"'`<>)]+/i)
+  if (urlMatch) {
+    return {
+      url: normalizeParsedImageUrl(urlMatch[0]),
+      revised_prompt: fallbackPrompt,
+    }
+  }
+
+  const rawBase64Match = trimmed.match(/\b([A-Za-z0-9+/]{100,}={0,2})\b/)
+  if (rawBase64Match) {
+    return {
+      url: `data:image/png;base64,${rawBase64Match[1]}`,
+      revised_prompt: fallbackPrompt,
+    }
+  }
+
+  return null
+}
+
 function parseInlineImagePayload(payload, fallbackPrompt) {
   if (!payload || typeof payload !== 'object') {
     return null
@@ -1649,20 +2337,40 @@ function parseImageParts(parts, fallbackPrompt) {
 }
 
 function parseImageRecord(record, fallbackPrompt) {
+  if (typeof record === 'string') {
+    return extractImageUrlFromString(record, fallbackPrompt)
+  }
+
   if (!record || typeof record !== 'object') {
     return null
   }
 
   if (typeof record.url === 'string' && record.url) {
+    const parsedUrl = extractImageUrlFromString(record.url, fallbackPrompt)
     return {
-      url: record.url,
+      url: parsedUrl?.url || normalizeParsedImageUrl(record.url),
       revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
     }
   }
 
-  if (record.image_url?.url) {
+  const imageUrlValue = typeof record.image_url === 'string'
+    ? record.image_url
+    : record.image_url?.url
+  if (imageUrlValue) {
+    const parsedUrl = extractImageUrlFromString(imageUrlValue, fallbackPrompt)
     return {
-      url: record.image_url.url,
+      url: parsedUrl?.url || normalizeParsedImageUrl(imageUrlValue),
+      revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
+    }
+  }
+
+  const imageValue = typeof record.image === 'string'
+    ? record.image
+    : record.image?.url
+  if (imageValue) {
+    const parsedUrl = extractImageUrlFromString(imageValue, fallbackPrompt)
+    return {
+      url: parsedUrl?.url || normalizeParsedImageUrl(imageValue),
       revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
     }
   }
@@ -1690,30 +2398,24 @@ function parseImageChatResponse(data, fallbackPrompt) {
   const content = data?.choices?.[0]?.message?.content
 
   if (typeof content === 'string') {
-    const markdownMatch = content.match(/!\[.*?\]\((data:image\/[^;]+;base64,[^)]+)\)/)
-    if (markdownMatch) {
-      return { url: markdownMatch[1], revised_prompt: fallbackPrompt }
-    }
-
-    if (content.startsWith('data:image/')) {
-      return { url: content, revised_prompt: fallbackPrompt }
-    }
-
-    const dataUrlMatch = content.match(/data:(image\/[a-zA-Z+]+);base64,([A-Za-z0-9+/=\s]+)/)
-    if (dataUrlMatch) {
-      return { url: dataUrlMatch[0].replace(/\s/g, ''), revised_prompt: fallbackPrompt }
-    }
-
-    const rawBase64Match = content.match(/\b([A-Za-z0-9+/]{100,}={0,2})\b/)
-    if (rawBase64Match) {
-      return { url: `data:image/png;base64,${rawBase64Match[1]}`, revised_prompt: fallbackPrompt }
+    const stringResult = extractImageUrlFromString(content, fallbackPrompt)
+    if (stringResult) {
+      return stringResult
     }
   }
 
   if (Array.isArray(content)) {
-    const imageItem = content.find((item) => item?.type === 'image_url' && item?.image_url?.url)
+    const imageItem = content.find((item) => item?.type === 'image_url' && (
+      item?.image_url?.url || typeof item?.image_url === 'string'
+    ))
     if (imageItem) {
-      return { url: imageItem.image_url.url, revised_prompt: fallbackPrompt }
+      const imageUrlValue = typeof imageItem.image_url === 'string'
+        ? imageItem.image_url
+        : imageItem.image_url.url
+      return {
+        url: normalizeParsedImageUrl(imageUrlValue),
+        revised_prompt: fallbackPrompt,
+      }
     }
 
     const base64Item = content.find((item) => item?.type === 'image_base64' && typeof item?.image_base64 === 'string')
@@ -1724,9 +2426,21 @@ function parseImageChatResponse(data, fallbackPrompt) {
         revised_prompt: fallbackPrompt,
       }
     }
+
+    for (const contentItem of content) {
+      const parsedRecord = parseImageRecord(contentItem, fallbackPrompt)
+      if (parsedRecord) {
+        return parsedRecord
+      }
+    }
   }
 
-  const topLevelCollections = [data?.data, data?.images]
+  const topLevelRecord = parseImageRecord(data, fallbackPrompt)
+  if (topLevelRecord) {
+    return topLevelRecord
+  }
+
+  const topLevelCollections = [data?.data, data?.images, data?.results, data?.artifacts]
   for (const collection of topLevelCollections) {
     if (!Array.isArray(collection)) continue
 
@@ -1735,6 +2449,14 @@ function parseImageChatResponse(data, fallbackPrompt) {
       if (parsedRecord) {
         return parsedRecord
       }
+    }
+  }
+
+  const directContainers = [data?.result, data?.image]
+  for (const entry of directContainers) {
+    const directRecord = parseImageRecord(entry, fallbackPrompt)
+    if (directRecord) {
+      return directRecord
     }
   }
 

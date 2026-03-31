@@ -113,6 +113,9 @@
   .status-running {
     color: #facc15;
   }
+  .status-needs_review {
+    color: #fb923c;
+  }
   .status-cancelled {
     color: #94a3b8;
   }
@@ -270,6 +273,7 @@
             <th>状态</th>
             <th>engine_task_id</th>
             <th>upstream_url</th>
+            <th>错误信息</th>
             <th>费用</th>
           </tr>
         </thead>
@@ -343,6 +347,7 @@
               <th>状态</th>
               <th>engine_task_id</th>
               <th>upstream_url</th>
+              <th>错误信息</th>
               <th>费用</th>
             </tr>
           </thead>
@@ -381,6 +386,7 @@ const STATUS_LABELS = {
   pending: '待处理',
   queued: '排队中',
   running: '处理中',
+  needs_review: '待核对',
   cancelled: '已取消',
 }
 
@@ -1099,6 +1105,7 @@ async function loadTasks(page) {
         <td class="status-${task.status || 'unknown'}">${esc(formatStatus(task.status))}</td>
         <td>${esc(task.engine_task_id || '-')}</td>
         <td>${esc(task.upstream_url || '-')}</td>
+        <td>${esc(task.error_message || '-')}</td>
         <td>${formatMoney(task.estimated_cost)}</td>
       </tr>
     `).join('')
@@ -1260,6 +1267,7 @@ async function showUserDetail(userId, userName) {
         <td class="status-${task.status || 'unknown'}">${esc(formatStatus(task.status))}</td>
         <td>${esc(task.engine_task_id || '-')}</td>
         <td>${esc(task.upstream_url || '-')}</td>
+        <td>${esc(task.error_message || '-')}</td>
         <td>${formatMoney(task.estimated_cost)}</td>
       </tr>
     `).join('')

@@ -30,12 +30,15 @@ const cleanupIntervalMinutes = Number(process.env.UPLOAD_CLEANUP_INTERVAL_MINUTE
 const publicBaseUrl = stripTrailingSlash(process.env.PUBLIC_BASE_URL || '')
 const videoApiBaseUrl = stripTrailingSlash(process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
-const imageApiBaseUrl = stripTrailingSlash(process.env.IMAGE_API_BASE_URL || 'http://47.77.198.47:3001/v1')
+const imageApiBaseUrl = normalizeOpenAiBaseUrl(process.env.IMAGE_API_BASE_URL || 'http://47.77.198.47:3001/v1')
+const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGATION_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
+const yunwuApiBaseUrl = stripTrailingSlash(process.env.YUNWU_API_BASE_URL || 'https://yunwu.ai')
 const dashScopeBaseUrl = stripTrailingSlash(process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com')
 const materialThirdChannel = Number(process.env.MATERIAL_THIRD_CHANNEL || 1)
 const materialPollIntervalMs = Math.max(1000, Number(process.env.MATERIAL_POLL_INTERVAL_MS || 3000))
 const materialPollTimeoutMs = Math.max(materialPollIntervalMs, Number(process.env.MATERIAL_POLL_TIMEOUT_MS || 180000))
 const materialResourceTemplate = (process.env.MATERIAL_RESOURCE_TEMPLATE || '{materialId}').trim() || '{materialId}'
+const tempAssetSigningSecret = resolveTempAssetSigningSecret()
 const mainAppUrl = stripTrailingSlash(process.env.MAIN_APP_URL || 'https://www.qycm.top')
 const mainAppVideoEntryPath = normalizeMainAppEntryPath(process.env.MAIN_APP_VIDEO_ENTRY_PATH || '/bot/video-workbench-seedance')
 const requireMainAppSso = readBooleanEnv(process.env.REQUIRE_MAIN_APP_SSO, isProduction)
@@ -55,7 +58,16 @@ const hasExplicitAdminAllowlist = [
 ].some((set) => set.size > 0)
 const UPSTREAM_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'request-id']
 const UPSTREAM_TRACE_ID_HEADERS = ['trace-id', 'x-trace-id', 'cf-ray']
+const USAGE_STATUS_NEEDS_REVIEW = 'needs_review'
+const USAGE_STATUS_SYNC_INTERVAL_MS = Math.max(60000, Number(process.env.USAGE_STATUS_SYNC_INTERVAL_MS || 180000))
+const USAGE_STATUS_SYNC_BATCH_SIZE = Math.max(1, Math.min(100, Number(process.env.USAGE_STATUS_SYNC_BATCH_SIZE || 20)))
+const USAGE_STATUS_SYNC_LOOKBACK_HOURS = Math.max(1, Number(process.env.USAGE_STATUS_SYNC_LOOKBACK_HOURS || 168))
+const USAGE_STATUS_SYNC_MIN_AGE_MINUTES = Math.max(1, Number(process.env.USAGE_STATUS_SYNC_MIN_AGE_MINUTES || 3))
+const UNTRACKED_USAGE_REVIEW_DELAY_MINUTES = Math.max(3, Number(process.env.UNTRACKED_USAGE_REVIEW_DELAY_MINUTES || 10))
+const UNTRACKED_USAGE_STATUS_MESSAGE = '上游响应未返回 task_id，无法自动查询状态，请结合供应商后台核对。'
 const uploadedReferenceMetadata = new Map()
+let usageStatusSyncTimer = null
+let usageStatusSyncRunning = false
 
 fs.mkdirSync(uploadDir, { recursive: true })
 
@@ -71,7 +83,7 @@ const upload = multer({
   storage,
   limits: {
     fileSize: 64 * 1024 * 1024,
-    files: 12,
+    files: 16,
   },
 })
 
@@ -84,11 +96,41 @@ app.use((req, _, next) => {
   next()
 })
 
-app.use('/temp-assets', express.static(uploadDir, {
-  setHeaders: (res) => {
-    res.setHeader('Cache-Control', `public, max-age=${Math.max(60, uploadTtlMinutes * 60)}`)
-  },
-}))
+app.get('/temp-assets/:filename', async (req, res) => {
+  const filename = sanitizeTempAssetName(req.params.filename)
+  const expiresAt = Number(req.query.exp || 0)
+  const signature = readSingleQueryValue(req.query.sig) || ''
+
+  if (!filename || !Number.isFinite(expiresAt) || expiresAt <= 0 || !signature) {
+    res.status(400).send('Missing temp asset signature.')
+    return
+  }
+
+  if (expiresAt <= Date.now()) {
+    res.status(410).send('Temp asset URL has expired.')
+    return
+  }
+
+  if (!verifyTempAssetSignature(filename, expiresAt, signature)) {
+    res.status(403).send('Invalid temp asset signature.')
+    return
+  }
+
+  const absolutePath = path.join(uploadDir, filename)
+  try {
+    const stat = await fsp.stat(absolutePath)
+    if (!stat.isFile()) {
+      res.status(404).send('Temp asset not found.')
+      return
+    }
+  } catch {
+    res.status(404).send('Temp asset not found.')
+    return
+  }
+
+  res.setHeader('Cache-Control', `private, max-age=${Math.max(60, Math.floor((expiresAt - Date.now()) / 1000))}`)
+  res.sendFile(filename, { root: uploadDir })
+})
 
 app.get('/api/health', (_, res) => {
   res.json({
@@ -101,8 +143,6 @@ app.get('/api/health', (_, res) => {
 })
 
 app.get('/api/session', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store')
-
   const session = req.videoSiteSession
   if (!session) {
     res.status(401).json({
@@ -155,13 +195,13 @@ app.use(async (req, res, next) => {
     return
   }
 
-  const ticket = readSingleQueryValue(req.query.ticket)
-  const requestedMainAppUrl = resolveRequestedMainAppUrl(req)
-
-  if (!ticket && session) {
+  if (session) {
     next()
     return
   }
+
+  const ticket = readSingleQueryValue(req.query.ticket)
+  const requestedMainAppUrl = resolveRequestedMainAppUrl(req)
 
   if (!ticket) {
     res.redirect(302, buildMainAppVideoEntryUrl(requestedMainAppUrl))
@@ -183,7 +223,7 @@ app.use(async (req, res, next) => {
   }
 })
 
-app.post('/api/upload', upload.array('files', 12), async (req, res) => {
+app.post('/api/upload', upload.array('files', 16), async (req, res) => {
   const files = Array.isArray(req.files) ? req.files : []
   if (files.length === 0) {
     res.status(400).json({ success: false, message: 'No files uploaded' })
@@ -230,7 +270,7 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
     }
 
     for (const file of files) {
-      const url = `${baseUrl}/temp-assets/${encodeURIComponent(file.filename)}`
+      const url = buildTempAssetUrl(baseUrl, file.filename, expiresAtMs)
       const item = {
         name: file.originalname,
         size: file.size,
@@ -249,7 +289,7 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
         item.resourceRef = uploaded.resourceRef
         item.expiresAt = uploaded.expiresAt
         item.storageBackend = 'dashscope'
-        registerUploadedReference(item.resourceRef, file.size, uploaded.expiresAtMs)
+        registerUploadedReference(item.resourceRef, file.size, file.mimetype, uploaded.expiresAtMs)
       } else if (materialType !== null && publiclyReachable && file.mimetype.startsWith('image/')) {
         const material = await createMaterialReference({
           name: buildMaterialName(file.originalname),
@@ -259,11 +299,11 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
         item.materialId = material.materialId
         item.materialStatus = material.status
         item.resourceRef = material.resourceRef
-        registerUploadedReference(item.url, file.size, expiresAtMs)
-        registerUploadedReference(item.resourceRef, file.size, expiresAtMs)
+        registerUploadedReference(item.url, file.size, file.mimetype, expiresAtMs)
+        registerUploadedReference(item.resourceRef, file.size, file.mimetype, expiresAtMs)
       } else {
-        registerUploadedReference(item.url, file.size, expiresAtMs)
-        registerUploadedReference(item.resourceRef, file.size, expiresAtMs)
+        registerUploadedReference(item.url, file.size, file.mimetype, expiresAtMs)
+        registerUploadedReference(item.resourceRef, file.size, file.mimetype, expiresAtMs)
       }
 
       payload.push(item)
@@ -281,34 +321,17 @@ app.post('/api/upload', upload.array('files', 12), async (req, res) => {
     })
   } catch (error) {
     const statusCode = Number(error.statusCode) || 502
-    console.error('[upload] Request failed:', {
-      statusCode,
-      message: error?.message || null,
-      stack: error?.stack || null,
-      fileCount: files.length,
-      files: files.map((file) => ({
-        name: file.originalname,
-        size: file.size,
-        mimeType: file.mimetype,
-        storedAs: file.filename,
-      })),
-      materialType: req.body?.materialType || null,
-      baseUrl: resolveBaseUrl(req),
-    })
+    applyUpstreamTraceHeaders(res, error)
     res.status(statusCode).json({
       success: false,
       message: error.message || 'Upload failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
     })
   }
 })
 
 app.post('/api/veo/generate', async (req, res) => {
-  console.log('[monitor-debug] /api/veo/generate hit:', {
-    hasSession: Boolean(req.videoSiteSession?.user),
-    userKeys: req.videoSiteSession?.user ? Object.keys(req.videoSiteSession.user) : [],
-    modelId: req.body?.modelId || req.body?.model || null,
-    mode: req.body?.mode || req.body?.params?.mode || null,
-  })
   const missing = getMissingVideoConfig()
   if (missing.length > 0) {
     res.status(500).json({
@@ -325,39 +348,27 @@ app.post('/api/veo/generate', async (req, res) => {
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
   }, ({ payload, traceMetadata, status, url }) => {
-    try {
-      const taskId = extractAggregationTaskId(payload)
-      console.log('[monitor-debug] /api/veo/generate upstream:', {
-        status,
-        taskId: taskId || null,
-        requestId: traceMetadata?.requestId || null,
-        traceId: traceMetadata?.traceId || null,
-        payloadKeys: payload && typeof payload === 'object' && !Array.isArray(payload) ? Object.keys(payload) : [],
-        payloadDataKeys: payload?.data && typeof payload.data === 'object' && !Array.isArray(payload.data) ? Object.keys(payload.data) : [],
-      })
-      if (status >= 400) return
-      insertUsageLog({
-        session: req.videoSiteSession,
-        channel: 'aggregation',
-        providerId: body.providerId || null,
-        model: body.modelId || body.model || null,
-        generationMode: body.mode || 't2v',
-        prompt: body.prompt || null,
-        aspectRatio: body.params?.aspectRatio || body.aspectRatio || null,
-        resolution: body.params?.resolution || null,
-        duration: body.params?.duration || null,
-        sampleCount: body.sampleCount || 1,
-        requestParams: attachUsageMediaSummary(body, mediaSummary),
-        engineTaskId: taskId || null,
-        upstreamRequestId: traceMetadata?.requestId || null,
-        upstreamTraceId: traceMetadata?.traceId || null,
-        upstreamUrl: url,
-      }).catch((error) => {
-        console.error('[monitor-debug] insertUsageLog promise rejected:', error)
-      })
-    } catch (error) {
-      console.error('[monitor-debug] /api/veo/generate monitor callback failed:', error)
-    }
+    if (status >= 400) return
+    const taskId = extractAggregationTaskId(payload)
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'aggregation',
+      providerId: body.providerId || null,
+      model: body.modelId || body.model || null,
+      generationMode: body.mode || 't2v',
+      prompt: body.prompt || null,
+      aspectRatio: body.params?.aspectRatio || body.aspectRatio || null,
+      resolution: body.params?.resolution || null,
+      duration: body.params?.duration || null,
+      sampleCount: body.sampleCount || 1,
+      requestParams: attachUsageMediaSummary(body, mediaSummary),
+      engineTaskId: taskId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: url,
+      status: taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
+      errorMessage: taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
+    }).catch(() => {})
   })
 })
 
@@ -376,57 +387,50 @@ app.post('/api/veo/queryResult', async (req, res) => {
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
   }, ({ payload, traceMetadata }) => {
-    try {
-      const taskId = extractAggregationTaskId(payload) || normalizeTaskIdValue(req.body?.taskId)
-      const queryFailedMessage = payload?.success === false
-        ? (extractAggregationMessage(payload) || '查询任务状态失败')
-        : null
-      const finalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
-      const finalMessage = finalStatus && finalStatus !== 'succeeded'
-        ? extractAggregationMessage(payload)
-        : null
-      console.log('[monitor-debug] /api/veo/queryResult upstream:', {
-        taskId: taskId || null,
-        finalStatus: finalStatus || null,
-        requestId: traceMetadata?.requestId || null,
-        traceId: traceMetadata?.traceId || null,
-      })
-      if (taskId && queryFailedMessage) {
-        updateUsageLogByTaskId(taskId, {
-          status: 'failed',
-          videoUrl: null,
-          errorMessage: queryFailedMessage,
-          completedAt: new Date().toISOString(),
-          upstreamRequestId: traceMetadata?.requestId || null,
-          upstreamTraceId: traceMetadata?.traceId || null,
-        }).catch((error) => {
-          console.error('[monitor-debug] updateUsageLogByTaskId promise rejected:', error)
-        })
-        return
-      }
-      if (!taskId || !finalStatus) return
+    const syncUpdate = buildAggregationUsageLogSyncUpdate({
+      payload,
+      requestedTaskId: req.body?.taskId,
+      traceMetadata,
+    })
+    if (syncUpdate?.taskId && syncUpdate.updates) {
+      updateUsageLogByTaskId(syncUpdate.taskId, syncUpdate.updates).catch(() => {})
+      return
+    }
+
+    const taskId = extractAggregationTaskId(payload) || normalizeTaskIdValue(req.body?.taskId)
+    const queryFailedMessage = payload?.success === false
+      ? (extractAggregationTerminalMessage(payload) || '查询任务状态失败')
+      : null
+
+    if (taskId && queryFailedMessage) {
       updateUsageLogByTaskId(taskId, {
-        status: finalStatus,
-        videoUrl: finalStatus === 'succeeded' ? extractAggregationVideoUrl(payload) : null,
-        errorMessage: finalMessage,
+        status: 'failed',
+        videoUrl: null,
+        errorMessage: queryFailedMessage,
         completedAt: new Date().toISOString(),
         upstreamRequestId: traceMetadata?.requestId || null,
         upstreamTraceId: traceMetadata?.traceId || null,
-      }).catch((error) => {
-        console.error('[monitor-debug] updateUsageLogByTaskId promise rejected:', error)
-      })
-    } catch (error) {
-      console.error('[monitor-debug] /api/veo/queryResult monitor callback failed:', error)
+      }).catch(() => {})
+      return
     }
+
+    const finalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
+    const finalMessage = finalStatus && finalStatus !== 'succeeded'
+      ? extractAggregationTerminalMessage(payload)
+      : null
+    if (!taskId || !finalStatus) return
+    updateUsageLogByTaskId(taskId, {
+      status: finalStatus,
+      videoUrl: finalStatus === 'succeeded' ? extractAggregationVideoUrl(payload) : null,
+      errorMessage: finalMessage,
+      completedAt: new Date().toISOString(),
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+    }).catch(() => {})
   })
 })
 
 app.post('/api/image/chat/completions', async (req, res) => {
-  console.log('[monitor-debug] /api/image/chat/completions hit:', {
-    hasSession: Boolean(req.videoSiteSession?.user),
-    userKeys: req.videoSiteSession?.user ? Object.keys(req.videoSiteSession.user) : [],
-    model: req.body?.model || null,
-  })
   if (!process.env.IMAGE_API_KEY) {
     res.status(500).json({
       error: {
@@ -437,13 +441,32 @@ app.post('/api/image/chat/completions', async (req, res) => {
     return
   }
 
-  const body = req.body || {}
+  const body = normalizeOpenAiImageRequestBody(req.body || {})
   const mediaSummary = parseUsageMediaSummaryHeader(req)
-  await proxyJson(req, res, `${imageApiBaseUrl}/chat/completions`, {
-    Authorization: `Bearer ${process.env.IMAGE_API_KEY}`,
-  }, ({ payload, traceMetadata, status, url }) => {
-    const imageResult = status < 400 ? extractImageResponseResult(payload) : null
-    const succeeded = Boolean(imageResult)
+  const upstreamBody = JSON.parse(JSON.stringify(body))
+  delete upstreamBody.providerId
+
+  try {
+    const response = await fetch(`${imageApiBaseUrl}/chat/completions`, {
+      method: req.method,
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${process.env.IMAGE_API_KEY}`,
+      },
+      body: JSON.stringify(upstreamBody),
+    })
+
+    const buffer = Buffer.from(await response.arrayBuffer())
+    const contentType = response.headers.get('content-type') || ''
+    const parsedPayload = tryParseJsonBuffer(buffer, contentType)
+    const traceMetadata = extractUpstreamTraceMetadata(response, parsedPayload)
+    const tracedPayload = injectUpstreamTraceMetadata(parsedPayload, traceMetadata)
+    const imageResult = response.status < 400 ? extractImageResponseResult(parsedPayload, extractImagePromptText(body) || '') : null
+    const succeeded = response.status < 400 && Boolean(imageResult)
+    const imageErrorMessage = response.status >= 400
+      ? (parsedPayload?.error?.message || null)
+      : (succeeded ? null : buildImageResponseParseError(parsedPayload))
+
     insertUsageLog({
       session: req.videoSiteSession,
       channel: 'image',
@@ -457,13 +480,218 @@ app.post('/api/image/chat/completions', async (req, res) => {
       }, mediaSummary),
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
-      upstreamUrl: url,
+      upstreamUrl: `${imageApiBaseUrl}/chat/completions`,
       status: succeeded ? 'succeeded' : 'failed',
-      errorMessage: succeeded
-        ? null
-        : (payload?.error?.message || buildImageResponseParseError(payload)),
+      errorMessage: imageErrorMessage,
+    }).catch(() => {})
+
+    if (response.status < 400 && !imageResult) {
+      applyUpstreamTraceHeaders(res, traceMetadata)
+      res.status(422).json({
+        error: {
+          message: imageErrorMessage || 'Image generation completed but no image data was found in the response.',
+          type: 'image_generation_error',
+        },
+        ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+        ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+      })
+      return
+    }
+
+    res.status(response.status)
+    copyUpstreamResponseHeaders(res, response.headers)
+    applyUpstreamTraceHeaders(res, traceMetadata)
+
+    if (tracedPayload !== null) {
+      if (!res.getHeader('Content-Type')) {
+        res.setHeader('Content-Type', contentType || 'application/json; charset=utf-8')
+      }
+      res.send(JSON.stringify(tracedPayload))
+      return
+    }
+
+    res.end(buffer)
+  } catch (error) {
+    applyUpstreamTraceHeaders(res, error)
+    res.status(502).json({
+      success: false,
+      message: error.message || 'Upstream request failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
+app.post('/api/image/aggregation/generate', async (req, res) => {
+  const missing = getMissingImageAggregationConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  const body = req.body || {}
+  const mediaSummary = parseUsageMediaSummaryHeader(req)
+  const upstreamBody = normalizeAggregationImageGenerateBody(body)
+
+  await proxyJsonWithBody(req, res, `${imageAggregationApiBaseUrl}/openApi/generate`, upstreamBody, buildImageAggregationHeaders(), ({ payload, traceMetadata, status, url }) => {
+    if (status >= 400) return
+    const taskId = extractAggregationTaskId(payload)
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'image',
+      providerId: body.providerId || 'gemini-image-aggregation',
+      model: upstreamBody.modelId || body.modelId || body.model || null,
+      generationMode: 'image',
+      prompt: upstreamBody.prompt || null,
+      aspectRatio: upstreamBody.payload?.params?.scale || null,
+      resolution: upstreamBody.payload?.params?.resolution || null,
+      sampleCount: 1,
+      requestParams: attachUsageMediaSummary({
+        modelId: upstreamBody.modelId || null,
+        abilityType: 'IMAGE',
+        payload: upstreamBody.payload || null,
+      }, mediaSummary),
+      engineTaskId: taskId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: url,
+      status: taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
+      errorMessage: taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
     }).catch(() => {})
   })
+})
+
+app.post('/api/image/aggregation/queryResult', async (req, res) => {
+  const missing = getMissingImageAggregationConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  const upstreamBody = normalizeAggregationImageQueryBody(req.body || {})
+
+  await proxyJsonWithBody(req, res, `${imageAggregationApiBaseUrl}/openApi/queryResult`, upstreamBody, buildImageAggregationHeaders(), ({ payload, traceMetadata }) => {
+    const syncUpdate = buildAggregationUsageLogSyncUpdate({
+      payload,
+      requestedTaskId: upstreamBody.taskId,
+      traceMetadata,
+      mediaUrlResolver: extractAggregationImageUrl,
+    })
+    if (syncUpdate?.taskId && syncUpdate.updates) {
+      updateUsageLogByTaskId(syncUpdate.taskId, syncUpdate.updates).catch(() => {})
+    }
+  })
+})
+
+app.post('/api/yunwu/generate', async (req, res) => {
+  const missing = getMissingYunwuConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  try {
+    const body = req.body || {}
+    const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
+    const requestSpec = buildYunwuGenerateRequest(body)
+    const upstream = await requestYunwu(requestSpec)
+    const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
+    const normalized = normalizeYunwuGenerateResponse(upstream.payload, requestSpec, traceMetadata)
+
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'yunwu',
+      providerId: body.providerId || null,
+      model: body.params?.model || requestSpec.body?.model || null,
+      generationMode: body.mode || 't2v',
+      prompt: body.prompt || null,
+      aspectRatio: body.params?.aspectRatio || null,
+      resolution: body.params?.resolution || null,
+      duration: body.params?.duration || null,
+      requestParams: attachUsageMediaSummary(body, mediaSummary),
+      engineTaskId: normalized.taskId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: `${yunwuApiBaseUrl}${requestSpec.path}`,
+      status: normalized.taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
+      errorMessage: normalized.taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
+    }).catch(() => {})
+
+    applyUpstreamTraceHeaders(res, traceMetadata)
+    res.json({
+      success: true,
+      data: normalized,
+      ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+      ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Yunwu generate failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
+app.post('/api/yunwu/query', async (req, res) => {
+  const missing = getMissingYunwuConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  try {
+    const requestSpec = buildYunwuQueryRequest(req.body || {})
+    const upstream = await requestYunwu(requestSpec)
+    const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
+    const normalized = normalizeYunwuQueryResponse(upstream.payload, requestSpec, traceMetadata)
+
+    if (normalized.status === 'succeeded' || normalized.status === 'failed') {
+      const taskId = normalized.taskId || req.body?.taskId
+      if (taskId) {
+        updateUsageLogByTaskId(taskId, {
+          status: normalized.status,
+          videoUrl: normalized.videoUrl || null,
+          errorMessage: normalized.status === 'failed' ? (normalized.message || null) : null,
+          completedAt: new Date().toISOString(),
+          upstreamRequestId: traceMetadata?.requestId || null,
+          upstreamTraceId: traceMetadata?.traceId || null,
+        }).catch(() => {})
+      }
+    }
+
+    applyUpstreamTraceHeaders(res, traceMetadata)
+    res.json({
+      success: true,
+      data: normalized,
+      ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+      ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Yunwu query failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
 })
 
 app.post('/api/wan/generate', async (req, res) => {
@@ -482,7 +710,7 @@ app.post('/api/wan/generate', async (req, res) => {
     const requestSpec = buildDashScopeWanGenerateRequest(body)
     const upstream = await requestDashScope(requestSpec)
     const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
-    const normalized = normalizeDashScopeWanTask(upstream.payload)
+    const normalized = normalizeYunwuGenerateResponse(upstream.payload, requestSpec, traceMetadata)
 
     insertUsageLog({
       session: req.videoSiteSession,
@@ -499,12 +727,14 @@ app.post('/api/wan/generate', async (req, res) => {
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
       upstreamUrl: `${dashScopeBaseUrl}${requestSpec.path}`,
+      status: normalized.taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
+      errorMessage: normalized.taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
     }).catch(() => {})
 
     applyUpstreamTraceHeaders(res, traceMetadata)
     res.json({
       success: true,
-      data: buildWanClientTask(normalized),
+      data: normalized,
       ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
       ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
     })
@@ -534,28 +764,26 @@ app.post('/api/wan/query', async (req, res) => {
     const requestSpec = buildDashScopeWanQueryRequest(req.body || {})
     const upstream = await requestDashScope(requestSpec)
     const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
-    const normalized = normalizeDashScopeWanTask(upstream.payload)
+    const normalized = normalizeYunwuQueryResponse(upstream.payload, requestSpec, traceMetadata)
 
-    if (normalized.status === 'succeeded' || normalized.status === 'failed' || normalized.status === 'cancelled') {
+    if (normalized.status === 'succeeded' || normalized.status === 'failed') {
       const taskId = normalized.taskId || req.body?.taskId
       if (taskId) {
-        try {
-          await updateUsageLogByTaskId(taskId, {
-            status: normalized.status,
-            videoUrl: normalized.videoUrl || null,
-            errorMessage: normalized.status === 'succeeded' ? null : (normalized.message || null),
-            completedAt: new Date().toISOString(),
-            upstreamRequestId: traceMetadata?.requestId || null,
-            upstreamTraceId: traceMetadata?.traceId || null,
-          })
-        } catch (_) {}
+        updateUsageLogByTaskId(taskId, {
+          status: normalized.status,
+          videoUrl: normalized.videoUrl || null,
+          errorMessage: normalized.status === 'failed' ? (normalized.message || null) : null,
+          completedAt: new Date().toISOString(),
+          upstreamRequestId: traceMetadata?.requestId || null,
+          upstreamTraceId: traceMetadata?.traceId || null,
+        }).catch(() => {})
       }
     }
 
     applyUpstreamTraceHeaders(res, traceMetadata)
     res.json({
       success: true,
-      data: buildWanClientTask(normalized),
+      data: normalized,
       ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
       ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
     })
@@ -565,54 +793,6 @@ app.post('/api/wan/query', async (req, res) => {
     res.status(statusCode).json({
       success: false,
       message: error.message || 'DashScope Wan query failed',
-      ...(error.requestId ? { requestId: error.requestId } : {}),
-      ...(error.traceId ? { traceId: error.traceId } : {}),
-    })
-  }
-})
-
-app.get('/api/wan/content/:taskId', async (req, res) => {
-  const taskId = normalizeTaskIdValue(req.params.taskId)
-  if (!taskId) {
-    res.status(400).json({
-      success: false,
-      message: 'Missing taskId',
-    })
-    return
-  }
-
-  try {
-    const videoUrl = await resolveWanContentUrl(taskId)
-    if (!videoUrl) {
-      res.status(404).json({
-        success: false,
-        message: 'Wan task video URL not found yet.',
-      })
-      return
-    }
-
-    const upstreamHeaders = {}
-    if (typeof req.headers.range === 'string' && req.headers.range.trim()) {
-      upstreamHeaders.Range = req.headers.range
-    }
-
-    const response = await fetch(videoUrl, {
-      method: 'GET',
-      headers: upstreamHeaders,
-    })
-
-    res.status(response.status)
-    copyUpstreamResponseHeaders(res, response.headers)
-    res.setHeader('Cache-Control', 'private, max-age=300')
-
-    const buffer = Buffer.from(await response.arrayBuffer())
-    res.end(buffer)
-  } catch (error) {
-    const statusCode = Number(error.statusCode) || 502
-    applyUpstreamTraceHeaders(res, error)
-    res.status(statusCode).json({
-      success: false,
-      message: error.message || 'Wan content proxy failed',
       ...(error.requestId ? { requestId: error.requestId } : {}),
       ...(error.traceId ? { traceId: error.traceId } : {}),
     })
@@ -635,6 +815,74 @@ function summarizeBase64Field(value) {
     hasDataUrlPrefix: /^data:/i.test(value),
     containsBase64Marker: value.includes(';base64,'),
   }
+}
+
+function normalizeOpenAiImageRequestBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return body
+  }
+
+  const normalized = JSON.parse(JSON.stringify(body))
+  if (!Array.isArray(normalized.messages)) {
+    return normalized
+  }
+
+  normalized.messages = normalized.messages.map((message) => {
+    if (!message || typeof message !== 'object' || !Array.isArray(message.content)) {
+      return message
+    }
+
+    return {
+      ...message,
+      content: message.content.map(normalizeOpenAiImageContentItem),
+    }
+  })
+
+  return normalized
+}
+
+function normalizeOpenAiImageContentItem(item) {
+  if (!item || typeof item !== 'object') {
+    return item
+  }
+
+  if (item.type === 'image_base64' && typeof item.image_base64 === 'string' && item.image_base64.trim()) {
+    return {
+      ...item,
+      type: 'image_url',
+      image_url: {
+        url: buildDataUrlFromImageItem(item),
+      },
+    }
+  }
+
+  if (item.type === 'image_url' && typeof item.image_url === 'string' && item.image_url.trim()) {
+    return {
+      ...item,
+      image_url: {
+        url: item.image_url.trim(),
+      },
+    }
+  }
+
+  return item
+}
+
+function buildDataUrlFromImageItem(item) {
+  const rawValue = typeof item?.image_base64 === 'string' ? item.image_base64.trim() : ''
+  if (!rawValue) {
+    return ''
+  }
+
+  if (/^data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+$/i.test(rawValue)) {
+    return rawValue.replace(/\s/g, '')
+  }
+
+  const mimeType = typeof item?.mime_type === 'string'
+    ? item.mime_type
+    : (typeof item?.mimeType === 'string' ? item.mimeType : 'image/png')
+
+  return `data:${mimeType};base64,${rawValue.replace(/\s/g, '')}`
 }
 
 function extractImagePromptText(body) {
@@ -671,6 +919,11 @@ function extractImageMediaCounts(body) {
 }
 
 function buildImageResponseParseError(data) {
+  const textFailureMessage = extractImageTextFailureMessage(data)
+  if (textFailureMessage) {
+    return textFailureMessage
+  }
+
   const summary = summarizeImageResponseShape(data)
   if (!summary) {
     return 'Image generation completed but no image data was found in the response.'
@@ -723,6 +976,125 @@ function summarizeImageResponseShape(data) {
   return fields.filter(Boolean).join(' | ') || null
 }
 
+function extractImageTextFailureMessage(data) {
+  const content = data?.choices?.[0]?.message?.content
+  if (typeof content === 'string') {
+    const trimmed = content.trim()
+    if (
+      trimmed
+      && !trimmed.startsWith('data:image/')
+      && !/!\[[^\]]*]\((?:data:image\/|https?:\/\/)/.test(trimmed)
+      && !/https?:\/\/[^\s"'`<>)]+/i.test(trimmed)
+    ) {
+      return trimmed.slice(0, 300)
+    }
+  }
+
+  return null
+}
+
+function normalizeExtractedImageUrl(url) {
+  if (typeof url !== 'string') {
+    return null
+  }
+
+  const trimmed = url.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  return trimmed.startsWith('data:image/')
+    ? trimmed.replace(/\s/g, '')
+    : trimmed
+}
+
+function tryParseStructuredImageString(content, fallbackPrompt = '') {
+  if (typeof content !== 'string') {
+    return null
+  }
+
+  const candidates = [content]
+  const fencedMatch = content.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  if (fencedMatch?.[1]) {
+    candidates.unshift(fencedMatch[1])
+  }
+
+  for (const candidate of candidates) {
+    const trimmed = candidate.trim()
+    if (!trimmed || !/^[\[{"]/.test(trimmed)) {
+      continue
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed)
+      const parsedResponse = extractImageResponseResult(parsed, fallbackPrompt)
+      if (parsedResponse) {
+        return parsedResponse
+      }
+
+      const directRecord = extractImageRecord(parsed, fallbackPrompt)
+      if (directRecord) {
+        return directRecord
+      }
+    } catch {
+      // Ignore malformed JSON-like strings and continue with other strategies.
+    }
+  }
+
+  return null
+}
+
+function extractImageUrlFromString(content, fallbackPrompt = '') {
+  if (typeof content !== 'string') {
+    return null
+  }
+
+  const trimmed = content.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  const markdownMatch = trimmed.match(/!\[[^\]]*]\(([^)]+)\)/s)
+  if (markdownMatch?.[1]) {
+    const nestedMatch = extractImageUrlFromString(markdownMatch[1], fallbackPrompt)
+    if (nestedMatch) {
+      return nestedMatch
+    }
+  }
+
+  if (trimmed.startsWith('data:image/')) {
+    return { url: normalizeExtractedImageUrl(trimmed), revisedPrompt: fallbackPrompt }
+  }
+
+  const dataUrlMatch = trimmed.match(/data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)/)
+  if (dataUrlMatch) {
+    return { url: dataUrlMatch[0].replace(/\s/g, ''), revisedPrompt: fallbackPrompt }
+  }
+
+  const structuredResult = tryParseStructuredImageString(trimmed, fallbackPrompt)
+  if (structuredResult) {
+    return structuredResult
+  }
+
+  const urlMatch = trimmed.match(/https?:\/\/[^\s"'`<>)]+/i)
+  if (urlMatch) {
+    return {
+      url: normalizeExtractedImageUrl(urlMatch[0]),
+      revisedPrompt: fallbackPrompt,
+    }
+  }
+
+  const rawBase64Match = trimmed.match(/\b([A-Za-z0-9+/]{100,}={0,2})\b/)
+  if (rawBase64Match) {
+    return {
+      url: `data:image/png;base64,${rawBase64Match[1]}`,
+      revisedPrompt: fallbackPrompt,
+    }
+  }
+
+  return null
+}
+
 function extractInlineImagePayload(payload, fallbackPrompt = '') {
   if (!payload || typeof payload !== 'object') {
     return null
@@ -763,20 +1135,40 @@ function extractImageParts(parts, fallbackPrompt = '') {
 }
 
 function extractImageRecord(record, fallbackPrompt = '') {
+  if (typeof record === 'string') {
+    return extractImageUrlFromString(record, fallbackPrompt)
+  }
+
   if (!record || typeof record !== 'object') {
     return null
   }
 
   if (typeof record.url === 'string' && record.url) {
+    const parsedUrl = extractImageUrlFromString(record.url, fallbackPrompt)
     return {
-      url: record.url,
+      url: parsedUrl?.url || normalizeExtractedImageUrl(record.url),
       revisedPrompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
     }
   }
 
-  if (record.image_url?.url) {
+  const imageUrlValue = typeof record.image_url === 'string'
+    ? record.image_url
+    : record.image_url?.url
+  if (imageUrlValue) {
+    const parsedUrl = extractImageUrlFromString(imageUrlValue, fallbackPrompt)
     return {
-      url: record.image_url.url,
+      url: parsedUrl?.url || normalizeExtractedImageUrl(imageUrlValue),
+      revisedPrompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
+    }
+  }
+
+  const imageValue = typeof record.image === 'string'
+    ? record.image
+    : record.image?.url
+  if (imageValue) {
+    const parsedUrl = extractImageUrlFromString(imageValue, fallbackPrompt)
+    return {
+      url: parsedUrl?.url || normalizeExtractedImageUrl(imageValue),
       revisedPrompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
     }
   }
@@ -804,30 +1196,24 @@ function extractImageResponseResult(data, fallbackPrompt = '') {
   const content = data?.choices?.[0]?.message?.content
 
   if (typeof content === 'string') {
-    const markdownMatch = content.match(/!\[.*?\]\((data:image\/[^;]+;base64,[^)]+)\)/)
-    if (markdownMatch) {
-      return { url: markdownMatch[1], revisedPrompt: fallbackPrompt }
-    }
-
-    if (content.startsWith('data:image/')) {
-      return { url: content, revisedPrompt: fallbackPrompt }
-    }
-
-    const dataUrlMatch = content.match(/data:(image\/[a-zA-Z+]+);base64,([A-Za-z0-9+/=\s]+)/)
-    if (dataUrlMatch) {
-      return { url: dataUrlMatch[0].replace(/\s/g, ''), revisedPrompt: fallbackPrompt }
-    }
-
-    const rawBase64Match = content.match(/\b([A-Za-z0-9+/]{100,}={0,2})\b/)
-    if (rawBase64Match) {
-      return { url: `data:image/png;base64,${rawBase64Match[1]}`, revisedPrompt: fallbackPrompt }
+    const stringResult = extractImageUrlFromString(content, fallbackPrompt)
+    if (stringResult) {
+      return stringResult
     }
   }
 
   if (Array.isArray(content)) {
-    const imageItem = content.find((item) => item?.type === 'image_url' && item?.image_url?.url)
+    const imageItem = content.find((item) => item?.type === 'image_url' && (
+      item?.image_url?.url || typeof item?.image_url === 'string'
+    ))
     if (imageItem) {
-      return { url: imageItem.image_url.url, revisedPrompt: fallbackPrompt }
+      const imageUrlValue = typeof imageItem.image_url === 'string'
+        ? imageItem.image_url
+        : imageItem.image_url.url
+      return {
+        url: normalizeExtractedImageUrl(imageUrlValue),
+        revisedPrompt: fallbackPrompt,
+      }
     }
 
     const base64Item = content.find((item) => item?.type === 'image_base64' && typeof item?.image_base64 === 'string')
@@ -838,9 +1224,21 @@ function extractImageResponseResult(data, fallbackPrompt = '') {
         revisedPrompt: fallbackPrompt,
       }
     }
+
+    for (const contentItem of content) {
+      const parsedRecord = extractImageRecord(contentItem, fallbackPrompt)
+      if (parsedRecord) {
+        return parsedRecord
+      }
+    }
   }
 
-  const topLevelCollections = [data?.data, data?.images]
+  const topLevelRecord = extractImageRecord(data, fallbackPrompt)
+  if (topLevelRecord) {
+    return topLevelRecord
+  }
+
+  const topLevelCollections = [data?.data, data?.images, data?.results, data?.artifacts]
   for (const collection of topLevelCollections) {
     if (!Array.isArray(collection)) continue
 
@@ -849,6 +1247,14 @@ function extractImageResponseResult(data, fallbackPrompt = '') {
       if (parsedRecord) {
         return parsedRecord
       }
+    }
+  }
+
+  const directContainers = [data?.result, data?.image]
+  for (const entry of directContainers) {
+    const directRecord = extractImageRecord(entry, fallbackPrompt)
+    if (directRecord) {
+      return directRecord
     }
   }
 
@@ -937,6 +1343,10 @@ function resolveUsageMediaSummary(requestParams, headerSummary) {
     return null
   }
 
+  return buildUploadedReferenceMediaSummary(references)
+}
+
+function buildUploadedReferenceMediaSummary(references) {
   return {
     images: buildUploadedReferenceMetric(references.images),
     videos: buildUploadedReferenceMetric(references.videos),
@@ -950,16 +1360,6 @@ function buildUploadedReferenceMetric(items) {
     count: refs.length,
     bytes: refs.reduce((total, item) => total + resolveUploadedReferenceBytes(item), 0),
   }
-}
-
-function registerUploadedReference(reference, bytes, expiresAtMs) {
-  const key = normalizeUploadedReferenceKey(reference)
-  if (!key) return
-
-  uploadedReferenceMetadata.set(key, {
-    bytes: Math.max(0, Number(bytes) || 0),
-    expiresAtMs: Math.max(Date.now(), Number(expiresAtMs) || Date.now()),
-  })
 }
 
 function resolveUploadedReferenceBytes(reference) {
@@ -977,126 +1377,29 @@ function resolveUploadedReferenceBytes(reference) {
   return metadata.bytes
 }
 
+function registerUploadedReference(reference, bytes, mimeType, expiresAtMs) {
+  const key = normalizeUploadedReferenceKey(reference)
+  if (!key) return
+
+  uploadedReferenceMetadata.set(key, {
+    bytes: Math.max(0, Number(bytes) || 0),
+    mimeType: typeof mimeType === 'string' ? mimeType : '',
+    expiresAtMs: Math.max(Date.now(), Number(expiresAtMs) || Date.now()),
+  })
+}
+
 function normalizeUploadedReferenceKey(reference) {
-  return typeof reference === 'string' ? reference.trim() : ''
+  if (typeof reference !== 'string') return ''
+  return reference.trim()
 }
 
-function findFirstPathValue(target, paths) {
-  for (const pathExpression of paths) {
-    const value = getPathValue(target, pathExpression)
-    if (value !== undefined && value !== null && value !== '') {
-      return value
+function cleanupUploadedReferenceMetadata() {
+  const now = Date.now()
+  for (const [key, metadata] of uploadedReferenceMetadata.entries()) {
+    if (!metadata || metadata.expiresAtMs <= now) {
+      uploadedReferenceMetadata.delete(key)
     }
   }
-
-  return null
-}
-
-function findFirstMatchingPathValue(target, paths, predicate) {
-  for (const pathExpression of paths) {
-    const value = getPathValue(target, pathExpression)
-    if (predicate(value, pathExpression)) {
-      return value.trim()
-    }
-  }
-
-  return null
-}
-
-function getPathValue(target, pathExpression) {
-  if (!target || typeof target !== 'object') {
-    return undefined
-  }
-
-  const segments = String(pathExpression || '').split('.').filter(Boolean)
-  let current = target
-
-  for (const segment of segments) {
-    if (current === null || current === undefined) {
-      return undefined
-    }
-
-    if (/^\d+$/.test(segment)) {
-      current = current[Number(segment)]
-      continue
-    }
-
-    current = current[segment]
-  }
-
-  return current
-}
-
-function findFirstMediaUrlDeep(target, depth = 0, keyPath = '') {
-  if (!target || depth > 6) {
-    return null
-  }
-
-  if (typeof target === 'string') {
-    return isLikelyRemoteVideoUrl(target, keyPath) ? target.trim() : null
-  }
-
-  if (Array.isArray(target)) {
-    for (let index = 0; index < target.length; index += 1) {
-      const match = findFirstMediaUrlDeep(
-        target[index],
-        depth + 1,
-        keyPath ? `${keyPath}.${index}` : String(index),
-      )
-      if (match) {
-        return match
-      }
-    }
-    return null
-  }
-
-  if (typeof target === 'object') {
-    for (const [key, value] of Object.entries(target)) {
-      const nextKeyPath = keyPath ? `${keyPath}.${key}` : key
-      if (typeof value === 'string' && isLikelyRemoteVideoUrl(value, nextKeyPath)) {
-        return value.trim()
-      }
-
-      const nestedMatch = findFirstMediaUrlDeep(value, depth + 1, nextKeyPath)
-      if (nestedMatch) {
-        return nestedMatch
-      }
-    }
-  }
-
-  return null
-}
-
-function isLikelyRemoteVideoUrl(value, keyPath = '') {
-  if (typeof value !== 'string') {
-    return false
-  }
-
-  const normalized = value.trim()
-  if (!/^https?:\/\//i.test(normalized)) {
-    return false
-  }
-
-  try {
-    const parsed = new URL(normalized)
-    const searchable = `${parsed.pathname}${parsed.search}`.toLowerCase()
-    if (/\.(mp4|mov|webm|m3u8)(\?|$)/i.test(searchable)) {
-      return true
-    }
-
-    const normalizedKeyPath = keyPath.toLowerCase().replace(/[^a-z]/g, '')
-    if (/(videourl|downloadurl|download|fileurl|resulturl|outputurl|playurl|videofile)/.test(normalizedKeyPath)) {
-      return true
-    }
-
-    if (/\/(video|videos|download|downloads|file|files|play)\b/i.test(parsed.pathname)) {
-      return true
-    }
-  } catch {
-    return false
-  }
-
-  return false
 }
 
 function normalizeTaskIdValue(value) {
@@ -1213,7 +1516,64 @@ function extractAggregationVideoUrl(payload) {
   )
 }
 
-function extractAggregationMessage(payload) {
+function extractAggregationImageUrl(payload) {
+  const parsed = extractImageResponseResult(payload)
+  if (parsed?.url) {
+    return parsed.url
+  }
+
+  return (
+    findFirstMatchingPathValue(payload, [
+      'imageUrl',
+      'image_url',
+      'resultUrl',
+      'url',
+      'content',
+      'message',
+      'data.imageUrl',
+      'data.image_url',
+      'data.resultUrl',
+      'data.url',
+      'data.content',
+      'data.message',
+      'data.result.imageUrl',
+      'data.result.image_url',
+      'data.result.resultUrl',
+      'data.result.url',
+      'data.result.content',
+      'data.result.message',
+      'result.imageUrl',
+      'result.image_url',
+      'result.resultUrl',
+      'result.url',
+      'result.content',
+      'result.message',
+    ], isLikelyRemoteImageUrl)
+    || findFirstMediaUrlDeep(payload, 0, '', isLikelyRemoteImageUrl)
+  )
+}
+
+function normalizeComparableMessageText(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[！!。.\s]+/g, '')
+}
+
+function isGenericSuccessMessage(value) {
+  const normalized = normalizeComparableMessageText(value)
+  if (!normalized) return false
+
+  return [
+    '操作成功',
+    '请求成功',
+    '调用成功',
+    'success',
+    'ok',
+  ].includes(normalized)
+}
+
+function extractAggregationTerminalMessage(payload) {
   const preferredMessage = readFirstString(findFirstPathValue(payload, [
     'error',
     'errorMessage',
@@ -1259,20 +1619,6 @@ function extractAggregationMessage(payload) {
   return null
 }
 
-function normalizeComparableMessageText(value) {
-  return String(value ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/[！!。.\s]+/g, '')
-}
-
-function isGenericSuccessMessage(value) {
-  const normalized = normalizeComparableMessageText(value)
-  if (!normalized) return false
-
-  return ['操作成功', '请求成功', '调用成功', 'success', 'ok'].includes(normalized)
-}
-
 function extractVeoFastReferenceCounts(normalizedBody) {
   const firstInstance = Array.isArray(normalizedBody?.instances) ? normalizedBody.instances[0] : null
   if (!firstInstance) {
@@ -1282,7 +1628,7 @@ function extractVeoFastReferenceCounts(normalizedBody) {
   const imageCount = [
     firstInstance.image,
     firstInstance.lastFrame,
-    ...(Array.isArray(firstInstance.referenceImages) ? normalizedBody.instances[0].referenceImages.map((item) => item?.image) : []),
+    ...(Array.isArray(firstInstance.referenceImages) ? firstInstance.referenceImages.map((item) => item?.image) : []),
   ].filter(Boolean).length
 
   return { images: imageCount, videos: 0, audios: 0 }
@@ -1322,12 +1668,6 @@ function logVeoFastUpstream(route, taskId, response, buffer) {
 }
 
 app.post('/api/veo-fast/generate', async (req, res) => {
-  console.log('[monitor-debug] /api/veo-fast/generate hit:', {
-    hasSession: Boolean(req.videoSiteSession?.user),
-    userKeys: req.videoSiteSession?.user ? Object.keys(req.videoSiteSession.user) : [],
-    model: req.body?.model || null,
-    mode: req.body?.mode || req.body?.params?.mode || null,
-  })
   const apiKey = process.env.VEO_FAST_API_KEY?.trim()
   if (!apiKey) {
     res.status(500).json({
@@ -1367,12 +1707,7 @@ app.post('/api/veo-fast/generate', async (req, res) => {
     Authorization: `Bearer ${apiKey}`,
   }, ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) return
-    const taskId = payload?.task_id
-      || payload?.data?.task_id
-      || payload?.taskId
-      || payload?.data?.taskId
-      || payload?.name
-      || payload?.id
+    const taskId = payload?.name || payload?.task_id || payload?.id
     insertUsageLog({
       session: req.videoSiteSession,
       channel: 'veo_fast',
@@ -1392,6 +1727,8 @@ app.post('/api/veo-fast/generate', async (req, res) => {
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
       upstreamUrl: url,
+      status: taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
+      errorMessage: taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
     }).catch(() => {})
   })
 })
@@ -1422,25 +1759,17 @@ app.get('/api/veo-fast/status/:taskId', async (req, res) => {
     const buffer = Buffer.from(await response.arrayBuffer())
     logVeoFastUpstream('status', req.params.taskId, response, buffer)
 
+    // Track status update
     try {
       const contentType = response.headers.get('content-type') || ''
       if (contentType.includes('application/json')) {
         const parsed = JSON.parse(buffer.toString('utf8'))
         const state = parsed?.state || parsed?.status
-        const normalizedState = typeof state === 'string' ? state.toLowerCase() : ''
-        const directVideoUrl = parsed?.video_url || parsed?.videoUrl || null
-        const succeeded = (
-          normalizedState === 'succeeded'
-          || normalizedState === 'completed'
-          || ((parsed?.success === true) && Boolean(directVideoUrl))
-        )
-        const failed = normalizedState === 'failed'
-
-        if (succeeded || failed) {
+        if (state === 'succeeded' || state === 'failed' || state === 'SUCCEEDED' || state === 'FAILED') {
           updateUsageLogByTaskId(req.params.taskId, {
-            status: succeeded ? 'succeeded' : 'failed',
-            videoUrl: directVideoUrl,
-            errorMessage: failed ? (parsed?.error?.message || parsed?.message || null) : null,
+            status: state.toLowerCase() === 'succeeded' ? 'succeeded' : 'failed',
+            videoUrl: parsed?.video_url || parsed?.videoUrl || null,
+            errorMessage: state.toLowerCase() === 'failed' ? (parsed?.error?.message || parsed?.message || null) : null,
             completedAt: new Date().toISOString(),
             upstreamRequestId: traceMetadata?.requestId || null,
             upstreamTraceId: traceMetadata?.traceId || null,
@@ -1501,6 +1830,7 @@ cleanupExpiredUploads().catch((error) => {
   console.error('[cleanup]', error)
 })
 
+// Admin dashboard
 app.use('/api/admin', requireAdminApiAccess, adminRouter)
 app.get('/admin', requireAdminPageAccess, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'index.html'))
@@ -1536,6 +1866,7 @@ if (!isProduction) {
 httpServer.listen(port, async () => {
   console.log(`[server] ${mode} listening on http://localhost:${port}`)
   await initDatabase()
+  startUsageStatusMaintenanceLoop()
 })
 
 async function proxyJson(req, res, url, extraHeaders = {}, onResponse = null) {
@@ -1568,18 +1899,1180 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onRespo
     applyUpstreamTraceHeaders(res, traceMetadata)
 
     if (tracedPayload !== null) {
-      res.type('application/json')
-      res.end(JSON.stringify(tracedPayload))
+      if (!res.getHeader('Content-Type')) {
+        res.setHeader('Content-Type', contentType || 'application/json; charset=utf-8')
+      }
+      res.send(JSON.stringify(tracedPayload))
       return
     }
 
     res.end(buffer)
   } catch (error) {
+    applyUpstreamTraceHeaders(res, error)
     res.status(502).json({
       success: false,
       message: error.message || 'Upstream request failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
     })
   }
+}
+
+const YUNWU_VIDEO_PROVIDERS = {
+  'yunwu-seedance': { family: 'seedance' },
+  'yunwu-veo': { family: 'veo' },
+  'yunwu-kling': { family: 'kling' },
+  'yunwu-sora': { family: 'sora' },
+  'yunwu-hailuo': { family: 'hailuo' },
+  'yunwu-luma': { family: 'luma' },
+  'yunwu-runway': { family: 'runway' },
+  'yunwu-grok': { family: 'grok' },
+  'yunwu-wanxiang': { family: 'wanxiang' },
+  'yunwu-tencent': { family: 'tencent' },
+}
+
+function getMissingYunwuConfig() {
+  return [
+    !process.env.YUNWU_API_KEY && 'YUNWU_API_KEY',
+  ].filter(Boolean)
+}
+
+const DASHSCOPE_WAN_SIZE_MAP = {
+  '720P': {
+    '16:9': '1280*720',
+    '9:16': '720*1280',
+    '1:1': '960*960',
+    '4:3': '1088*832',
+    '3:4': '832*1088',
+  },
+  '1080P': {
+    '16:9': '1920*1080',
+    '9:16': '1080*1920',
+    '1:1': '1440*1440',
+    '4:3': '1632*1248',
+    '3:4': '1248*1632',
+  },
+}
+
+function getMissingDashScopeConfig() {
+  return [
+    !process.env.DASHSCOPE_API_KEY && 'DASHSCOPE_API_KEY',
+  ].filter(Boolean)
+}
+
+async function createDashScopeTemporaryReference({ file, model }) {
+  const policy = await getDashScopeUploadPolicy(model)
+  const key = buildDashScopeUploadKey(policy.uploadDir, file.originalname)
+  await uploadFileToDashScope({
+    file,
+    policy,
+    key,
+  })
+
+  const expiresAtMs = Date.now() + 48 * 60 * 60 * 1000
+
+  return {
+    resourceRef: `oss://${key}`,
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    expiresAtMs,
+  }
+}
+
+async function getDashScopeUploadPolicy(model) {
+  const upstream = await requestDashScope({
+    method: 'GET',
+    path: '/api/v1/uploads',
+    query: {
+      action: 'getPolicy',
+      model,
+    },
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  })
+
+  const data = upstream.payload?.data
+  if (!data?.upload_dir || !data?.upload_host || !data?.policy || !data?.signature || !data?.oss_access_key_id) {
+    throw createHttpError(502, 'DashScope upload policy response is incomplete.', extractUpstreamTraceMetadata(upstream.response, upstream.payload))
+  }
+
+  return {
+    uploadDir: String(data.upload_dir),
+    uploadHost: String(data.upload_host),
+    policy: String(data.policy),
+    signature: String(data.signature),
+    ossAccessKeyId: String(data.oss_access_key_id),
+    objectAcl: String(data.x_oss_object_acl || 'private'),
+    forbidOverwrite: String(data.x_oss_forbid_overwrite || 'true'),
+    maxFileSizeMb: Number(data.max_file_size_mb || 0),
+  }
+}
+
+async function uploadFileToDashScope({ file, policy, key }) {
+  if (policy.maxFileSizeMb > 0 && file.size > policy.maxFileSizeMb * 1024 * 1024) {
+    throw createHttpError(400, `Reference file exceeds DashScope upload limit of ${policy.maxFileSizeMb}MB.`)
+  }
+
+  const fileBuffer = await fsp.readFile(file.path)
+  const formData = new FormData()
+  formData.append('OSSAccessKeyId', policy.ossAccessKeyId)
+  formData.append('policy', policy.policy)
+  formData.append('Signature', policy.signature)
+  formData.append('key', key)
+  formData.append('x-oss-object-acl', policy.objectAcl)
+  formData.append('x-oss-forbid-overwrite', policy.forbidOverwrite)
+  formData.append('success_action_status', '200')
+  formData.append(
+    'file',
+    new Blob([fileBuffer], { type: file.mimetype || 'application/octet-stream' }),
+    sanitizeDashScopeUploadFileName(file.originalname),
+  )
+
+  const response = await fetch(policy.uploadHost, {
+    method: 'POST',
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const message = (await response.text()) || 'DashScope temp file upload failed.'
+    throw createHttpError(response.status, message)
+  }
+}
+
+function buildDashScopeUploadKey(uploadDir, originalName) {
+  const safeName = sanitizeDashScopeUploadFileName(originalName)
+  return `${String(uploadDir || '').replace(/\/+$/, '')}/${randomUUID()}-${safeName}`
+}
+
+function sanitizeDashScopeUploadFileName(originalName) {
+  const parsed = path.parse(path.basename(String(originalName || '').trim()))
+  const baseName = (parsed.name || 'reference').replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'reference'
+  const extension = (parsed.ext || '').replace(/[^\w.]+/g, '')
+  return `${baseName.slice(0, 80)}${extension.slice(0, 16)}`
+}
+
+function parseUploadStorageBackend(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return 'local'
+  if (normalized === 'dashscope') return 'dashscope'
+  return 'local'
+}
+
+function normalizeDashScopeUploadModel(value) {
+  const normalized = String(value || '').trim()
+  return normalized || ''
+}
+
+function buildDashScopeWanGenerateRequest(input) {
+  const providerId = String(input.providerId || 'wan1')
+  if (providerId !== 'wan1') {
+    throw createHttpError(400, `Unsupported DashScope Wan provider: ${providerId || 'unknown'}`)
+  }
+
+  const prompt = String(input.prompt || '').trim()
+  if (!prompt) {
+    throw createHttpError(400, 'Prompt is required.')
+  }
+
+  const params = input.params && typeof input.params === 'object' ? input.params : {}
+  const references = normalizeDashScopeWanReferences(input.references)
+
+  if (references.images.length > 5) {
+    throw createHttpError(400, 'DashScope Wan supports at most 5 reference images.')
+  }
+
+  if (references.videos.length > 3) {
+    throw createHttpError(400, 'DashScope Wan supports at most 3 reference videos.')
+  }
+
+  if (references.images.length + references.videos.length > 5) {
+    throw createHttpError(400, 'DashScope Wan requires reference images and videos to total 5 or fewer items.')
+  }
+
+  const referenceUrls = collectDashScopeWanReferenceUrls(references)
+  if (referenceUrls.length === 0) {
+    throw createHttpError(400, 'At least one DashScope Wan reference image or video is required.')
+  }
+
+  const negativePrompt = typeof params.negativePrompt === 'string' ? params.negativePrompt.trim() : ''
+  const seed = normalizeDashScopeWanSeed(params.seed)
+
+  return {
+    method: 'POST',
+    path: '/api/v1/services/aigc/video-generation/video-synthesis',
+    async: true,
+    resolveOssResource: referenceUrls.some((item) => isDashScopeOssResource(item)),
+    body: {
+      model: String(params.model || 'wan2.6-r2v-flash'),
+      input: {
+        prompt,
+        ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+        reference_urls: referenceUrls,
+      },
+      parameters: {
+        size: resolveDashScopeWanSize(params),
+        duration: resolveDashScopeWanDuration(params),
+        shot_type: resolveDashScopeWanShotType(params),
+        audio: Boolean(params.generateAudio),
+        watermark: Boolean(params.watermark),
+        ...(seed !== null ? { seed } : {}),
+      },
+    },
+  }
+}
+
+function buildDashScopeWanQueryRequest(input) {
+  const providerId = String(input.providerId || 'wan1')
+  if (providerId !== 'wan1') {
+    throw createHttpError(400, `Unsupported DashScope Wan provider: ${providerId || 'unknown'}`)
+  }
+
+  const taskId = String(input.taskId || '').trim()
+  if (!taskId) {
+    throw createHttpError(400, 'taskId is required.')
+  }
+
+  return {
+    method: 'GET',
+    path: `/api/v1/tasks/${encodeURIComponent(taskId)}`,
+  }
+}
+
+function normalizeDashScopeWanReferences(references) {
+  return {
+    images: Array.isArray(references?.images) ? references.images.filter((item) => typeof item === 'string' && item) : [],
+    videos: Array.isArray(references?.videos) ? references.videos.filter((item) => typeof item === 'string' && item) : [],
+    orderedVisualRefs: Array.isArray(references?.orderedVisualRefs)
+      ? references.orderedVisualRefs.filter((item) => typeof item === 'string' && item)
+      : [],
+  }
+}
+
+function collectDashScopeWanReferenceUrls(references) {
+  const ordered = references.orderedVisualRefs.slice(0, 5)
+  if (ordered.length > 0) {
+    return ordered
+  }
+
+  return [...references.images, ...references.videos].slice(0, 5)
+}
+
+function isDashScopeOssResource(value) {
+  return typeof value === 'string' && value.startsWith('oss://')
+}
+
+function resolveDashScopeWanSize(params) {
+  const explicitSize = normalizeDashScopeWanSize(params?.size)
+  if (explicitSize) {
+    return explicitSize
+  }
+
+  const resolution = String(params?.resolution || '720P').trim().toUpperCase()
+  const aspectRatio = String(params?.aspectRatio || '16:9').trim()
+  const size = DASHSCOPE_WAN_SIZE_MAP[resolution]?.[aspectRatio]
+
+  if (!size) {
+    throw createHttpError(400, `Unsupported DashScope Wan size mapping: ${resolution} / ${aspectRatio}`)
+  }
+
+  return size
+}
+
+function normalizeDashScopeWanSize(value) {
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  const normalized = value.trim()
+  if (!normalized) {
+    return null
+  }
+
+  for (const sizes of Object.values(DASHSCOPE_WAN_SIZE_MAP)) {
+    if (Object.values(sizes).includes(normalized)) {
+      return normalized
+    }
+  }
+
+  throw createHttpError(400, `Unsupported DashScope Wan size: ${normalized}`)
+}
+
+function resolveDashScopeWanDuration(params) {
+  const duration = Math.trunc(coercePositiveNumber(params?.duration, 5))
+  if (duration < 2 || duration > 10) {
+    throw createHttpError(400, 'DashScope Wan duration must be an integer between 2 and 10 seconds.')
+  }
+  return duration
+}
+
+function resolveDashScopeWanShotType(params) {
+  const shotType = String(params?.shotType || 'single').trim().toLowerCase()
+  if (shotType !== 'single' && shotType !== 'multi') {
+    throw createHttpError(400, `Unsupported DashScope Wan shot_type: ${shotType}`)
+  }
+  return shotType
+}
+
+function normalizeDashScopeWanSeed(value) {
+  if (value === null || value === undefined || value === '') {
+    return null
+  }
+
+  const seed = Math.trunc(Number(value))
+  if (!Number.isFinite(seed) || seed < 0 || seed > 2147483647) {
+    throw createHttpError(400, 'DashScope Wan seed must be an integer between 0 and 2147483647.')
+  }
+
+  return seed
+}
+
+function getYunwuProviderConfig(providerId) {
+  return YUNWU_VIDEO_PROVIDERS[providerId] || null
+}
+
+function buildYunwuGenerateRequest(input) {
+  const providerId = String(input.providerId || '')
+  const providerConfig = getYunwuProviderConfig(providerId)
+  if (!providerConfig) {
+    throw createHttpError(400, `Unsupported Yunwu provider: ${providerId || 'unknown'}`)
+  }
+
+  const prompt = String(input.prompt || '').trim()
+  if (!prompt) {
+    throw createHttpError(400, 'Prompt is required.')
+  }
+
+  const mode = String(input.mode || 't2v')
+  const params = input.params && typeof input.params === 'object' ? input.params : {}
+  const references = normalizeYunwuReferences(input.references)
+
+  switch (providerConfig.family) {
+    case 'veo':
+      return {
+        method: 'POST',
+        path: '/v1/video/create',
+        body: {
+          model: params.model,
+          prompt,
+          aspect_ratio: params.aspectRatio,
+          ...(typeof params.enhancePrompt === 'boolean' ? { enhance_prompt: params.enhancePrompt } : {}),
+          ...(typeof params.enableUpsample === 'boolean' ? { enable_upsample: params.enableUpsample } : {}),
+          ...(references.images.length > 0 ? { images: references.images } : {}),
+          ...(params.resolution ? { size: params.resolution } : {}),
+        },
+      }
+    case 'sora':
+      return {
+        method: 'POST',
+        path: '/v1/video/create',
+        body: {
+          model: params.model,
+          prompt,
+          duration: coercePositiveNumber(params.duration, 10),
+          orientation: mapOrientationFromAspectRatio(params.aspectRatio),
+          size: params.resolution || '720p',
+          private: params.privateOutput !== false,
+          watermark: Boolean(params.watermark),
+          ...(references.images.length > 0 ? { images: references.images.slice(0, 1) } : {}),
+        },
+      }
+    case 'grok':
+      return {
+        method: 'POST',
+        path: '/v1/video/create',
+        body: {
+          model: params.model,
+          prompt,
+          aspect_ratio: params.aspectRatio,
+          size: params.resolution || '720p',
+          ...(references.images.length > 0 ? { images: references.images.slice(0, 1) } : {}),
+        },
+      }
+    case 'hailuo':
+      return {
+        method: 'POST',
+        path: '/minimax/v1/video_generation',
+        body: {
+          model: params.model,
+          prompt,
+          duration: coercePositiveNumber(params.duration, 6),
+          ...(mode !== 't2v' && references.images[0] ? { first_frame_image: references.images[0] } : {}),
+          ...(mode === 'flf' && references.images[1] ? { last_frame_image: references.images[1] } : {}),
+          ...(mode !== 't2v'
+            ? {
+                resolution: params.resolution || '768P',
+                prompt_optimizer: params.promptOptimizer !== false,
+              }
+            : {}),
+        },
+      }
+    case 'luma':
+      return {
+        method: 'POST',
+        path: '/luma/generations',
+        body: {
+          user_prompt: prompt,
+          model_name: params.model,
+          duration: coercePositiveNumber(params.duration, 5),
+          resolution: params.resolution || '720p',
+        },
+      }
+    case 'runway':
+      return {
+        method: 'POST',
+        path: '/runwayml/v1/image_to_video',
+        body: {
+          model: params.model,
+          promptText: prompt,
+          promptImage: references.images[0],
+          duration: String(coercePositiveNumber(params.duration, 5)),
+          ratio: params.aspectRatio || '16:9',
+          watermark: Boolean(params.watermark),
+        },
+      }
+    case 'seedance':
+      return {
+        method: 'POST',
+        path: '/volc/v1/contents/generations/tasks',
+        body: {
+          model: params.model,
+          content: buildYunwuSeedanceContent(prompt, mode, params, references),
+        },
+      }
+    case 'kling': {
+      const createKind = resolveYunwuKlingCreateKind(mode)
+      return {
+        method: 'POST',
+        path: mapYunwuKlingCreatePath(createKind),
+        body: buildYunwuKlingBody(createKind, prompt, params, references),
+        queryContext: { createKind },
+      }
+    }
+    case 'wanxiang':
+      return {
+        method: 'POST',
+        path: '/alibailian/api/v1/services/aigc/video-generation/video-synthesis',
+        body: {
+          model: params.model,
+          input: {
+            prompt,
+            img_url: references.images[0],
+          },
+          parameters: {
+            resolution: params.resolution || '720p',
+            prompt_extend: params.promptExtend !== false,
+            audio: Boolean(params.generateAudio),
+          },
+        },
+      }
+    case 'tencent':
+      return {
+        method: 'POST',
+        path: '/tencent-vod/v1/aigc-video',
+        body: {
+          model_name: 'Kling',
+          model_version: params.model,
+          prompt,
+          output_config: {
+            storage_mode: 'url',
+            media_name: `veo-studio-${Date.now()}`,
+            duration: coercePositiveNumber(params.duration, 5),
+            resolution: params.resolution || '720p',
+            aspect_ratio: params.aspectRatio || '16:9',
+            audio_generation: Boolean(params.generateAudio),
+            person_generation: 'real',
+            input_compliance_check: false,
+            output_compliance_check: false,
+            enhance_switch: true,
+          },
+        },
+      }
+    default:
+      throw createHttpError(400, `Unsupported Yunwu family: ${providerConfig.family}`)
+  }
+}
+
+function buildYunwuQueryRequest(input) {
+  const providerId = String(input.providerId || '')
+  const providerConfig = getYunwuProviderConfig(providerId)
+  if (!providerConfig) {
+    throw createHttpError(400, `Unsupported Yunwu provider: ${providerId || 'unknown'}`)
+  }
+
+  const taskId = String(input.taskId || '').trim()
+  if (!taskId) {
+    throw createHttpError(400, 'taskId is required.')
+  }
+
+  const queryContext = input.queryContext && typeof input.queryContext === 'object' ? input.queryContext : {}
+
+  switch (providerConfig.family) {
+    case 'veo':
+    case 'sora':
+    case 'grok':
+      return {
+        method: 'GET',
+        path: '/v1/video/query',
+        query: { id: taskId },
+      }
+    case 'hailuo':
+      return {
+        method: 'GET',
+        path: '/minimax/v1/query/video_generation',
+        query: { task_id: taskId },
+      }
+    case 'luma':
+      return {
+        method: 'GET',
+        path: `/luma/generations/${encodeURIComponent(taskId)}`,
+      }
+    case 'runway':
+      return {
+        method: 'GET',
+        path: `/runwayml/v1/tasks/${encodeURIComponent(taskId)}`,
+      }
+    case 'seedance':
+      return {
+        method: 'GET',
+        path: `/volc/v1/contents/generations/tasks/${encodeURIComponent(taskId)}`,
+      }
+    case 'kling':
+      return {
+        method: 'GET',
+        path: mapYunwuKlingQueryPath(queryContext.createKind, taskId),
+      }
+    case 'wanxiang':
+      return {
+        method: 'GET',
+        path: `/alibailian/api/v1/tasks/${encodeURIComponent(taskId)}`,
+      }
+    case 'tencent':
+      return {
+        method: 'GET',
+        path: `/tencent-vod/v1/query/${encodeURIComponent(taskId)}`,
+      }
+    default:
+      throw createHttpError(400, `Unsupported Yunwu family: ${providerConfig.family}`)
+  }
+}
+
+async function requestYunwu(spec) {
+  const url = appendQueryParams(`${yunwuApiBaseUrl}${spec.path}`, spec.query)
+  const headers = {
+    Accept: 'application/json',
+    Authorization: `Bearer ${process.env.YUNWU_API_KEY}`,
+  }
+
+  if (spec.body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+  }
+
+  const options = {
+    method: spec.method || 'POST',
+    headers,
+    body: spec.body !== undefined ? JSON.stringify(spec.body) : undefined,
+  }
+
+  let response
+  let lastError = null
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await fetch(url, options)
+      break
+    } catch (error) {
+      lastError = error
+      if (attempt === 2) {
+        throw createHttpError(502, error?.message || 'Yunwu upstream fetch failed.')
+      }
+      await sleep(800 * (attempt + 1))
+    }
+  }
+
+  if (!response) {
+    throw createHttpError(502, lastError?.message || 'Yunwu upstream fetch failed.')
+  }
+
+  const contentType = response.headers.get('content-type') || ''
+  const payload = isJsonContentType(contentType)
+    ? await response.json()
+    : await response.text()
+  const traceMetadata = extractUpstreamTraceMetadata(response, payload)
+
+  if (!response.ok) {
+    const message = typeof payload === 'string'
+      ? payload
+      : payload?.message || payload?.msg || payload?.error?.message || JSON.stringify(payload)
+    throw createHttpError(response.status, message || 'Yunwu upstream request failed.', traceMetadata)
+  }
+
+  return { response, payload }
+}
+
+async function requestDashScope(spec) {
+  const url = appendQueryParams(`${dashScopeBaseUrl}${spec.path}`, spec.query)
+  const headers = {
+    Accept: 'application/json',
+    Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY}`,
+    ...(spec.headers || {}),
+  }
+
+  if (spec.async) {
+    headers['X-DashScope-Async'] = 'enable'
+  }
+
+  if (spec.resolveOssResource) {
+    headers['X-DashScope-OssResourceResolve'] = 'enable'
+  }
+
+  if (spec.body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+  }
+
+  const options = {
+    method: spec.method || 'POST',
+    headers,
+    body: spec.body !== undefined ? JSON.stringify(spec.body) : undefined,
+  }
+
+  let response
+  let lastError = null
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await fetch(url, options)
+      break
+    } catch (error) {
+      lastError = error
+      if (attempt === 2) {
+        throw createHttpError(502, error?.message || 'DashScope upstream fetch failed.')
+      }
+      await sleep(800 * (attempt + 1))
+    }
+  }
+
+  if (!response) {
+    throw createHttpError(502, lastError?.message || 'DashScope upstream fetch failed.')
+  }
+
+  const contentType = response.headers.get('content-type') || ''
+  const payload = isJsonContentType(contentType)
+    ? await response.json()
+    : await response.text()
+  const traceMetadata = extractUpstreamTraceMetadata(response, payload)
+
+  if (!response.ok) {
+    const message = typeof payload === 'string'
+      ? payload
+      : payload?.message || payload?.msg || payload?.error?.message || JSON.stringify(payload)
+    throw createHttpError(response.status, message || 'DashScope upstream request failed.', traceMetadata)
+  }
+
+  return { response, payload }
+}
+
+function normalizeYunwuGenerateResponse(payload, requestSpec, traceMetadata) {
+  return {
+    taskId: extractYunwuTaskId(payload),
+    status: normalizeYunwuStatus(extractYunwuStatus(payload) || 'submitted'),
+    message: extractYunwuMessage(payload),
+    videoUrl: extractYunwuVideoUrl(payload),
+    queryContext: requestSpec.queryContext || null,
+    ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+    ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+  }
+}
+
+function normalizeYunwuQueryResponse(payload, requestSpec, traceMetadata) {
+  return {
+    taskId: extractYunwuTaskId(payload) || readFirstString(requestSpec.query?.id, requestSpec.query?.task_id),
+    status: normalizeYunwuStatus(extractYunwuStatus(payload)),
+    message: extractYunwuMessage(payload),
+    videoUrl: extractYunwuVideoUrl(payload),
+    ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+    ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+  }
+}
+
+function normalizeYunwuReferences(references) {
+  return {
+    images: Array.isArray(references?.images) ? references.images.filter((item) => typeof item === 'string' && item) : [],
+    videos: Array.isArray(references?.videos) ? references.videos.filter((item) => typeof item === 'string' && item) : [],
+    audios: Array.isArray(references?.audios) ? references.audios.filter((item) => typeof item === 'string' && item) : [],
+  }
+}
+
+function buildYunwuSeedanceContent(prompt, mode, params, references) {
+  const flags = [
+    `--resolution ${params.resolution || '480p'}`,
+    `--ratio ${params.aspectRatio || '16:9'}`,
+    `--duration ${coercePositiveNumber(params.duration, 5)}`,
+    `--wm ${Boolean(params.watermark)}`,
+  ]
+
+  const content = [{
+    type: 'text',
+    text: `${prompt} ${flags.join(' ')}`.trim(),
+  }]
+
+  if (mode === 'i2v' && references.images[0]) {
+    content.push({ type: 'image_url', image_url: references.images[0] })
+  }
+
+  if (mode === 'flf') {
+    if (references.images[0]) {
+      content.push({ type: 'image_url', image_url: references.images[0], role: 'first_frame' })
+    }
+    if (references.images[1]) {
+      content.push({ type: 'image_url', image_url: references.images[1], role: 'last_frame' })
+    }
+  }
+
+  if (mode === 'ref') {
+    for (const imageUrl of references.images) {
+      content.push({ type: 'image_url', image_url: imageUrl, role: 'reference_image' })
+    }
+  }
+
+  return content
+}
+
+function resolveYunwuKlingCreateKind(mode) {
+  switch (mode) {
+    case 't2v':
+      return 'text2video'
+    case 'ref':
+      return 'multi-image2video'
+    case 'omni':
+      return 'omni-video'
+    case 'flf':
+    case 'i2v':
+    default:
+      return 'image2video'
+  }
+}
+
+function mapYunwuKlingCreatePath(createKind) {
+  switch (createKind) {
+    case 'text2video':
+      return '/kling/v1/videos/text2video'
+    case 'multi-image2video':
+      return '/kling/v1/videos/multi-image2video'
+    case 'omni-video':
+      return '/kling/v1/videos/omni-video'
+    case 'image2video':
+    default:
+      return '/kling/v1/videos/image2video'
+  }
+}
+
+function mapYunwuKlingQueryPath(createKind, taskId) {
+  switch (createKind) {
+    case 'text2video':
+      return `/kling/v1/videos/text2video/${encodeURIComponent(taskId)}`
+    case 'multi-image2video':
+      return `/kling/v1/videos/multi-image2video/${encodeURIComponent(taskId)}`
+    case 'omni-video':
+      return `/kling/v1/videos/omni-video/${encodeURIComponent(taskId)}`
+    case 'image2video':
+    default:
+      return `/kling/v1/videos/image2video/${encodeURIComponent(taskId)}`
+  }
+}
+
+function buildYunwuKlingBody(createKind, prompt, params, references) {
+  if (createKind === 'text2video') {
+    return {
+      model_name: params.model,
+      prompt,
+      aspect_ratio: params.aspectRatio || '16:9',
+      duration: String(coercePositiveNumber(params.duration, 5)),
+      sound: Boolean(params.generateAudio),
+    }
+  }
+
+  if (createKind === 'multi-image2video') {
+    return {
+      model_name: params.model,
+      prompt,
+      image_list: references.images.map((image) => ({ image })),
+      aspect_ratio: params.aspectRatio || '16:9',
+      duration: String(coercePositiveNumber(params.duration, 5)),
+      mode: 'std',
+    }
+  }
+
+  if (createKind === 'omni-video') {
+    return {
+      model_name: params.model,
+      prompt,
+      ...(references.images[0]
+        ? {
+            image_list: [
+              {
+                image_url: references.images[0],
+                type: 'first_frame',
+              },
+            ],
+          }
+        : {}),
+      ...(references.videos[0]
+        ? {
+            video_list: [
+              {
+                video_url: references.videos[0],
+                refer_type: 'base',
+                keep_original_sound: 'yes',
+              },
+            ],
+          }
+        : {}),
+      mode: 'std',
+      sound: params.generateAudio ? 'on' : 'off',
+      aspect_ratio: params.aspectRatio || '16:9',
+      duration: String(coercePositiveNumber(params.duration, 5)),
+    }
+  }
+
+  return {
+    model_name: params.model,
+    prompt,
+    image: references.images[0],
+    ...(references.images[1] ? { image_tail: references.images[1] } : {}),
+    aspect_ratio: params.aspectRatio || '16:9',
+    duration: String(coercePositiveNumber(params.duration, 5)),
+    sound: Boolean(params.generateAudio),
+  }
+}
+
+function extractYunwuTaskId(payload) {
+  const taskValue = findFirstPathValue(payload, [
+    'taskId',
+    'task_id',
+    'id',
+    'output.taskId',
+    'output.task_id',
+    'data.taskId',
+    'data.task_id',
+    'data.id',
+    'result.taskId',
+    'result.task_id',
+    'result.id',
+    'Response.TaskId',
+    'Response.TaskID',
+  ])
+
+  if (typeof taskValue === 'number') {
+    return String(taskValue)
+  }
+
+  return typeof taskValue === 'string' && taskValue.trim() ? taskValue.trim() : null
+}
+
+function extractYunwuStatus(payload) {
+  return readFirstString(
+    findFirstPathValue(payload, [
+      'status',
+      'state',
+      'task_status',
+      'output.status',
+      'output.state',
+      'output.task_status',
+      'detail.status',
+      'detail.state',
+      'detail.task_status',
+      'data.status',
+      'data.state',
+      'data.task_status',
+      'result.status',
+      'result.state',
+      'Response.Status',
+      'base_resp.status_msg',
+    ]),
+  )
+}
+
+function extractYunwuMessage(payload) {
+  const message = findFirstPathValue(payload, [
+    'message',
+    'msg',
+    'output.message',
+    'output.msg',
+    'error.message',
+    'error',
+    'detail.error_message',
+    'detail.errorMessage',
+    'detail.error.message',
+    'detail.message',
+    'detail.msg',
+    'detail.error',
+    'detail.images.0.error_message',
+    'detail.images.1.error_message',
+    'detail.images.2.error_message',
+    'detail.images.3.error_message',
+    'detail.images.4.error_message',
+    'data.message',
+    'data.msg',
+    'data.error.message',
+    'data.error',
+    'result.message',
+    'result.msg',
+    'result.error.message',
+    'result.error',
+    'failure_reason',
+    'base_resp.status_msg',
+    'Response.ErrorMessage',
+  ])
+
+  if (typeof message === 'string' && message.trim()) {
+    return message.trim()
+  }
+
+  return null
+}
+
+function extractYunwuVideoUrl(payload) {
+  return (
+    findFirstMatchingPathValue(payload, [
+      'videoUrl',
+      'video_url',
+      'url',
+      'content',
+      'data.videoUrl',
+      'data.video_url',
+      'data.url',
+      'data.content',
+      'data.output.video_url',
+      'data.output.url',
+      'data.result.video_url',
+      'data.result.videoUrl',
+      'data.result.url',
+      'data.file.download_url',
+      'data.data.file.download_url',
+      'output.video_url',
+      'output.url',
+      'result.video_url',
+      'result.videoUrl',
+      'result.url',
+      'assets.video',
+      'assets.video.url',
+      'data.assets.video',
+      'data.assets.video.url',
+      'video.url',
+      'Response.AigcVideoResult.Output.FileInfos.0.FileUrl',
+      'Response.AigcVideoTask.Output.FileInfos.0.FileUrl',
+    ], isLikelyRemoteVideoUrl)
+    || findFirstMediaUrlDeep(payload)
+  )
+}
+
+function normalizeYunwuStatus(value) {
+  if (typeof value !== 'string') {
+    return 'processing'
+  }
+
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) {
+    return 'processing'
+  }
+
+  if (['success', 'succeeded', 'completed', 'complete', 'finished', 'done'].includes(normalized)) {
+    return 'succeeded'
+  }
+
+  if (['failed', 'failure', 'error', 'rejected', 'canceled', 'cancelled', 'unknown'].includes(normalized)) {
+    return 'failed'
+  }
+
+  if (['pending', 'queued', 'submitted', 'processing', 'running', 'in_progress'].includes(normalized)) {
+    return 'processing'
+  }
+
+  return normalized
+}
+
+function findFirstPathValue(target, paths) {
+  for (const path of paths) {
+    const value = getPathValue(target, path)
+    if (value !== undefined && value !== null && value !== '') {
+      return value
+    }
+  }
+
+  return null
+}
+
+function getPathValue(target, pathExpression) {
+  if (!target || typeof target !== 'object') {
+    return undefined
+  }
+
+  const segments = pathExpression.split('.')
+  let current = target
+
+  for (const rawSegment of segments) {
+    if (current === null || current === undefined) {
+      return undefined
+    }
+
+    if (/^\d+$/.test(rawSegment)) {
+      current = current[Number(rawSegment)]
+      continue
+    }
+
+    current = current[rawSegment]
+  }
+
+  return current
+}
+
+function findFirstMediaUrlDeep(target, depth = 0, keyPath = '', predicate = isLikelyRemoteVideoUrl) {
+  if (!target || depth > 6) {
+    return null
+  }
+
+  if (typeof target === 'string') {
+    return predicate(target, keyPath) ? target.trim() : null
+  }
+
+  if (Array.isArray(target)) {
+    for (let index = 0; index < target.length; index += 1) {
+      const match = findFirstMediaUrlDeep(
+        target[index],
+        depth + 1,
+        keyPath ? `${keyPath}.${index}` : String(index),
+        predicate,
+      )
+      if (match) {
+        return match
+      }
+    }
+    return null
+  }
+
+  if (typeof target === 'object') {
+    for (const [key, value] of Object.entries(target)) {
+      const nextKeyPath = keyPath ? `${keyPath}.${key}` : key
+      if (typeof value === 'string' && predicate(value, nextKeyPath)) {
+        return value.trim()
+      }
+
+      const nestedMatch = findFirstMediaUrlDeep(value, depth + 1, nextKeyPath, predicate)
+      if (nestedMatch) {
+        return nestedMatch
+      }
+    }
+  }
+
+  return null
+}
+
+function findFirstMatchingPathValue(target, paths, predicate) {
+  for (const path of paths) {
+    const value = getPathValue(target, path)
+    if (predicate(value, path)) {
+      return value.trim()
+    }
+  }
+
+  return null
+}
+
+function isLikelyRemoteVideoUrl(value, keyPath = '') {
+  if (typeof value !== 'string') {
+    return false
+  }
+
+  const normalized = value.trim()
+  if (!/^https?:\/\//i.test(normalized)) {
+    return false
+  }
+
+  try {
+    const parsed = new URL(normalized)
+    const searchable = `${parsed.pathname}${parsed.search}`.toLowerCase()
+    if (/\.(mp4|mov|webm|m3u8)(\?|$)/i.test(searchable)) {
+      return true
+    }
+
+    const normalizedKeyPath = keyPath.toLowerCase().replace(/[^a-z]/g, '')
+    if (/(videourl|downloadurl|download|fileurl|resulturl|outputurl|playurl|videofile)/.test(normalizedKeyPath)) {
+      return true
+    }
+
+    if (/\/(video|videos|download|downloads|file|files|play)\b/i.test(parsed.pathname)) {
+      return true
+    }
+  } catch {
+    return false
+  }
+
+  return false
+}
+
+function isLikelyRemoteImageUrl(value, keyPath = '') {
+  if (typeof value !== 'string') {
+    return false
+  }
+
+  const normalized = value.trim()
+  if (!/^https?:\/\//i.test(normalized)) {
+    return false
+  }
+
+  try {
+    const parsed = new URL(normalized)
+    const searchable = `${parsed.pathname}${parsed.search}`.toLowerCase()
+    if (/\.(png|jpe?g|webp|gif|bmp|svg)(\?|$)/i.test(searchable)) {
+      return true
+    }
+
+    const normalizedKeyPath = keyPath.toLowerCase().replace(/[^a-z]/g, '')
+    if (/(imageurl|thumbnail|cover|poster|resulturl|outputurl|fileurl)/.test(normalizedKeyPath)) {
+      return true
+    }
+
+    if (/\/(image|images|img|thumbnail|cover|poster|file|files)\b/i.test(parsed.pathname)) {
+      return true
+    }
+  } catch {
+    return false
+  }
+
+  return false
+}
+
+function appendQueryParams(url, query) {
+  if (!query || typeof query !== 'object') {
+    return url
+  }
+
+  const nextUrl = new URL(url)
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') {
+      continue
+    }
+    nextUrl.searchParams.set(key, String(value))
+  }
+  return nextUrl.toString()
+}
+
+function coercePositiveNumber(value, fallbackValue) {
+  const numericValue = Number(value)
+  if (Number.isFinite(numericValue) && numericValue > 0) {
+    return numericValue
+  }
+  return fallbackValue
+}
+
+function mapOrientationFromAspectRatio(aspectRatio) {
+  if (aspectRatio === '9:16' || aspectRatio === '3:4') {
+    return 'portrait'
+  }
+
+  if (aspectRatio === '1:1') {
+    return 'square'
+  }
+
+  return 'landscape'
 }
 
 function copyUpstreamResponseHeaders(res, headers) {
@@ -1725,168 +3218,6 @@ function readFirstString(...values) {
   return null
 }
 
-function parseIdentityAllowlist(value) {
-  return new Set(uniqueNormalizedValues([value]))
-}
-
-function normalizeIdentityValue(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return String(value).trim().toLowerCase()
-  }
-
-  if (typeof value !== 'string') {
-    return ''
-  }
-
-  return String(value).trim().toLowerCase()
-}
-
-function isAdminUser(user) {
-  if (!user || typeof user !== 'object') return false
-
-  if (user.isAdmin === true || user.is_admin === true) {
-    return true
-  }
-
-  const identities = collectUserIdentities(user)
-  if (
-    matchesAllowlist(adminUserIdAllowlist, identities.ids)
-    || matchesAllowlist(adminUserAccountAllowlist, identities.accounts)
-    || matchesAllowlist(adminUserEmailAllowlist, identities.emails)
-    || matchesAllowlist(adminUserNameAllowlist, identities.names)
-  ) {
-    return true
-  }
-
-  if (
-    identities.roles.some(isBuiltInAdminIdentity)
-    || identities.groups.some(isBuiltInAdminIdentity)
-  ) {
-    return true
-  }
-
-  if (hasExplicitAdminAllowlist) {
-    return false
-  }
-
-  return identities.accounts.some(isBuiltInAdminIdentity)
-}
-
-function collectUserIdentities(user) {
-  return {
-    ids: uniqueNormalizedValues([user.id, user.userId, user.uid]),
-    accounts: uniqueNormalizedValues([user.account, user.username, user.userName, user.login]),
-    emails: uniqueNormalizedValues([user.email]),
-    names: uniqueNormalizedValues([user.name, user.nickname, user.displayName, user.realName]),
-    roles: uniqueNormalizedValues([
-      user.role,
-      user.roles,
-      user.permission,
-      user.permissions,
-    ]),
-    groups: uniqueNormalizedValues([
-      user.group,
-      user.groupName,
-      user.groups,
-      user.groupNames,
-    ]),
-  }
-}
-
-function uniqueNormalizedValues(values) {
-  const normalized = []
-  for (const value of values) {
-    if (Array.isArray(value)) {
-      normalized.push(...uniqueNormalizedValues(value))
-      continue
-    }
-
-    if (typeof value === 'string' && /[,;|]/.test(value)) {
-      normalized.push(...value.split(/[,;|]/).map((item) => normalizeIdentityValue(item)).filter(Boolean))
-      continue
-    }
-
-    const nextValue = normalizeIdentityValue(value)
-    if (nextValue) {
-      normalized.push(nextValue)
-    }
-  }
-
-  return [...new Set(normalized)]
-}
-
-function matchesAllowlist(allowlist, candidates) {
-  if (!allowlist.size) return false
-  return candidates.some((candidate) => allowlist.has(candidate))
-}
-
-function isBuiltInAdminIdentity(value) {
-  return value === 'admin' || value === 'administrator'
-}
-
-function requireAdminApiAccess(req, res, next) {
-  if (!requireMainAppSso) {
-    next()
-    return
-  }
-
-  const session = req.videoSiteSession
-  if (!session) {
-    res.status(401).json({
-      success: false,
-      message: 'Please launch VEO Studio from the main site first.',
-      redirectUrl: buildMainAppVideoEntryUrl(resolveRequestedMainAppUrl(req)),
-    })
-    return
-  }
-
-  if (!isAdminUser(session.user)) {
-    res.status(403).json({
-      success: false,
-      message: 'Admin access only.',
-    })
-    return
-  }
-
-  next()
-}
-
-function requireAdminPageAccess(req, res, next) {
-  if (!requireMainAppSso) {
-    next()
-    return
-  }
-
-  if (!isAdminUser(req.videoSiteSession?.user)) {
-    res
-      .status(403)
-      .type('html')
-      .send(`<!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>无权访问</title>
-    <style>
-      body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f172a; color: #e2e8f0; display: grid; place-items: center; min-height: 100vh; }
-      .card { width: min(92vw, 460px); padding: 32px; border-radius: 20px; background: rgba(15, 23, 42, 0.9); border: 1px solid rgba(148, 163, 184, 0.24); box-shadow: 0 20px 60px rgba(15, 23, 42, 0.35); }
-      h1 { margin: 0 0 10px; font-size: 26px; }
-      p { margin: 0; line-height: 1.7; color: #cbd5e1; }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>无权访问</h1>
-      <p>当前账号不是管理员，不能进入后台管理页面。</p>
-    </div>
-  </body>
-</html>`)
-    return
-  }
-
-  next()
-}
-
 function normalizeVeoFastRequest(body, promptMode) {
   const normalized = JSON.parse(JSON.stringify(body || {}))
   const firstInstance = Array.isArray(normalized.instances) ? normalized.instances[0] : null
@@ -1929,7 +3260,11 @@ async function createMaterialReference({ name, originalUrl, type }) {
   })
 
   if (!createPayload?.success) {
-    throw createHttpError(400, createPayload?.msg || createPayload?.message || 'Material creation failed.')
+    throw createHttpError(
+      400,
+      createPayload?.msg || createPayload?.message || 'Material creation failed.',
+      extractTraceMetadataFromPayload(createPayload),
+    )
   }
 
   const materialId = createPayload?.data?.materialId
@@ -1950,7 +3285,11 @@ async function createMaterialReference({ name, originalUrl, type }) {
     })
 
     if (!listPayload?.success) {
-      throw createHttpError(502, listPayload?.msg || listPayload?.message || 'Material status query failed.')
+      throw createHttpError(
+        502,
+        listPayload?.msg || listPayload?.message || 'Material status query failed.',
+        extractTraceMetadataFromPayload(listPayload),
+      )
     }
 
     const records = Array.isArray(listPayload?.data?.records) ? listPayload.data.records : []
@@ -2008,93 +3347,7 @@ async function requestJson(baseUrl, endpoint, headers, body) {
     throw createHttpError(response.status, message || 'Upstream request failed.', traceMetadata)
   }
 
-  return payload
-}
-
-function appendQueryParams(url, query) {
-  if (!query || typeof query !== 'object') {
-    return url
-  }
-
-  const parsed = new URL(url)
-  for (const [key, value] of Object.entries(query)) {
-    if (value === undefined || value === null || value === '') {
-      continue
-    }
-
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        if (item === undefined || item === null || item === '') {
-          continue
-        }
-        parsed.searchParams.append(key, String(item))
-      }
-      continue
-    }
-
-    parsed.searchParams.set(key, String(value))
-  }
-
-  return parsed.toString()
-}
-
-async function requestDashScope(spec) {
-  const url = appendQueryParams(`${dashScopeBaseUrl}${spec.path}`, spec.query)
-  const headers = {
-    Accept: 'application/json',
-    Authorization: `Bearer ${process.env.DASHSCOPE_API_KEY}`,
-    ...(spec.headers || {}),
-  }
-
-  if (spec.async) {
-    headers['X-DashScope-Async'] = 'enable'
-  }
-
-  if (spec.resolveOssResource) {
-    headers['X-DashScope-OssResourceResolve'] = 'enable'
-  }
-
-  if (spec.body !== undefined) {
-    headers['Content-Type'] = 'application/json'
-  }
-
-  let response
-  let lastError = null
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      response = await fetch(url, {
-        method: spec.method || 'POST',
-        headers,
-        body: spec.body !== undefined ? JSON.stringify(spec.body) : undefined,
-      })
-      break
-    } catch (error) {
-      lastError = error
-      if (attempt === 2) {
-        throw createHttpError(502, error?.message || 'DashScope upstream fetch failed.')
-      }
-      await sleep(800 * (attempt + 1))
-    }
-  }
-
-  if (!response) {
-    throw createHttpError(502, lastError?.message || 'DashScope upstream fetch failed.')
-  }
-
-  const contentType = response.headers.get('content-type') || ''
-  const payload = isJsonContentType(contentType)
-    ? await response.json()
-    : await response.text()
-  const traceMetadata = extractUpstreamTraceMetadata(response, payload)
-
-  if (!response.ok) {
-    const message = typeof payload === 'string'
-      ? payload
-      : payload?.message || payload?.msg || payload?.error?.message || JSON.stringify(payload)
-    throw createHttpError(response.status, message || 'DashScope upstream request failed.', traceMetadata)
-  }
-
-  return { response, payload }
+  return injectUpstreamTraceMetadata(payload, traceMetadata)
 }
 
 function createHttpError(statusCode, message, metadata = {}) {
@@ -2117,405 +3370,79 @@ function getMissingVideoConfig() {
   ].filter(Boolean)
 }
 
+function getMissingImageAggregationConfig() {
+  return [
+    !(process.env.IMAGE_AGGREGATION_PROJECT_CODE || process.env.VIDEO_PROJECT_CODE) && 'IMAGE_AGGREGATION_PROJECT_CODE|VIDEO_PROJECT_CODE',
+    !(process.env.IMAGE_AGGREGATION_ACCESS_KEY || process.env.VIDEO_ACCESS_KEY) && 'IMAGE_AGGREGATION_ACCESS_KEY|VIDEO_ACCESS_KEY',
+    !(process.env.IMAGE_AGGREGATION_SECRET_KEY || process.env.VIDEO_SECRET_KEY) && 'IMAGE_AGGREGATION_SECRET_KEY|VIDEO_SECRET_KEY',
+  ].filter(Boolean)
+}
+
+function buildImageAggregationHeaders() {
+  return {
+    projectCode: process.env.IMAGE_AGGREGATION_PROJECT_CODE || process.env.VIDEO_PROJECT_CODE,
+    'X-Access-Key': process.env.IMAGE_AGGREGATION_ACCESS_KEY || process.env.VIDEO_ACCESS_KEY,
+    'X-Secret-Key': process.env.IMAGE_AGGREGATION_SECRET_KEY || process.env.VIDEO_SECRET_KEY,
+  }
+}
+
+function normalizeAggregationImageGenerateBody(body) {
+  const normalized = JSON.parse(JSON.stringify(body || {}))
+  delete normalized.providerId
+  delete normalized.model
+  normalized.abilityType = 'IMAGE'
+
+  if (typeof normalized.modelId !== 'string' || !normalized.modelId.trim()) {
+    normalized.modelId = 'gemini-3.1-flash-image-preview'
+  } else {
+    normalized.modelId = normalized.modelId.trim()
+  }
+
+  if (!normalized.payload || typeof normalized.payload !== 'object' || Array.isArray(normalized.payload)) {
+    normalized.payload = {}
+  }
+
+  if (!normalized.payload.params || typeof normalized.payload.params !== 'object' || Array.isArray(normalized.payload.params)) {
+    normalized.payload.params = {}
+  }
+
+  const resolution = readFirstString(normalized.payload.params.resolution)
+  const scale = readFirstString(normalized.payload.params.scale)
+  if (resolution) {
+    normalized.payload.params.resolution = resolution
+  } else {
+    delete normalized.payload.params.resolution
+  }
+  if (scale) {
+    normalized.payload.params.scale = scale
+  } else {
+    delete normalized.payload.params.scale
+  }
+
+  if (Array.isArray(normalized.payload.resources)) {
+    normalized.payload.resources = normalized.payload.resources
+      .filter((value) => typeof value === 'string' && value.trim())
+      .map((value) => value.trim())
+  } else {
+    delete normalized.payload.resources
+  }
+
+  return normalized
+}
+
+function normalizeAggregationImageQueryBody(body) {
+  return {
+    taskId: normalizeTaskIdValue(body?.taskId),
+    abilityType: 'IMAGE',
+  }
+}
+
 function getMissingMaterialConfig() {
   return [
     !(process.env.MATERIAL_PROJECT_CODE || process.env.VIDEO_PROJECT_CODE) && 'MATERIAL_PROJECT_CODE|VIDEO_PROJECT_CODE',
     !(process.env.MATERIAL_ACCESS_KEY || process.env.VIDEO_ACCESS_KEY) && 'MATERIAL_ACCESS_KEY|VIDEO_ACCESS_KEY',
     !(process.env.MATERIAL_SECRET_KEY || process.env.VIDEO_SECRET_KEY) && 'MATERIAL_SECRET_KEY|VIDEO_SECRET_KEY',
   ].filter(Boolean)
-}
-
-const DASHSCOPE_WAN_SIZE_MAP = {
-  '720P': {
-    '16:9': '1280*720',
-    '9:16': '720*1280',
-    '1:1': '960*960',
-    '4:3': '1088*832',
-    '3:4': '832*1088',
-  },
-}
-
-function getMissingDashScopeConfig() {
-  return [
-    !process.env.DASHSCOPE_API_KEY && 'DASHSCOPE_API_KEY',
-  ].filter(Boolean)
-}
-
-async function createDashScopeTemporaryReference({ file, model }) {
-  const policy = await getDashScopeUploadPolicy(model)
-  const key = buildDashScopeUploadKey(policy.uploadDir, file.originalname)
-  await uploadFileToDashScope({ file, policy, key })
-
-  const expiresAtMs = Date.now() + 48 * 60 * 60 * 1000
-
-  return {
-    resourceRef: `oss://${key}`,
-    expiresAt: new Date(expiresAtMs).toISOString(),
-    expiresAtMs,
-  }
-}
-
-async function getDashScopeUploadPolicy(model) {
-  const upstream = await requestDashScope({
-    method: 'GET',
-    path: '/api/v1/uploads',
-    query: {
-      action: 'getPolicy',
-      model,
-    },
-    headers: {
-      'Content-Type': 'application/json',
-    },
-  })
-
-  const data = upstream.payload?.data
-  if (!data?.upload_dir || !data?.upload_host || !data?.policy || !data?.signature || !data?.oss_access_key_id) {
-    throw createHttpError(502, 'DashScope upload policy response is incomplete.', extractUpstreamTraceMetadata(upstream.response, upstream.payload))
-  }
-
-  return {
-    uploadDir: String(data.upload_dir),
-    uploadHost: String(data.upload_host),
-    policy: String(data.policy),
-    signature: String(data.signature),
-    ossAccessKeyId: String(data.oss_access_key_id),
-    objectAcl: String(data.x_oss_object_acl || 'private'),
-    forbidOverwrite: String(data.x_oss_forbid_overwrite || 'true'),
-    maxFileSizeMb: Number(data.max_file_size_mb || 0),
-  }
-}
-
-async function uploadFileToDashScope({ file, policy, key }) {
-  if (policy.maxFileSizeMb > 0 && file.size > policy.maxFileSizeMb * 1024 * 1024) {
-    throw createHttpError(400, `Reference file exceeds DashScope upload limit of ${policy.maxFileSizeMb}MB.`)
-  }
-
-  const fileBuffer = await fsp.readFile(file.path)
-  const formData = new FormData()
-  formData.append('OSSAccessKeyId', policy.ossAccessKeyId)
-  formData.append('policy', policy.policy)
-  formData.append('Signature', policy.signature)
-  formData.append('key', key)
-  formData.append('x-oss-object-acl', policy.objectAcl)
-  formData.append('x-oss-forbid-overwrite', policy.forbidOverwrite)
-  formData.append('success_action_status', '200')
-  formData.append(
-    'file',
-    new Blob([fileBuffer], { type: file.mimetype || 'application/octet-stream' }),
-    sanitizeDashScopeUploadFileName(file.originalname),
-  )
-
-  const response = await fetch(policy.uploadHost, {
-    method: 'POST',
-    body: formData,
-  })
-
-  if (!response.ok) {
-    const message = (await response.text()) || 'DashScope temp file upload failed.'
-    throw createHttpError(response.status, message)
-  }
-}
-
-function buildDashScopeUploadKey(uploadDir, originalName) {
-  const safeName = sanitizeDashScopeUploadFileName(originalName)
-  return `${String(uploadDir || '').replace(/\/+$/, '')}/${randomUUID()}-${safeName}`
-}
-
-function sanitizeDashScopeUploadFileName(originalName) {
-  const parsed = path.parse(path.basename(String(originalName || '').trim()))
-  const baseName = (parsed.name || 'reference').replace(/[^\w.-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || 'reference'
-  const extension = (parsed.ext || '').replace(/[^\w.]+/g, '')
-  return `${baseName.slice(0, 80)}${extension.slice(0, 16)}`
-}
-
-function parseUploadStorageBackend(value) {
-  const normalized = String(value || '').trim().toLowerCase()
-  if (!normalized) return 'local'
-  if (normalized === 'dashscope') return 'dashscope'
-  return 'local'
-}
-
-function normalizeDashScopeUploadModel(value) {
-  const normalized = String(value || '').trim()
-  return normalized || ''
-}
-
-function buildDashScopeWanGenerateRequest(input) {
-  const providerId = String(input.providerId || 'wan1')
-  if (providerId !== 'wan1') {
-    throw createHttpError(400, `Unsupported DashScope Wan provider: ${providerId || 'unknown'}`)
-  }
-
-  const prompt = String(input.prompt || '').trim()
-  if (!prompt) {
-    throw createHttpError(400, 'Prompt is required.')
-  }
-
-  const params = input.params && typeof input.params === 'object' ? input.params : {}
-  const references = normalizeDashScopeWanReferences(input.references)
-
-  if (references.images.length > 5) {
-    throw createHttpError(400, 'DashScope Wan supports at most 5 reference images.')
-  }
-
-  if (references.videos.length > 3) {
-    throw createHttpError(400, 'DashScope Wan supports at most 3 reference videos.')
-  }
-
-  if (references.images.length + references.videos.length > 5) {
-    throw createHttpError(400, 'DashScope Wan requires reference images and videos to total 5 or fewer items.')
-  }
-
-  const referenceUrls = collectDashScopeWanReferenceUrls(references)
-  if (referenceUrls.length === 0) {
-    throw createHttpError(400, 'At least one DashScope Wan reference image or video is required.')
-  }
-
-  const negativePrompt = typeof params.negativePrompt === 'string' ? params.negativePrompt.trim() : ''
-
-  return {
-    method: 'POST',
-    path: '/api/v1/services/aigc/video-generation/video-synthesis',
-    async: true,
-    resolveOssResource: referenceUrls.some((item) => isDashScopeOssResource(item)),
-    body: {
-      model: String(params.model || 'wan2.6-r2v-flash'),
-      input: {
-        prompt,
-        ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
-        reference_urls: referenceUrls,
-      },
-      parameters: {
-        size: resolveDashScopeWanSize(params),
-        duration: resolveDashScopeWanDuration(params),
-        shot_type: resolveDashScopeWanShotType(params),
-        audio: Boolean(params.generateAudio),
-        watermark: Boolean(params.watermark),
-      },
-    },
-  }
-}
-
-function buildDashScopeWanQueryRequest(input) {
-  const providerId = String(input.providerId || 'wan1')
-  if (providerId !== 'wan1') {
-    throw createHttpError(400, `Unsupported DashScope Wan provider: ${providerId || 'unknown'}`)
-  }
-
-  const taskId = String(input.taskId || '').trim()
-  if (!taskId) {
-    throw createHttpError(400, 'taskId is required.')
-  }
-
-  return {
-    method: 'GET',
-    path: `/api/v1/tasks/${encodeURIComponent(taskId)}`,
-  }
-}
-
-function normalizeDashScopeWanReferences(references) {
-  return {
-    images: Array.isArray(references?.images) ? references.images.filter((item) => typeof item === 'string' && item) : [],
-    videos: Array.isArray(references?.videos) ? references.videos.filter((item) => typeof item === 'string' && item) : [],
-    orderedVisualRefs: Array.isArray(references?.orderedVisualRefs)
-      ? references.orderedVisualRefs.filter((item) => typeof item === 'string' && item)
-      : [],
-  }
-}
-
-function collectDashScopeWanReferenceUrls(references) {
-  const ordered = references.orderedVisualRefs.slice(0, 5)
-  if (ordered.length > 0) {
-    return ordered
-  }
-
-  return [...references.images, ...references.videos].slice(0, 5)
-}
-
-function isDashScopeOssResource(value) {
-  return typeof value === 'string' && value.startsWith('oss://')
-}
-
-function resolveDashScopeWanSize(params) {
-  const resolution = String(params?.resolution || '720P').trim().toUpperCase()
-  const aspectRatio = String(params?.aspectRatio || '16:9').trim()
-  const size = DASHSCOPE_WAN_SIZE_MAP[resolution]?.[aspectRatio]
-
-  if (!size) {
-    throw createHttpError(400, `Unsupported DashScope Wan size mapping: ${resolution} / ${aspectRatio}`)
-  }
-
-  return size
-}
-
-function resolveDashScopeWanDuration(params) {
-  const duration = Math.trunc(Number(params?.duration || 5))
-  if (!Number.isFinite(duration) || duration < 2 || duration > 10) {
-    throw createHttpError(400, 'DashScope Wan duration must be an integer between 2 and 10 seconds.')
-  }
-  return duration
-}
-
-function resolveDashScopeWanShotType(params) {
-  const shotType = String(params?.shotType || 'single').trim().toLowerCase()
-  if (shotType !== 'single' && shotType !== 'multi') {
-    throw createHttpError(400, `Unsupported DashScope Wan shot_type: ${shotType}`)
-  }
-  return shotType
-}
-
-function normalizeDashScopeWanTask(payload) {
-  return {
-    taskId: extractDashScopeTaskId(payload),
-    status: normalizeDashScopeTaskStatus(extractDashScopeTaskStatus(payload)),
-    message: extractDashScopeTaskMessage(payload),
-    videoUrl: extractDashScopeVideoUrl(payload),
-  }
-}
-
-function buildWanPreviewProxyPath(taskId) {
-  const normalizedTaskId = normalizeTaskIdValue(taskId)
-  if (!normalizedTaskId) return null
-  return `/api/wan/content/${encodeURIComponent(normalizedTaskId)}`
-}
-
-function buildWanClientTask(task) {
-  return {
-    ...task,
-    previewUrl: buildWanPreviewProxyPath(task?.taskId),
-  }
-}
-
-function extractDashScopeTaskId(payload) {
-  return normalizeTaskIdValue(findFirstPathValue(payload, [
-    'task_id',
-    'taskId',
-    'id',
-    'output.task_id',
-    'output.taskId',
-    'output.id',
-    'data.task_id',
-    'data.taskId',
-    'data.id',
-  ]))
-}
-
-function extractDashScopeTaskStatus(payload) {
-  return findFirstPathValue(payload, [
-    'task_status',
-    'status',
-    'state',
-    'output.task_status',
-    'output.status',
-    'output.state',
-    'data.task_status',
-    'data.status',
-    'data.state',
-  ])
-}
-
-function normalizeDashScopeTaskStatus(value) {
-  if (value === null || value === undefined) return null
-
-  const normalized = String(value).trim().toLowerCase()
-  if (!normalized) return null
-
-  if (['succeeded', 'success', 'completed', 'done'].includes(normalized)) return 'succeeded'
-  if (['failed', 'failure', 'error', 'unknown'].includes(normalized)) return 'failed'
-  if (['canceled', 'cancelled'].includes(normalized)) return 'cancelled'
-  if (['running', 'processing', 'in_progress'].includes(normalized)) return 'running'
-  if (['pending', 'queued', 'submitted'].includes(normalized)) return 'pending'
-  return normalized
-}
-
-function extractDashScopeTaskMessage(payload) {
-  return readFirstString(findFirstPathValue(payload, [
-    'output.message',
-    'output.msg',
-    'output.code',
-    'message',
-    'msg',
-    'error.message',
-    'error',
-    'data.message',
-    'data.msg',
-  ]))
-}
-
-function extractDashScopeVideoUrl(payload) {
-  return findFirstMatchingPathValue(payload, [
-    'output.video_url',
-    'output.videoUrl',
-    'output.result.video_url',
-    'output.result.videoUrl',
-    'output.results.0.video_url',
-    'output.results.0.videoUrl',
-    'output.results.0.url',
-    'output.file_infos.0.file_url',
-    'output.fileInfos.0.fileUrl',
-    'data.output.video_url',
-    'data.output.videoUrl',
-    'data.output.results.0.video_url',
-    'data.output.results.0.videoUrl',
-    'data.output.results.0.url',
-    'data.output.file_infos.0.file_url',
-    'data.output.fileInfos.0.fileUrl',
-  ], isLikelyRemoteVideoUrl)
-}
-
-async function findWanUsageVideoRecord(taskId) {
-  const db = getPool()
-  if (!db || !taskId) return null
-
-  const result = await db.query(
-    `
-      SELECT status, video_url AS "videoUrl", error_message AS "errorMessage"
-      FROM video_usage_logs
-      WHERE channel = 'wan'
-        AND engine_task_id = $1
-      ORDER BY created_at DESC
-      LIMIT 1
-    `,
-    [taskId],
-  )
-
-  return result.rows[0] || null
-}
-
-async function resolveWanContentUrl(taskId) {
-  const existing = await findWanUsageVideoRecord(taskId).catch(() => null)
-  if (existing?.videoUrl) {
-    return existing.videoUrl
-  }
-
-  const upstream = await requestDashScope(buildDashScopeWanQueryRequest({ taskId }))
-  const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
-  const normalized = normalizeDashScopeWanTask(upstream.payload)
-
-  if (normalized.taskId || normalized.status === 'succeeded' || normalized.status === 'failed' || normalized.status === 'cancelled') {
-    try {
-      await updateUsageLogByTaskId(taskId, {
-        status: normalized.status || existing?.status || 'submitted',
-        videoUrl: normalized.videoUrl || null,
-        errorMessage: normalized.status === 'succeeded' ? null : (normalized.message || existing?.errorMessage || null),
-        completedAt: normalized.status === 'succeeded' || normalized.status === 'failed' || normalized.status === 'cancelled'
-          ? new Date().toISOString()
-          : undefined,
-        upstreamRequestId: traceMetadata?.requestId || null,
-        upstreamTraceId: traceMetadata?.traceId || null,
-      })
-    } catch (_) {}
-  }
-
-  if (normalized.videoUrl) {
-    return normalized.videoUrl
-  }
-
-  if (normalized.status === 'failed' || normalized.status === 'cancelled') {
-    throw createHttpError(409, normalized.message || 'Wan video generation failed.', traceMetadata)
-  }
-
-  return null
 }
 
 function resolveBaseUrl(req) {
@@ -2525,6 +3452,35 @@ function resolveBaseUrl(req) {
   const protocol = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto || req.protocol
   const host = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost || req.get('host')
   return `${protocol}://${host}`
+}
+
+function buildTempAssetUrl(baseUrl, filename, expiresAt) {
+  const normalizedFilename = sanitizeTempAssetName(filename)
+  const signature = signTempAssetPayload(normalizedFilename, expiresAt)
+  const url = new URL(`${stripTrailingSlash(baseUrl)}/temp-assets/${encodeURIComponent(normalizedFilename)}`)
+  url.searchParams.set('exp', String(expiresAt))
+  url.searchParams.set('sig', signature)
+  return url.toString()
+}
+
+function sanitizeTempAssetName(value) {
+  const normalized = path.basename(String(value || '').trim())
+  if (!normalized || normalized === '.' || normalized === '..') return ''
+  return normalized
+}
+
+function signTempAssetPayload(filename, expiresAt) {
+  return createHmac('sha256', tempAssetSigningSecret)
+    .update(`${filename}:${expiresAt}`)
+    .digest('base64url')
+}
+
+function verifyTempAssetSignature(filename, expiresAt, signature) {
+  const expected = signTempAssetPayload(filename, expiresAt)
+  const providedBuffer = Buffer.from(signature, 'utf8')
+  const expectedBuffer = Buffer.from(expected, 'utf8')
+  if (providedBuffer.length !== expectedBuffer.length) return false
+  return timingSafeEqual(providedBuffer, expectedBuffer)
 }
 
 async function cleanupExpiredUploads() {
@@ -2542,17 +3498,30 @@ async function cleanupExpiredUploads() {
   }))
 }
 
-function cleanupUploadedReferenceMetadata() {
-  const now = Date.now()
-  for (const [key, metadata] of uploadedReferenceMetadata.entries()) {
-    if (!metadata || metadata.expiresAtMs <= now) {
-      uploadedReferenceMetadata.delete(key)
-    }
-  }
-}
-
 function stripTrailingSlash(value) {
   return value.replace(/\/+$/, '')
+}
+
+function normalizeOpenAiBaseUrl(value) {
+  const normalized = stripTrailingSlash(String(value || '').trim())
+
+  try {
+    const url = new URL(normalized)
+    const pathname = stripTrailingSlash(url.pathname || '')
+    if (pathname === '' || pathname === '/') {
+      url.pathname = '/v1'
+      return stripTrailingSlash(url.toString())
+    }
+
+    if (pathname.endsWith('/chat/completions')) {
+      url.pathname = pathname.slice(0, -'/chat/completions'.length) || '/v1'
+      return stripTrailingSlash(url.toString())
+    }
+  } catch {
+    return normalized
+  }
+
+  return normalized
 }
 
 function inferExtension(mimeType = '') {
@@ -2630,6 +3599,28 @@ function normalizeMainAppEntryPath(value) {
 function readBooleanEnv(value, fallbackValue) {
   if (!value) return fallbackValue
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
+}
+
+function resolveTempAssetSigningSecret() {
+  const candidates = [
+    process.env.TEMP_ASSET_SIGNING_SECRET,
+    process.env.VIDEO_SITE_SESSION_SECRET,
+    process.env.VIDEO_SSO_INTERNAL_SECRET,
+    process.env.VIDEO_SECRET_KEY,
+  ]
+
+  for (const candidate of candidates) {
+    const normalized = candidate?.trim()
+    if (normalized) {
+      return normalized
+    }
+  }
+
+  if (!isProduction) {
+    return 'veo-studio-dev-temp-asset-secret'
+  }
+
+  throw new Error('TEMP_ASSET_SIGNING_SECRET is required in production when temp asset URLs are enabled.')
 }
 
 function resolveVideoSiteSessionSecret() {
@@ -2842,6 +3833,185 @@ function clearVideoSiteSession(res) {
   }))
 }
 
+function parseIdentityAllowlist(value) {
+  if (typeof value !== 'string') return new Set()
+  return new Set(
+    value
+      .split(/[,\n;\r]+/)
+      .map((item) => normalizeIdentityValue(item))
+      .filter(Boolean),
+  )
+}
+
+function normalizeIdentityValue(value) {
+  if (value == null) return ''
+  return String(value).trim().toLowerCase()
+}
+
+function isAdminUser(user) {
+  if (!user || typeof user !== 'object') return false
+
+  if (user.isAdmin === true || user.is_admin === true) {
+    return true
+  }
+
+  const identities = collectUserIdentities(user)
+  if (
+    matchesAllowlist(adminUserIdAllowlist, identities.ids)
+    || matchesAllowlist(adminUserAccountAllowlist, identities.accounts)
+    || matchesAllowlist(adminUserEmailAllowlist, identities.emails)
+    || matchesAllowlist(adminUserNameAllowlist, identities.names)
+  ) {
+    return true
+  }
+
+  if (
+    identities.roles.some(isAdminRoleValue)
+    || identities.groups.some(isAdminRoleValue)
+  ) {
+    return true
+  }
+
+  if (hasExplicitAdminAllowlist) {
+    return false
+  }
+
+  return (
+    identities.ids.some(isBuiltInAdminIdentity)
+    || identities.accounts.some(isBuiltInAdminIdentity)
+    || identities.emails.some(isBuiltInAdminIdentity)
+    || identities.names.some(isBuiltInAdminIdentity)
+  )
+}
+
+function collectUserIdentities(user) {
+  return {
+    ids: uniqueNormalizedValues([user.id, user.userId, user.uid]),
+    accounts: uniqueNormalizedValues([user.account, user.username, user.userName, user.login]),
+    emails: uniqueNormalizedValues([user.email]),
+    names: uniqueNormalizedValues([user.name, user.nickname, user.displayName, user.realName]),
+    roles: uniqueNormalizedValues([
+      user.role,
+      user.roles,
+      user.permission,
+      user.permissions,
+    ]),
+    groups: uniqueNormalizedValues([
+      user.group,
+      user.groupName,
+      user.groups,
+      user.groupNames,
+    ]),
+  }
+}
+
+function uniqueNormalizedValues(values) {
+  const normalized = []
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      normalized.push(...uniqueNormalizedValues(value))
+      continue
+    }
+
+    if (typeof value === 'string' && /[,;|]/.test(value)) {
+      normalized.push(...value.split(/[,;|]/).map((item) => normalizeIdentityValue(item)).filter(Boolean))
+      continue
+    }
+
+    const nextValue = normalizeIdentityValue(value)
+    if (nextValue) {
+      normalized.push(nextValue)
+    }
+  }
+
+  return [...new Set(normalized)]
+}
+
+function matchesAllowlist(allowlist, candidates) {
+  if (!allowlist.size) return false
+  return candidates.some((candidate) => allowlist.has(candidate))
+}
+
+function isBuiltInAdminIdentity(value) {
+  return value === 'admin' || value === 'administrator'
+}
+
+function isAdminRoleValue(value) {
+  return (
+    value === 'admin'
+    || value === 'administrator'
+    || value === 'superadmin'
+    || value === 'super-admin'
+    || value === 'root'
+    || value.includes('管理员')
+    || value.includes('administrator')
+    || value.includes('superadmin')
+  )
+}
+
+function requireAdminApiAccess(req, res, next) {
+  if (!requireMainAppSso) {
+    next()
+    return
+  }
+
+  const session = req.videoSiteSession
+  if (!session) {
+    res.status(401).json({
+      success: false,
+      message: 'Please launch VEO Studio from the main site first.',
+      redirectUrl: buildMainAppVideoEntryUrl(resolveRequestedMainAppUrl(req)),
+    })
+    return
+  }
+
+  if (!isAdminUser(session.user)) {
+    res.status(403).json({
+      success: false,
+      message: 'Admin access only.',
+    })
+    return
+  }
+
+  next()
+}
+
+function requireAdminPageAccess(req, res, next) {
+  if (!requireMainAppSso) {
+    next()
+    return
+  }
+
+  if (!isAdminUser(req.videoSiteSession?.user)) {
+    res
+      .status(403)
+      .type('html')
+      .send(`<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>无权限访问</title>
+    <style>
+      body { margin: 0; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: #0f172a; color: #e2e8f0; display: grid; place-items: center; min-height: 100vh; }
+      .card { width: min(92vw, 460px); padding: 32px; border-radius: 20px; background: rgba(15, 23, 42, 0.9); border: 1px solid rgba(148, 163, 184, 0.24); box-shadow: 0 20px 60px rgba(15, 23, 42, 0.35); }
+      h1 { margin: 0 0 10px; font-size: 26px; }
+      p { margin: 0; line-height: 1.7; color: #cbd5e1; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>当前账号无后台权限</h1>
+      <p>只有管理员账号可以进入监控后台。请返回视频工作台并使用管理员账号登录。</p>
+    </div>
+  </body>
+</html>`)
+    return
+  }
+
+  next()
+}
+
 function appendSetCookie(res, cookie) {
   const current = res.getHeader('Set-Cookie')
   if (!current) {
@@ -2865,4 +4035,293 @@ function serializeCookie(name, value, options) {
   if (options.sameSite) parts.push(`SameSite=${options.sameSite}`)
   if (options.secure) parts.push('Secure')
   return parts.join('; ')
+}
+function buildAggregationUsageLogSyncUpdate({
+  payload,
+  requestedTaskId,
+  traceMetadata,
+  mediaUrlResolver = extractAggregationVideoUrl,
+}) {
+  const taskId = extractAggregationTaskId(payload) || normalizeTaskIdValue(requestedTaskId)
+  if (!taskId) {
+    return null
+  }
+
+  const aggregationStatus = extractAggregationStatus(payload)
+  const finalStatus = normalizeAggregationFinalStatus(aggregationStatus)
+  if (finalStatus) {
+    return {
+      taskId,
+      outcome: 'terminal',
+      updates: {
+        status: finalStatus,
+        videoUrl: finalStatus === 'succeeded' ? mediaUrlResolver(payload) : null,
+        errorMessage: finalStatus === 'succeeded' ? null : extractAggregationTerminalMessage(payload),
+        completedAt: new Date().toISOString(),
+        upstreamRequestId: traceMetadata?.requestId || null,
+        upstreamTraceId: traceMetadata?.traceId || null,
+      },
+    }
+  }
+
+  const queryFailedMessage = payload?.success === false
+    ? (extractAggregationTerminalMessage(payload) || '查询任务状态失败')
+    : null
+  if (queryFailedMessage) {
+    return {
+      taskId,
+      outcome: 'needs_review',
+      updates: {
+        status: USAGE_STATUS_NEEDS_REVIEW,
+        videoUrl: null,
+        errorMessage: formatUsageStatusQueryFailureMessage(queryFailedMessage),
+        completedAt: null,
+        upstreamRequestId: traceMetadata?.requestId || null,
+        upstreamTraceId: traceMetadata?.traceId || null,
+      },
+    }
+  }
+
+  if (isAggregationPendingStatus(aggregationStatus)) {
+    return {
+      taskId,
+      outcome: 'pending',
+      updates: {
+        status: 'submitted',
+        errorMessage: null,
+        completedAt: null,
+        upstreamRequestId: traceMetadata?.requestId || null,
+        upstreamTraceId: traceMetadata?.traceId || null,
+      },
+    }
+  }
+
+  return null
+}
+
+function isAggregationPendingStatus(value) {
+  if (value === null || value === undefined) return false
+
+  const normalized = String(value).trim().toLowerCase()
+  return [
+    '0',
+    '1',
+    'submitted',
+    'pending',
+    'queued',
+    'processing',
+    'running',
+    'inprogress',
+    'in_progress',
+  ].includes(normalized)
+}
+
+function formatUsageStatusQueryFailureMessage(message) {
+  const normalized = readFirstString(message) || '查询任务状态失败'
+  if (normalized.startsWith('状态查询失败')) {
+    return normalized
+  }
+  return `状态查询失败：${normalized}`
+}
+
+async function markUntrackedUsageLogsForReview() {
+  const db = getPool()
+  if (!db) return 0
+
+  const result = await db.query(
+    `
+      UPDATE video_usage_logs
+      SET status = $1,
+          error_message = CASE
+            WHEN error_message IS NULL OR BTRIM(error_message) = '' THEN $2
+            ELSE error_message
+          END,
+          completed_at = NULL,
+          updated_at = NOW()
+      WHERE status = 'submitted'
+        AND engine_task_id IS NULL
+        AND channel = ANY($3::text[])
+        AND created_at <= NOW() - ($4::int * INTERVAL '1 minute')
+      RETURNING id
+    `,
+    [
+      USAGE_STATUS_NEEDS_REVIEW,
+      UNTRACKED_USAGE_STATUS_MESSAGE,
+      ['aggregation', 'veo_fast', 'yunwu', 'wan'],
+      UNTRACKED_USAGE_REVIEW_DELAY_MINUTES,
+    ],
+  )
+
+  return result.rowCount
+}
+
+async function reclassifyAggregationQueryFailuresForReview() {
+  const db = getPool()
+  if (!db) return 0
+
+  const result = await db.query(
+    `
+      UPDATE video_usage_logs
+      SET status = $1,
+          completed_at = NULL,
+          error_message = CASE
+            WHEN error_message IS NULL OR BTRIM(error_message) = '' THEN $2
+            WHEN error_message LIKE '状态查询失败：%' THEN error_message
+            ELSE '状态查询失败：' || error_message
+          END,
+          updated_at = NOW()
+      WHERE channel = 'aggregation'
+        AND status = 'failed'
+        AND engine_task_id IS NOT NULL
+        AND (
+          error_message LIKE 'AK/SK校验失败%'
+          OR error_message LIKE '查询任务状态失败%'
+          OR error_message LIKE '状态查询失败：%'
+        )
+      RETURNING id
+    `,
+    [
+      USAGE_STATUS_NEEDS_REVIEW,
+      '状态查询失败：查询接口返回了非终态错误，请重新核对上游账号凭证。',
+    ],
+  )
+
+  return result.rowCount
+}
+
+async function fetchAggregationLogsForStatusSync() {
+  const db = getPool()
+  if (!db) return []
+
+  const retryDelaySeconds = Math.max(30, Math.floor(USAGE_STATUS_SYNC_INTERVAL_MS / 1000))
+  const result = await db.query(
+    `
+      SELECT id, engine_task_id, status, created_at, updated_at
+      FROM video_usage_logs
+      WHERE channel = 'aggregation'
+        AND status = ANY($1::text[])
+        AND engine_task_id IS NOT NULL
+        AND created_at >= NOW() - ($2::int * INTERVAL '1 hour')
+        AND created_at <= NOW() - ($3::int * INTERVAL '1 minute')
+        AND updated_at <= NOW() - ($4::int * INTERVAL '1 second')
+      ORDER BY updated_at ASC, created_at ASC
+      LIMIT $5
+    `,
+    [
+      ['submitted', USAGE_STATUS_NEEDS_REVIEW],
+      USAGE_STATUS_SYNC_LOOKBACK_HOURS,
+      USAGE_STATUS_SYNC_MIN_AGE_MINUTES,
+      retryDelaySeconds,
+      USAGE_STATUS_SYNC_BATCH_SIZE,
+    ],
+  )
+
+  return result.rows
+}
+
+async function queryAggregationTaskStatusForSync(taskId) {
+  try {
+    const payload = await requestJson(videoApiBaseUrl, '/openApi/queryResult', {
+      projectCode: process.env.VIDEO_PROJECT_CODE,
+      'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
+      'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
+    }, {
+      taskId,
+      abilityType: 'VIDEO',
+    })
+
+    return buildAggregationUsageLogSyncUpdate({
+      payload,
+      requestedTaskId: taskId,
+      traceMetadata: extractTraceMetadataFromPayload(payload),
+    })
+  } catch (error) {
+    return {
+      taskId: normalizeTaskIdValue(taskId),
+      outcome: 'needs_review',
+      updates: {
+        status: USAGE_STATUS_NEEDS_REVIEW,
+        videoUrl: null,
+        errorMessage: formatUsageStatusQueryFailureMessage(error?.message || '查询任务状态失败'),
+        completedAt: null,
+        upstreamRequestId: error?.requestId || null,
+        upstreamTraceId: error?.traceId || null,
+      },
+    }
+  }
+}
+
+async function syncAggregationUsageStatuses() {
+  const rows = await fetchAggregationLogsForStatusSync()
+  const summary = {
+    scanned: rows.length,
+    updated: 0,
+    terminal: 0,
+    needsReview: 0,
+    pending: 0,
+  }
+
+  for (const row of rows) {
+    const syncUpdate = await queryAggregationTaskStatusForSync(row.engine_task_id)
+    if (!syncUpdate?.taskId || !syncUpdate.updates) {
+      continue
+    }
+
+    await updateUsageLogByTaskId(syncUpdate.taskId, syncUpdate.updates)
+    summary.updated += 1
+
+    if (syncUpdate.outcome === 'terminal') {
+      summary.terminal += 1
+    } else if (syncUpdate.outcome === 'needs_review') {
+      summary.needsReview += 1
+    } else if (syncUpdate.outcome === 'pending') {
+      summary.pending += 1
+    }
+  }
+
+  return summary
+}
+
+async function runUsageStatusMaintenance(trigger = 'interval') {
+  if (usageStatusSyncRunning) {
+    return
+  }
+
+  usageStatusSyncRunning = true
+  try {
+    const reclassifiedCount = await reclassifyAggregationQueryFailuresForReview()
+    const untrackedCount = await markUntrackedUsageLogsForReview()
+    const syncSummary = await syncAggregationUsageStatuses()
+
+    if (reclassifiedCount > 0 || untrackedCount > 0 || syncSummary.updated > 0) {
+      console.info('[usage-status-sync]', {
+        trigger,
+        reclassifiedCount,
+        untrackedCount,
+        ...syncSummary,
+      })
+    }
+  } catch (error) {
+    console.error('[usage-status-sync] failed:', error)
+  } finally {
+    usageStatusSyncRunning = false
+  }
+}
+
+function startUsageStatusMaintenanceLoop() {
+  if (usageStatusSyncTimer) {
+    return
+  }
+
+  runUsageStatusMaintenance('startup').catch((error) => {
+    console.error('[usage-status-sync] startup failed:', error)
+  })
+
+  usageStatusSyncTimer = setInterval(() => {
+    runUsageStatusMaintenance('interval').catch((error) => {
+      console.error('[usage-status-sync] interval failed:', error)
+    })
+  }, USAGE_STATUS_SYNC_INTERVAL_MS)
+
+  usageStatusSyncTimer.unref()
 }
