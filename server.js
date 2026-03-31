@@ -460,8 +460,12 @@ app.post('/api/image/chat/completions', async (req, res) => {
     const contentType = response.headers.get('content-type') || ''
     const parsedPayload = tryParseJsonBuffer(buffer, contentType)
     const traceMetadata = extractUpstreamTraceMetadata(response, parsedPayload)
-    const tracedPayload = injectUpstreamTraceMetadata(parsedPayload, traceMetadata)
-    const imageResult = response.status < 400 ? extractImageResponseResult(parsedPayload, extractImagePromptText(body) || '') : null
+    const imagePrompt = extractImagePromptText(body) || ''
+    const imageResult = response.status < 400 ? extractImageResponseResult(parsedPayload, imagePrompt) : null
+    const normalizedPayload = response.status < 400
+      ? await inlineImageResultIntoPayload(parsedPayload, imageResult)
+      : parsedPayload
+    const tracedPayload = injectUpstreamTraceMetadata(normalizedPayload, traceMetadata)
     const succeeded = response.status < 400 && Boolean(imageResult)
     const imageErrorMessage = response.status >= 400
       ? (parsedPayload?.error?.message || null)
@@ -1006,6 +1010,109 @@ function normalizeExtractedImageUrl(url) {
   return trimmed.startsWith('data:image/')
     ? trimmed.replace(/\s/g, '')
     : trimmed
+}
+
+async function inlineImageResultIntoPayload(payload, imageResult) {
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
+    return payload
+  }
+
+  const normalizedUrl = normalizeExtractedImageUrl(imageResult?.url)
+  if (!normalizedUrl || !/^https?:\/\//i.test(normalizedUrl)) {
+    return payload
+  }
+
+  try {
+    const dataUrl = await fetchRemoteImageAsDataUrl(normalizedUrl)
+    return injectCanonicalImageResult(payload, {
+      ...imageResult,
+      url: dataUrl,
+    })
+  } catch {
+    return payload
+  }
+}
+
+async function fetchRemoteImageAsDataUrl(url) {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`Failed to fetch generated image: ${response.status}`)
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer())
+  const mimeType = resolveFetchedImageMimeType(response.headers.get('content-type'), url)
+  return `data:${mimeType};base64,${buffer.toString('base64')}`
+}
+
+function resolveFetchedImageMimeType(contentType, url) {
+  const normalizedType = typeof contentType === 'string'
+    ? contentType.split(';')[0].trim().toLowerCase()
+    : ''
+  if (normalizedType.startsWith('image/')) {
+    return normalizedType
+  }
+
+  try {
+    const pathname = new URL(url).pathname.toLowerCase()
+    if (pathname.endsWith('.jpg') || pathname.endsWith('.jpeg')) {
+      return 'image/jpeg'
+    }
+    if (pathname.endsWith('.webp')) {
+      return 'image/webp'
+    }
+    if (pathname.endsWith('.gif')) {
+      return 'image/gif'
+    }
+    if (pathname.endsWith('.png')) {
+      return 'image/png'
+    }
+  } catch {
+    // Ignore malformed URLs and fall back to PNG.
+  }
+
+  return 'image/png'
+}
+
+function injectCanonicalImageResult(payload, imageResult) {
+  if (!payload || Array.isArray(payload) || typeof payload !== 'object') {
+    return payload
+  }
+
+  const canonicalContent = [{
+    type: 'image_url',
+    image_url: {
+      url: imageResult.url,
+    },
+  }]
+
+  if (Array.isArray(payload.choices) && payload.choices.length > 0) {
+    const nextChoices = [...payload.choices]
+    const firstChoice = nextChoices[0]
+    if (firstChoice && typeof firstChoice === 'object') {
+      nextChoices[0] = {
+        ...firstChoice,
+        message: {
+          ...(firstChoice.message && typeof firstChoice.message === 'object' ? firstChoice.message : {}),
+          content: canonicalContent,
+        },
+      }
+
+      return {
+        ...payload,
+        choices: nextChoices,
+      }
+    }
+  }
+
+  return {
+    ...payload,
+    data: [{
+      image_url: imageResult.url,
+      ...(typeof imageResult.revisedPrompt === 'string' && imageResult.revisedPrompt
+        ? { revised_prompt: imageResult.revisedPrompt }
+        : {}),
+    }],
+  }
 }
 
 function tryParseStructuredImageString(content, fallbackPrompt = '') {
