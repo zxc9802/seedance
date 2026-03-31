@@ -26,8 +26,16 @@ function isKlingProvider(id) {
   return id === 'kling'
 }
 
+function isWanProvider(id) {
+  return PROVIDERS[id]?.backendKind === 'dashscope-wan'
+}
+
 function isYunwuProvider(id) {
   return PROVIDERS[id]?.backendKind === 'yunwu'
+}
+
+function isAggregationImageProvider(id) {
+  return PROVIDERS[id]?.backendKind === 'aggregation-image'
 }
 
 function App() {
@@ -89,7 +97,7 @@ function App() {
   const currentState = providerState[provider] || { generating: false, progress: 0, videoUrl: null, error: null }
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
   const maxImages = resolveImageLimit(config, generationMode, videoReferences)
-  const maxVideos = resolveLimit(config.maxReferenceVideos, generationMode)
+  const maxVideos = resolveVideoLimit(config, generationMode, videoReferences)
   const maxAudios = resolveLimit(config.maxReferenceAudios, generationMode)
 
   const updateParam = useCallback((key, value) => {
@@ -339,6 +347,84 @@ function App() {
             )
           }
         }
+      } else if (isWanProvider(provider)) {
+        const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
+        if (uploadedReferences.requiresPublicBaseUrl) {
+          /*
+          throw new Error('鍙傝€冪礌鏉愬凡缁忎笂浼犲埌鏈湴鍚庣锛屼絾褰撳墠鍚庣鍦板潃涓嶆槸鍏綉鍙闂湴鍧€銆傝閮ㄧ讲鍚庣鍒板叕缃戯紝鎴栬缃?PUBLIC_BASE_URL 鎸囧悜鍏綉鍩熷悕/闅ч亾銆?)
+          */
+          throw new Error('Reference assets were uploaded locally, but the backend is not reachable from the public internet. Set PUBLIC_BASE_URL to a public host before using DashScope Wan references.')
+        }
+
+        const requestInfo = buildWanVideoRequest(provider, params, finalPrompt, generationMode, uploadedReferences)
+        updateProviderState(provider, { progress: 18 })
+
+        const response = await fetch(requestInfo.url, {
+          method: 'POST',
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
+          body: JSON.stringify(requestInfo.body),
+        })
+
+        if (!response.ok) {
+          throw new Error(await formatHttpError(response))
+        }
+
+        const data = await response.json()
+        if (!data?.success) {
+          throw new Error(data?.message || '瑙嗛鐢熸垚璇锋眰澶辫触')
+        }
+
+        const initialTask = normalizeYunwuTask(data?.data)
+        if (initialTask.videoUrl) {
+          window.clearInterval(progressTimer)
+          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl)
+          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          return
+        }
+
+        if (!initialTask.taskId) {
+          throw new Error('鎺ュ彛宸插搷搴旓紝浣嗘病鏈夎繑鍥?taskId')
+        }
+
+        let finished = false
+        while (!finished) {
+          await sleep(5000)
+          const pollRequest = buildWanQueryRequest(provider, initialTask.taskId)
+          const pollResponse = await fetch(pollRequest.url, {
+            method: 'POST',
+            headers: pollRequest.headers,
+            body: JSON.stringify(pollRequest.body),
+          })
+
+          if (!pollResponse.ok) {
+            throw new Error(await formatHttpError(pollResponse))
+          }
+
+          const pollData = await pollResponse.json()
+          if (!pollData?.success) {
+            /*
+            throw new Error(pollData?.message || '鏌ヨ浠诲姟鐘舵€佸け璐?)
+            */
+            throw new Error(pollData?.message || 'Failed to query Wan task status')
+          }
+
+          const task = normalizeYunwuTask(pollData.data)
+          const state = normalizeTaskState(task.status)
+          if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
+            finished = true
+            window.clearInterval(progressTimer)
+            const previewUrl = await resolvePreviewUrl(task.videoUrl)
+            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            return
+          }
+
+          if (state === 'failed') {
+            /*
+            throw new Error(task.message || '瑙嗛鐢熸垚澶辫触')
+            */
+            throw new Error(task.message || 'Wan video generation failed')
+          }
+        }
       } else if (isYunwuProvider(provider)) {
         const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
         if (uploadedReferences.requiresPublicBaseUrl) {
@@ -489,7 +575,85 @@ function App() {
           }
         }
       } else if (!isVideoProvider(provider)) {
-        const requestInfo = buildImageRequest(params, finalPrompt, generationMode, referenceMedia)
+        if (isAggregationImageProvider(provider)) {
+          const uploadedReferences = await uploadImageReferences(referenceMedia)
+          if (uploadedReferences.requiresPublicBaseUrl) {
+            throw new Error('Reference images were uploaded locally, but the backend is not reachable from the public internet. Set PUBLIC_BASE_URL to a public host before using aggregation image references.')
+          }
+
+          const requestInfo = buildAggregationImageRequest(provider, params, finalPrompt, generationMode, uploadedReferences.resourceRefs)
+          updateProviderState(provider, { progress: 18 })
+
+          const response = await fetch(requestInfo.url, {
+            method: 'POST',
+            headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
+            body: JSON.stringify(requestInfo.body),
+          })
+
+          if (!response.ok) {
+            throw new Error(await formatHttpError(response))
+          }
+
+          const data = await response.json()
+          if (!data?.success) {
+            throw new Error(data?.msg || data?.message || 'Image generation request failed')
+          }
+
+          const initialTask = normalizeAggregationImageTask(data, finalPrompt)
+          const initialState = normalizeAggregationTaskState(initialTask.status)
+          if ((initialState === 'succeeded' || initialState === 'completed') && initialTask.imageUrl) {
+            window.clearInterval(progressTimer)
+            const previewUrl = await resolvePreviewUrl(initialTask.imageUrl)
+            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            return
+          }
+
+          if (initialState === 'failed' || initialState === 'cancelled') {
+            throw new Error(initialTask.message || 'Image generation failed')
+          }
+
+          if (!initialTask.taskId) {
+            throw new Error('The upstream request succeeded, but no taskId was returned')
+          }
+
+          let finished = false
+          while (!finished) {
+            await sleep(5000)
+            const pollRequest = buildAggregationImageQueryRequest(initialTask.taskId)
+            const pollResponse = await fetch(pollRequest.url, {
+              method: 'POST',
+              headers: pollRequest.headers,
+              body: JSON.stringify(pollRequest.body),
+            })
+
+            if (!pollResponse.ok) {
+              throw new Error(await formatHttpError(pollResponse))
+            }
+
+            const pollData = await pollResponse.json()
+            if (!pollData?.success) {
+              throw new Error(pollData?.msg || pollData?.message || 'Failed to query image task status')
+            }
+
+            const task = normalizeAggregationImageTask(pollData, finalPrompt)
+            const state = normalizeAggregationTaskState(task.status)
+            if ((state === 'succeeded' || state === 'completed') && task.imageUrl) {
+              finished = true
+              window.clearInterval(progressTimer)
+              const previewUrl = await resolvePreviewUrl(task.imageUrl)
+              updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+              return
+            }
+
+            if (state === 'failed' || state === 'cancelled') {
+              throw new Error(task.message || 'Image generation failed')
+            }
+          }
+
+          throw new Error('Image generation finished without a result URL')
+        }
+
+        const requestInfo = buildOpenAiImageRequest(provider, params, finalPrompt, generationMode, referenceMedia)
         const response = await fetch(requestInfo.url, {
           method: 'POST',
           headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
@@ -621,6 +785,13 @@ function mergeProviderRuntimeState(currentState, updates) {
   return next
 }
 
+let videoAssetOrderCounter = 0
+
+function nextVideoAssetOrder() {
+  videoAssetOrderCounter += 1
+  return Date.now() * 1000 + videoAssetOrderCounter
+}
+
 function serializeVideoReferences(references) {
   return {
     images: serializeVideoAssetList(references?.images),
@@ -636,6 +807,7 @@ function serializeVideoAssetList(list) {
     .filter((asset) => asset?.file)
     .map((asset) => ({
       id: asset.id,
+      order: asset.order,
       name: asset.name,
       size: asset.size,
       mimeType: asset.mimeType,
@@ -730,6 +902,7 @@ function hydrateVideoAsset(asset) {
 
   return {
     id: asset.id || crypto.randomUUID(),
+    order: typeof asset.order === 'number' ? asset.order : nextVideoAssetOrder(),
     file,
     name: asset.name || file.name,
     size: asset.size ?? file.size,
@@ -999,6 +1172,26 @@ function buildYunwuVideoRequest(provider, params, prompt, mode, references) {
   }
 }
 
+function buildWanVideoRequest(provider, params, prompt, mode, references) {
+  return {
+    url: '/api/wan/generate',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      prompt,
+      mode,
+      params: {
+        ...params,
+        generateAudio: Boolean(params.generateAudio),
+        watermark: Boolean(params.watermark),
+      },
+      references,
+    },
+  }
+}
+
 function buildYunwuQueryRequest(provider, taskId, queryContext) {
   return {
     url: '/api/yunwu/query',
@@ -1013,6 +1206,19 @@ function buildYunwuQueryRequest(provider, taskId, queryContext) {
   }
 }
 
+function buildWanQueryRequest(provider, taskId) {
+  return {
+    url: '/api/wan/query',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      taskId,
+    },
+  }
+}
+
 function normalizeYunwuTask(data) {
   return {
     taskId: extractTaskId(data),
@@ -1020,6 +1226,17 @@ function normalizeYunwuTask(data) {
     message: data?.message || null,
     videoUrl: data?.videoUrl || null,
     queryContext: data?.queryContext || null,
+  }
+}
+
+function normalizeAggregationImageTask(payload, fallbackPrompt) {
+  const imageResult = parseImageChatResponse(payload, fallbackPrompt)
+
+  return {
+    taskId: extractTaskId(payload),
+    status: extractAggregationTaskStatus(payload),
+    message: extractAggregationTaskMessage(payload),
+    imageUrl: imageResult?.url || null,
   }
 }
 
@@ -1038,21 +1255,30 @@ function formatRuntimeErrorMessage(provider, message) {
   return message
 }
 
-function buildImageRequest(params, prompt, mode, mediaList) {
+function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
   const content = [{ type: 'text', text: prompt }]
   if (mode === 'i2v') {
     for (const media of mediaList) {
-      const rawBase64 = extractImageBase64Payload(media)
-      if (!rawBase64) {
+      const imageUrl = extractImageDataUrlPayload(media)
+      if (!imageUrl) {
         throw new Error('参考图片格式无效，图生图仅支持 Base64 图片输入')
       }
 
       content.push({
-        type: 'image_base64',
-        image_base64: rawBase64,
+        type: 'image_url',
+        image_url: { url: imageUrl },
       })
     }
   }
+
+  const messages = []
+  const systemInstruction = buildOpenAiImageSystemInstruction(params)
+  if (systemInstruction) {
+    messages.push({ role: 'system', content: systemInstruction })
+  }
+  messages.push({ role: 'user', content })
+
+  const generationConfig = buildGeminiImageGenerationConfig(params)
 
   return {
     url: '/api/image/chat/completions',
@@ -1060,8 +1286,93 @@ function buildImageRequest(params, prompt, mode, mediaList) {
       'Content-Type': 'application/json',
     },
     body: {
+      providerId: provider,
       model: params.model,
-      messages: [{ role: 'user', content }],
+      messages,
+      ...(generationConfig ? { generationConfig } : {}),
+    },
+  }
+}
+
+function buildOpenAiImageSystemInstruction(params) {
+  const rules = []
+
+  if (params?.aspectRatio) {
+    rules.push(`Use an output aspect ratio of ${params.aspectRatio}.`)
+  }
+
+  if (params?.resolution) {
+    rules.push(`Target image size ${params.resolution}.`)
+  }
+
+  if (rules.length === 0) {
+    return ''
+  }
+
+  return [
+    'Image generation constraints:',
+    ...rules,
+    'Do not ignore these output constraints unless the request is impossible.',
+  ].join(' ')
+}
+
+function buildGeminiImageGenerationConfig(params) {
+  const imageConfig = {}
+
+  if (params?.aspectRatio) {
+    imageConfig.aspectRatio = params.aspectRatio
+  }
+
+  if (params?.resolution) {
+    imageConfig.imageSize = params.resolution
+  }
+
+  if (Object.keys(imageConfig).length === 0) {
+    return null
+  }
+
+  return {
+    responseModalities: ['TEXT', 'IMAGE'],
+    imageConfig,
+  }
+}
+
+function buildAggregationImageRequest(provider, params, prompt, mode, resourceRefs) {
+  const payload = {
+    params: {
+      resolution: params.resolution,
+      scale: params.aspectRatio,
+    },
+  }
+
+  if (mode === 'i2v' && resourceRefs.length > 0) {
+    payload.resources = resourceRefs
+  }
+
+  return {
+    url: '/api/image/aggregation/generate',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      modelId: params.model,
+      abilityType: 'IMAGE',
+      prompt,
+      payload,
+    },
+  }
+}
+
+function buildAggregationImageQueryRequest(taskId) {
+  return {
+    url: '/api/image/aggregation/queryResult',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      taskId,
+      abilityType: 'IMAGE',
     },
   }
 }
@@ -1080,6 +1391,26 @@ function extractImageBase64Payload(media) {
   }
 
   return null
+}
+
+function extractImageDataUrlPayload(media) {
+  if (typeof media !== 'string') return null
+
+  const trimmed = media.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  if (/^data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed)) {
+    return trimmed.replace(/\s/g, '')
+  }
+
+  const rawBase64 = extractImageBase64Payload(trimmed)
+  if (!rawBase64) {
+    return null
+  }
+
+  return `data:image/png;base64,${rawBase64}`
 }
 
 function mapVideoMode(mode) {
@@ -1159,6 +1490,68 @@ async function readVideoReferencesAsBase64(references) {
   return results
 }
 
+async function uploadImageReferences(mediaList) {
+  if (!Array.isArray(mediaList) || mediaList.length === 0) {
+    return { resourceRefs: [], requiresPublicBaseUrl: false }
+  }
+
+  const assets = mediaList.map((media, index) => ({
+    id: `image-${index}`,
+    order: index,
+    file: imageMediaToFile(media, index),
+  }))
+
+  const uploaded = await uploadReferenceBatch(assets)
+  return {
+    resourceRefs: uploaded.resourceRefs,
+    requiresPublicBaseUrl: uploaded.requiresPublicBaseUrl,
+  }
+}
+
+function imageMediaToFile(media, index) {
+  if (typeof media !== 'string') {
+    throw new Error('Reference image format is invalid')
+  }
+
+  const dataUrlMatch = media.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i)
+  if (dataUrlMatch) {
+    const mimeType = dataUrlMatch[1]
+    const base64 = dataUrlMatch[2].replace(/\s/g, '')
+    const extension = mimeTypeToFileExtension(mimeType)
+    return createFileFromBase64Data(base64, mimeType, `image-reference-${index + 1}.${extension}`)
+  }
+
+  const rawBase64 = extractImageBase64Payload(media)
+  if (!rawBase64) {
+    throw new Error('Reference image format is invalid')
+  }
+
+  return createFileFromBase64Data(rawBase64, 'image/png', `image-reference-${index + 1}.png`)
+}
+
+function createFileFromBase64Data(base64, mimeType, filename) {
+  const binary = window.atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index)
+  }
+  return new File([bytes], filename, { type: mimeType })
+}
+
+function mimeTypeToFileExtension(mimeType) {
+  switch ((mimeType || '').toLowerCase()) {
+    case 'image/jpeg':
+      return 'jpg'
+    case 'image/webp':
+      return 'webp'
+    case 'image/gif':
+      return 'gif'
+    case 'image/png':
+    default:
+      return 'png'
+  }
+}
+
 function resolveLimit(limitConfig, mode) {
   if (typeof limitConfig === 'number') return limitConfig
   if (!limitConfig) return 0
@@ -1167,13 +1560,25 @@ function resolveLimit(limitConfig, mode) {
 
 function resolveImageLimit(config, mode, references) {
   const baseLimit = resolveLimit(config?.maxReferenceImages, mode)
+  if (config?.id === 'wan1') {
+    return Math.max(0, Math.min(baseLimit, 5 - (references?.videos?.length || 0)))
+  }
   if (config?.id === 'kling' && mode === 'fusion' && references?.videos?.length > 0) {
     return Math.min(baseLimit, 4)
   }
   return baseLimit
 }
 
+function resolveVideoLimit(config, mode, references) {
+  const baseLimit = resolveLimit(config?.maxReferenceVideos, mode)
+  if (config?.id === 'wan1') {
+    return Math.max(0, Math.min(baseLimit, 5 - (references?.images?.length || 0)))
+  }
+  return baseLimit
+}
+
 function validateVideoReferenceInput(provider, params, mode, references) {
+  const wanValidationError = validateWanReferenceInput(provider, mode, references)
   const klingValidationError = validateKlingReferenceInput(provider, params, mode, references)
   if (mode === 't2v') return null
   if (mode === 'i2v' && references.images.length !== 1) return '图生视频模式需要 1 张参考图片'
@@ -1201,7 +1606,33 @@ function validateVideoReferenceInput(provider, params, mode, references) {
     }
   }
 
+  if (wanValidationError) {
+    return wanValidationError
+  }
+
   return klingValidationError
+}
+
+function validateWanReferenceInput(provider, mode, references) {
+  if (!isWanProvider(provider) || mode !== 'fusion') return null
+
+  const imageCount = references.images.length
+  const videoCount = references.videos.length
+  const totalVisualCount = imageCount + videoCount
+
+  if (videoCount > 3) {
+    return '\u4e07\u8c61\u53c2\u8003\u89c6\u9891\u6700\u591a 3 \u6bb5'
+  }
+
+  if (imageCount > 5) {
+    return '\u4e07\u8c61\u53c2\u8003\u56fe\u7247\u6700\u591a 5 \u5f20'
+  }
+
+  if (totalVisualCount > 5) {
+    return '\u4e07\u8c61\u53c2\u8003\u56fe\u7247\u548c\u89c6\u9891\u603b\u6570\u4e0d\u80fd\u8d85\u8fc7 5 \u4e2a'
+  }
+
+  return null
 }
 
 function validateKlingReferenceInput(provider, params, mode, references) {
@@ -1242,21 +1673,26 @@ function validateKlingReferenceInput(provider, params, mode, references) {
 
 async function uploadVideoReferences(provider, params, references) {
   const imageMaterialType = resolveImageMaterialType(provider, params)
-  const images = await uploadReferenceBatch(references.images, { materialType: imageMaterialType })
-  const videos = await uploadReferenceBatch(references.videos)
-  const audios = await uploadReferenceBatch(references.audios)
+  const uploadOptions = resolveReferenceUploadOptions(provider, params)
+  const images = await uploadReferenceBatch(references.images, { materialType: imageMaterialType, ...uploadOptions })
+  const videos = await uploadReferenceBatch(references.videos, uploadOptions)
+  const audios = await uploadReferenceBatch(references.audios, uploadOptions)
+  const orderedVisualRefs = [...images.items, ...videos.items]
+    .sort((left, right) => left.order - right.order)
+    .map((item) => item.resourceRef)
 
   return {
     images: images.resourceRefs,
     videos: videos.resourceRefs,
     audios: audios.resourceRefs,
+    orderedVisualRefs,
     requiresPublicBaseUrl: images.requiresPublicBaseUrl || videos.requiresPublicBaseUrl || audios.requiresPublicBaseUrl,
   }
 }
 
 async function uploadReferenceBatch(assets, options = {}) {
   if (!assets.length) {
-    return { resourceRefs: [], requiresPublicBaseUrl: false }
+    return { resourceRefs: [], items: [], requiresPublicBaseUrl: false }
   }
 
   const formData = new FormData()
@@ -1265,6 +1701,12 @@ async function uploadReferenceBatch(assets, options = {}) {
   }
   if (options.materialType && options.materialType !== 'direct') {
     formData.append('materialType', options.materialType)
+  }
+  if (options.storageBackend) {
+    formData.append('storageBackend', options.storageBackend)
+  }
+  if (options.dashscopeModel) {
+    formData.append('dashscopeModel', options.dashscopeModel)
   }
 
   const response = await fetch('/api/upload', {
@@ -1283,6 +1725,11 @@ async function uploadReferenceBatch(assets, options = {}) {
 
   return {
     resourceRefs: data.files.map((file) => file.resourceRef || file.url),
+    items: data.files.map((file, index) => ({
+      assetId: assets[index]?.id || null,
+      order: typeof assets[index]?.order === 'number' ? assets[index].order : index,
+      resourceRef: file.resourceRef || file.url,
+    })),
     requiresPublicBaseUrl: data.publiclyReachable === false,
   }
 }
@@ -1290,6 +1737,20 @@ async function uploadReferenceBatch(assets, options = {}) {
 function resolveImageMaterialType(provider, params) {
   if (provider !== 'veo') return 'direct'
   return params.imageMaterialType || 'role'
+}
+
+function resolveReferenceUploadOptions(provider, params) {
+  if (!isWanProvider(provider)) {
+    return {}
+  }
+
+  const configuredModel = typeof params?.model === 'string' ? params.model.trim() : ''
+  const fallbackModel = PROVIDERS[provider]?.defaults?.model || 'wan2.6-r2v-flash'
+
+  return {
+    storageBackend: 'dashscope',
+    dashscopeModel: configuredModel || fallbackModel,
+  }
 }
 
 function createEmptyVideoReferences() {
@@ -1360,23 +1821,47 @@ async function resolvePreviewUrl(url) {
 }
 
 function normalizeTaskState(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    value = String(value)
+  }
+
   if (typeof value !== 'string') return ''
 
   const normalized = value.trim().toLowerCase()
   switch (normalized) {
+    case '2':
     case 'succeeded':
     case 'success':
       return 'succeeded'
+    case '0':
+    case '1':
+    case 'submitted':
+    case 'pending':
+    case 'queued':
+    case 'processing':
+    case 'running':
+    case 'inprogress':
+    case 'in_progress':
+      return 'submitted'
     case 'completed':
     case 'complete':
       return 'completed'
+    case '3':
+    case '4':
     case 'failed':
     case 'failure':
     case 'error':
+    case 'canceled':
+    case 'cancelled':
+    case 'unknown':
       return 'failed'
     default:
       return normalized
   }
+}
+
+function normalizeAggregationTaskState(value) {
+  return normalizeTaskState(value)
 }
 
 function normalizeTaskIdValue(value) {
@@ -1424,6 +1909,41 @@ function findFirstPathValue(target, paths) {
   }
 
   return null
+}
+
+function extractAggregationTaskStatus(payload) {
+  return findFirstPathValue(payload, [
+    'status',
+    'state',
+    'task_status',
+    'data.status',
+    'data.state',
+    'data.task_status',
+    'data.result.status',
+    'data.result.state',
+    'data.result.task_status',
+    'result.status',
+    'result.state',
+    'result.task_status',
+  ])
+}
+
+function extractAggregationTaskMessage(payload) {
+  return findFirstPathValue(payload, [
+    'message',
+    'msg',
+    'content',
+    'data.message',
+    'data.msg',
+    'data.content',
+    'data.result.message',
+    'data.result.msg',
+    'data.result.content',
+    'result.message',
+    'result.msg',
+    'result.content',
+    'error.message',
+  ]) || null
 }
 
 function extractTaskId(payload) {
@@ -1675,6 +2195,108 @@ function summarizeImageResponseShape(data) {
   return fields.filter(Boolean).join(' | ') || null
 }
 
+function normalizeParsedImageUrl(url) {
+  if (typeof url !== 'string') {
+    return null
+  }
+
+  const trimmed = url.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  return trimmed.startsWith('data:image/')
+    ? trimmed.replace(/\s/g, '')
+    : trimmed
+}
+
+function tryParseStructuredImageString(content, fallbackPrompt) {
+  if (typeof content !== 'string') {
+    return null
+  }
+
+  const candidates = [content]
+  const fencedMatch = content.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  if (fencedMatch?.[1]) {
+    candidates.unshift(fencedMatch[1])
+  }
+
+  for (const candidate of candidates) {
+    const trimmed = candidate.trim()
+    if (!trimmed || !/^[\[{"]/.test(trimmed)) {
+      continue
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed)
+      const parsedResponse = parseImageChatResponse(parsed, fallbackPrompt)
+      if (parsedResponse) {
+        return parsedResponse
+      }
+
+      const directRecord = parseImageRecord(parsed, fallbackPrompt)
+      if (directRecord) {
+        return directRecord
+      }
+    } catch {
+      // Ignore malformed JSON-like strings and continue with other strategies.
+    }
+  }
+
+  return null
+}
+
+function extractImageUrlFromString(content, fallbackPrompt) {
+  if (typeof content !== 'string') {
+    return null
+  }
+
+  const trimmed = content.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  const markdownMatch = trimmed.match(/!\[[^\]]*]\(([^)]+)\)/s)
+  if (markdownMatch?.[1]) {
+    const nestedMatch = extractImageUrlFromString(markdownMatch[1], fallbackPrompt)
+    if (nestedMatch) {
+      return nestedMatch
+    }
+  }
+
+  if (trimmed.startsWith('data:image/')) {
+    return { url: normalizeParsedImageUrl(trimmed), revised_prompt: fallbackPrompt }
+  }
+
+  const dataUrlMatch = trimmed.match(/data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)/)
+  if (dataUrlMatch) {
+    return { url: dataUrlMatch[0].replace(/\s/g, ''), revised_prompt: fallbackPrompt }
+  }
+
+  const structuredResult = tryParseStructuredImageString(trimmed, fallbackPrompt)
+  if (structuredResult) {
+    return structuredResult
+  }
+
+  const urlMatch = trimmed.match(/https?:\/\/[^\s"'`<>)]+/i)
+  if (urlMatch) {
+    return {
+      url: normalizeParsedImageUrl(urlMatch[0]),
+      revised_prompt: fallbackPrompt,
+    }
+  }
+
+  const rawBase64Match = trimmed.match(/\b([A-Za-z0-9+/]{100,}={0,2})\b/)
+  if (rawBase64Match) {
+    return {
+      url: `data:image/png;base64,${rawBase64Match[1]}`,
+      revised_prompt: fallbackPrompt,
+    }
+  }
+
+  return null
+}
+
 function parseInlineImagePayload(payload, fallbackPrompt) {
   if (!payload || typeof payload !== 'object') {
     return null
@@ -1715,20 +2337,40 @@ function parseImageParts(parts, fallbackPrompt) {
 }
 
 function parseImageRecord(record, fallbackPrompt) {
+  if (typeof record === 'string') {
+    return extractImageUrlFromString(record, fallbackPrompt)
+  }
+
   if (!record || typeof record !== 'object') {
     return null
   }
 
   if (typeof record.url === 'string' && record.url) {
+    const parsedUrl = extractImageUrlFromString(record.url, fallbackPrompt)
     return {
-      url: record.url,
+      url: parsedUrl?.url || normalizeParsedImageUrl(record.url),
       revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
     }
   }
 
-  if (record.image_url?.url) {
+  const imageUrlValue = typeof record.image_url === 'string'
+    ? record.image_url
+    : record.image_url?.url
+  if (imageUrlValue) {
+    const parsedUrl = extractImageUrlFromString(imageUrlValue, fallbackPrompt)
     return {
-      url: record.image_url.url,
+      url: parsedUrl?.url || normalizeParsedImageUrl(imageUrlValue),
+      revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
+    }
+  }
+
+  const imageValue = typeof record.image === 'string'
+    ? record.image
+    : record.image?.url
+  if (imageValue) {
+    const parsedUrl = extractImageUrlFromString(imageValue, fallbackPrompt)
+    return {
+      url: parsedUrl?.url || normalizeParsedImageUrl(imageValue),
       revised_prompt: typeof record.revised_prompt === 'string' ? record.revised_prompt : fallbackPrompt,
     }
   }
@@ -1756,30 +2398,24 @@ function parseImageChatResponse(data, fallbackPrompt) {
   const content = data?.choices?.[0]?.message?.content
 
   if (typeof content === 'string') {
-    const markdownMatch = content.match(/!\[.*?\]\((data:image\/[^;]+;base64,[^)]+)\)/)
-    if (markdownMatch) {
-      return { url: markdownMatch[1], revised_prompt: fallbackPrompt }
-    }
-
-    if (content.startsWith('data:image/')) {
-      return { url: content, revised_prompt: fallbackPrompt }
-    }
-
-    const dataUrlMatch = content.match(/data:(image\/[a-zA-Z+]+);base64,([A-Za-z0-9+/=\s]+)/)
-    if (dataUrlMatch) {
-      return { url: dataUrlMatch[0].replace(/\s/g, ''), revised_prompt: fallbackPrompt }
-    }
-
-    const rawBase64Match = content.match(/\b([A-Za-z0-9+/]{100,}={0,2})\b/)
-    if (rawBase64Match) {
-      return { url: `data:image/png;base64,${rawBase64Match[1]}`, revised_prompt: fallbackPrompt }
+    const stringResult = extractImageUrlFromString(content, fallbackPrompt)
+    if (stringResult) {
+      return stringResult
     }
   }
 
   if (Array.isArray(content)) {
-    const imageItem = content.find((item) => item?.type === 'image_url' && item?.image_url?.url)
+    const imageItem = content.find((item) => item?.type === 'image_url' && (
+      item?.image_url?.url || typeof item?.image_url === 'string'
+    ))
     if (imageItem) {
-      return { url: imageItem.image_url.url, revised_prompt: fallbackPrompt }
+      const imageUrlValue = typeof imageItem.image_url === 'string'
+        ? imageItem.image_url
+        : imageItem.image_url.url
+      return {
+        url: normalizeParsedImageUrl(imageUrlValue),
+        revised_prompt: fallbackPrompt,
+      }
     }
 
     const base64Item = content.find((item) => item?.type === 'image_base64' && typeof item?.image_base64 === 'string')
@@ -1790,9 +2426,21 @@ function parseImageChatResponse(data, fallbackPrompt) {
         revised_prompt: fallbackPrompt,
       }
     }
+
+    for (const contentItem of content) {
+      const parsedRecord = parseImageRecord(contentItem, fallbackPrompt)
+      if (parsedRecord) {
+        return parsedRecord
+      }
+    }
   }
 
-  const topLevelCollections = [data?.data, data?.images]
+  const topLevelRecord = parseImageRecord(data, fallbackPrompt)
+  if (topLevelRecord) {
+    return topLevelRecord
+  }
+
+  const topLevelCollections = [data?.data, data?.images, data?.results, data?.artifacts]
   for (const collection of topLevelCollections) {
     if (!Array.isArray(collection)) continue
 
@@ -1801,6 +2449,14 @@ function parseImageChatResponse(data, fallbackPrompt) {
       if (parsedRecord) {
         return parsedRecord
       }
+    }
+  }
+
+  const directContainers = [data?.result, data?.image]
+  for (const entry of directContainers) {
+    const directRecord = parseImageRecord(entry, fallbackPrompt)
+    if (directRecord) {
+      return directRecord
     }
   }
 

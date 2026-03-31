@@ -92,6 +92,24 @@ export default function ParameterPanel({ provider, config, params, onUpdate }) {
         </Section>
       )}
 
+      {config.features.shotType && config.shotTypeOptions && (
+        <Section icon={<Video size={13} />} title="镜头类型">
+          <div className="chip-row compact">
+            {config.shotTypeOptions.map((option) => (
+              <Chip
+                key={option.value}
+                active={params.shotType === option.value}
+                onClick={() => onUpdate('shotType', option.value)}
+                color={config.color}
+                compact
+              >
+                {option.label}
+              </Chip>
+            ))}
+          </div>
+        </Section>
+      )}
+
       {config.features.guidanceScale && (
         <Section icon={<Wand2 size={13} />} title="引导强度">
           <div className="slider-row">
