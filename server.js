@@ -2483,7 +2483,7 @@ function buildDashScopeWanGenerateRequest(input) {
     async: true,
     resolveOssResource: referenceUrls.some((item) => isDashScopeOssResource(item)),
     body: {
-      model: String(params.model || 'wan2.6-r2v-flash'),
+      model: String(params.model || 'wan2.6-r2v'),
       input: {
         prompt,
         ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),

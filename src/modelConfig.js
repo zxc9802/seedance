@@ -247,7 +247,7 @@ const BASE_PROVIDERS = {
     vendor: 'DashScope',
     color: '#0ea5e9',
     models: [
-      { value: 'wan2.6-r2v-flash', label: 'Wan 2.6 R2V Flash', tag: 'DashScope' },
+      { value: 'wan2.6-r2v', label: 'Wan 2.6 R2V', tag: 'DashScope' },
     ],
     aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4'],
     resolutions: {
@@ -275,7 +275,7 @@ const BASE_PROVIDERS = {
       fusion: 3,
     },
     defaults: {
-      model: 'wan2.6-r2v-flash',
+      model: 'wan2.6-r2v',
       aspectRatio: '16:9',
       resolution: '720P',
       duration: 5,

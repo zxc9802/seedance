@@ -2079,7 +2079,7 @@ function resolveReferenceUploadOptions(provider, params) {
   }
 
   const configuredModel = typeof params?.model === 'string' ? params.model.trim() : ''
-  const fallbackModel = PROVIDERS[provider]?.defaults?.model || 'wan2.6-r2v-flash'
+  const fallbackModel = PROVIDERS[provider]?.defaults?.model || 'wan2.6-r2v'
 
   return {
     storageBackend: 'dashscope',
