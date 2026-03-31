@@ -1269,42 +1269,29 @@ function formatRuntimeErrorMessage(provider, message) {
 }
 
 function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
-  const content = [{ type: 'text', text: prompt }]
+  const parts = [{ text: prompt }]
   if (mode === 'i2v') {
     for (const media of mediaList) {
-      const imageUrl = extractImageDataUrlPayload(media)
-      if (!imageUrl) {
+      const inlineImage = buildGeminiInlineImagePart(media)
+      if (!inlineImage) {
         throw new Error('参考图片格式无效，图生图仅支持 Base64 图片输入')
       }
 
-      content.push({
-        type: 'image_url',
-        image_url: { url: imageUrl },
-      })
+      parts.push({ inline_data: inlineImage })
     }
   }
 
-  const messages = []
-  const explicitDimensions = resolveOpenAiImageDimensions(params)
-  const systemInstruction = buildOpenAiImageSystemInstruction(params, explicitDimensions)
-  if (systemInstruction) {
-    messages.push({ role: 'system', content: systemInstruction })
-  }
-  messages.push({ role: 'user', content })
-
-  const generationConfig = buildGeminiImageGenerationConfig(params, explicitDimensions)
-  const explicitSize = explicitDimensions ? `${explicitDimensions.width}x${explicitDimensions.height}` : null
+  const generationConfig = buildGeminiImageGenerationConfig(params)
 
   return {
-    url: '/api/image/chat/completions',
+    url: '/api/image/generate-content',
     headers: {
       'Content-Type': 'application/json',
     },
     body: {
       providerId: provider,
       model: params.model,
-      messages,
-      ...(explicitSize ? { size: explicitSize } : {}),
+      contents: [{ parts }],
       ...(generationConfig ? { generationConfig } : {}),
     },
   }
@@ -1338,18 +1325,11 @@ function buildOpenAiImageSystemInstruction(params, explicitDimensions) {
   ].join(' ')
 }
 
-function buildGeminiImageGenerationConfig(params, explicitDimensions) {
+function buildGeminiImageGenerationConfig(params) {
   const imageConfig = {}
-  const explicitSize = explicitDimensions ? `${explicitDimensions.width}x${explicitDimensions.height}` : null
 
   if (params?.aspectRatio) {
     imageConfig.aspectRatio = params.aspectRatio
-  }
-
-  if (explicitSize) {
-    imageConfig.imageSize = explicitSize
-    imageConfig.width = explicitDimensions.width
-    imageConfig.height = explicitDimensions.height
   }
 
   if (params?.resolution) {
@@ -1361,8 +1341,24 @@ function buildGeminiImageGenerationConfig(params, explicitDimensions) {
   }
 
   return {
-    responseModalities: ['TEXT', 'IMAGE'],
     imageConfig,
+  }
+}
+
+function buildGeminiInlineImagePart(media) {
+  const dataUrl = extractImageDataUrlPayload(media)
+  if (!dataUrl) {
+    return null
+  }
+
+  const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i)
+  if (!match) {
+    return null
+  }
+
+  return {
+    mime_type: match[1],
+    data: match[2].replace(/\s/g, ''),
   }
 }
 
@@ -2460,7 +2456,7 @@ function sleep(ms) {
 
 function buildImageResponseParseError(data) {
   if (isGatewayStatusPayload(data)) {
-    return '图片接口返回的是 New API 网关状态，而不是模型生成结果。请检查部署路由是否把 /api/image/chat/completions 转发到了本站后端，并确认 IMAGE_API_BASE_URL 填的是上游基础地址（例如 https://example.com/v1），不要填当前站点地址，也不要重复带上 /chat/completions。'
+    return '图片接口返回的是网关状态，而不是模型生成结果。请检查部署路由是否把 /api/image/generate-content 转发到了本站后端，并确认 IMAGE_API_BASE_URL 填的是上游基础地址（例如 https://example.com），不要填当前站点地址，也不要重复带上 /v1beta/models/...:generateContent。'
   }
 
   const summary = summarizeImageResponseShape(data)

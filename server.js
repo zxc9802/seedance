@@ -30,7 +30,7 @@ const cleanupIntervalMinutes = Number(process.env.UPLOAD_CLEANUP_INTERVAL_MINUTE
 const publicBaseUrl = stripTrailingSlash(process.env.PUBLIC_BASE_URL || '')
 const videoApiBaseUrl = stripTrailingSlash(process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
-const imageApiBaseUrl = normalizeOpenAiBaseUrl(process.env.IMAGE_API_BASE_URL || 'http://47.77.198.47:3001/v1')
+const imageApiBaseUrl = normalizeGeminiImageBaseUrl(process.env.IMAGE_API_BASE_URL || 'https://www.shanbaob.com')
 const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGATION_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const yunwuApiBaseUrl = stripTrailingSlash(process.env.YUNWU_API_BASE_URL || 'https://yunwu.ai')
 const dashScopeBaseUrl = stripTrailingSlash(process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com')
@@ -430,7 +430,10 @@ app.post('/api/veo/queryResult', async (req, res) => {
   })
 })
 
-app.post('/api/image/chat/completions', async (req, res) => {
+app.post('/api/image/chat/completions', handleGeminiImageGenerateRequest)
+app.post('/api/image/generate-content', handleGeminiImageGenerateRequest)
+
+async function handleGeminiImageGenerateRequest(req, res) {
   if (!process.env.IMAGE_API_KEY) {
     res.status(500).json({
       error: {
@@ -441,16 +444,44 @@ app.post('/api/image/chat/completions', async (req, res) => {
     return
   }
 
-  const body = normalizeOpenAiImageRequestBody(req.body || {})
+  const body = normalizeGeminiImageRequestBody(req.body || {})
+  const model = typeof body?.model === 'string' ? body.model.trim() : ''
+  if (!model) {
+    res.status(400).json({
+      error: {
+        message: 'Missing required field: model',
+        type: 'request_error',
+      },
+    })
+    return
+  }
+
+  const contents = Array.isArray(body?.contents) ? body.contents : []
+  if (contents.length === 0) {
+    res.status(400).json({
+      error: {
+        message: 'Missing required field: contents',
+        type: 'request_error',
+      },
+    })
+    return
+  }
+
   const mediaSummary = parseUsageMediaSummaryHeader(req)
-  const upstreamBody = JSON.parse(JSON.stringify(body))
-  delete upstreamBody.providerId
+  const upstreamBody = {
+    contents,
+    ...(body.generationConfig ? { generationConfig: body.generationConfig } : {}),
+    ...(body.systemInstruction ? { systemInstruction: body.systemInstruction } : {}),
+    ...(body.tools ? { tools: body.tools } : {}),
+  }
+  const upstreamUrl = buildGeminiGenerateContentUrl(imageApiBaseUrl, model)
 
   try {
-    const response = await fetch(`${imageApiBaseUrl}/chat/completions`, {
+    const response = await fetch(upstreamUrl, {
       method: req.method,
       headers: {
         'Content-Type': 'application/json',
+        'x-goog-api-key': process.env.IMAGE_API_KEY,
         Authorization: `Bearer ${process.env.IMAGE_API_KEY}`,
       },
       body: JSON.stringify(upstreamBody),
@@ -484,7 +515,7 @@ app.post('/api/image/chat/completions', async (req, res) => {
       }, mediaSummary),
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
-      upstreamUrl: `${imageApiBaseUrl}/chat/completions`,
+      upstreamUrl,
       status: succeeded ? 'succeeded' : 'failed',
       errorMessage: imageErrorMessage,
     }).catch(() => {})
@@ -524,7 +555,7 @@ app.post('/api/image/chat/completions', async (req, res) => {
       ...(error.traceId ? { traceId: error.traceId } : {}),
     })
   }
-})
+}
 
 app.post('/api/image/aggregation/generate', async (req, res) => {
   const missing = getMissingImageAggregationConfig()
@@ -821,28 +852,63 @@ function summarizeBase64Field(value) {
   }
 }
 
-function normalizeOpenAiImageRequestBody(body) {
+function normalizeGeminiImageRequestBody(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return body
   }
 
   const normalized = JSON.parse(JSON.stringify(body))
-  if (!Array.isArray(normalized.messages)) {
-    return normalized
+  if (Array.isArray(normalized.contents)) {
+    normalized.contents = normalized.contents.map(normalizeGeminiContentItem)
+  } else if (Array.isArray(normalized.messages)) {
+    normalized.contents = convertOpenAiMessagesToGeminiContents(normalized.messages)
   }
 
-  normalized.messages = normalized.messages.map((message) => {
-    if (!message || typeof message !== 'object' || !Array.isArray(message.content)) {
-      return message
+  if (normalized.generationConfig?.imageConfig && typeof normalized.generationConfig.imageConfig === 'object') {
+    const nextImageConfig = {}
+    if (typeof normalized.generationConfig.imageConfig.aspectRatio === 'string' && normalized.generationConfig.imageConfig.aspectRatio.trim()) {
+      nextImageConfig.aspectRatio = normalized.generationConfig.imageConfig.aspectRatio.trim()
     }
+    if (typeof normalized.generationConfig.imageConfig.imageSize === 'string' && normalized.generationConfig.imageConfig.imageSize.trim()) {
+      nextImageConfig.imageSize = normalized.generationConfig.imageConfig.imageSize.trim()
+    }
+    normalized.generationConfig.imageConfig = nextImageConfig
+  }
 
-    return {
-      ...message,
-      content: message.content.map(normalizeOpenAiImageContentItem),
-    }
-  })
+  delete normalized.messages
 
   return normalized
+}
+
+function normalizeGeminiContentItem(item) {
+  if (!item || typeof item !== 'object') {
+    return item
+  }
+
+  if (!Array.isArray(item.parts)) {
+    return item
+  }
+
+  return {
+    ...item,
+    parts: item.parts.map(normalizeGeminiPartItem),
+  }
+}
+
+function convertOpenAiMessagesToGeminiContents(messages) {
+  return messages
+    .filter((message) => message && typeof message === 'object')
+    .map((message) => {
+      const content = Array.isArray(message.content)
+        ? message.content.map(normalizeOpenAiImageContentItem)
+        : [{ type: 'text', text: typeof message.content === 'string' ? message.content : '' }]
+      const parts = content
+        .map(convertOpenAiContentItemToGeminiPart)
+        .filter(Boolean)
+
+      return parts.length > 0 ? { parts } : null
+    })
+    .filter(Boolean)
 }
 
 function normalizeOpenAiImageContentItem(item) {
@@ -872,6 +938,82 @@ function normalizeOpenAiImageContentItem(item) {
   return item
 }
 
+function normalizeGeminiPartItem(part) {
+  if (!part || typeof part !== 'object') {
+    return part
+  }
+
+  if (part.inline_data && typeof part.inline_data === 'object') {
+    return {
+      ...part,
+      inline_data: normalizeGeminiInlineData(part.inline_data),
+    }
+  }
+
+  if (part.inlineData && typeof part.inlineData === 'object') {
+    return {
+      ...part,
+      inline_data: normalizeGeminiInlineData(part.inlineData),
+    }
+  }
+
+  return part
+}
+
+function normalizeGeminiInlineData(inlineData) {
+  const mimeType = typeof inlineData?.mime_type === 'string'
+    ? inlineData.mime_type
+    : (typeof inlineData?.mimeType === 'string' ? inlineData.mimeType : 'image/png')
+  const data = typeof inlineData?.data === 'string' ? inlineData.data.replace(/\s/g, '') : ''
+
+  return {
+    mime_type: mimeType,
+    data,
+  }
+}
+
+function convertOpenAiContentItemToGeminiPart(item) {
+  if (!item || typeof item !== 'object') {
+    return null
+  }
+
+  if (item.type === 'text' && typeof item.text === 'string' && item.text.trim()) {
+    return { text: item.text.trim() }
+  }
+
+  if (item.type === 'image_base64' && typeof item.image_base64 === 'string' && item.image_base64.trim()) {
+    const dataUrl = buildDataUrlFromImageItem(item)
+    const inlineData = parseGeminiInlineDataFromDataUrl(dataUrl)
+    return inlineData ? { inline_data: inlineData } : null
+  }
+
+  if (item.type === 'image_url') {
+    const rawUrl = typeof item.image_url === 'string'
+      ? item.image_url
+      : item.image_url?.url
+    const inlineData = parseGeminiInlineDataFromDataUrl(rawUrl)
+    return inlineData ? { inline_data: inlineData } : null
+  }
+
+  return null
+}
+
+function parseGeminiInlineDataFromDataUrl(value) {
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  const match = value.trim().match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i)
+  if (!match) {
+    return null
+  }
+
+  return {
+    mime_type: match[1],
+    data: match[2].replace(/\s/g, ''),
+  }
+}
+
 function buildDataUrlFromImageItem(item) {
   const rawValue = typeof item?.image_base64 === 'string' ? item.image_base64.trim() : ''
   if (!rawValue) {
@@ -890,6 +1032,15 @@ function buildDataUrlFromImageItem(item) {
 }
 
 function extractImagePromptText(body) {
+  const parts = readGeminiRequestParts(body)
+  if (parts.length > 0) {
+    return parts
+      .filter((item) => typeof item?.text === 'string')
+      .map((item) => item.text.trim())
+      .filter(Boolean)
+      .join('\n')
+  }
+
   const messages = Array.isArray(body?.messages) ? body.messages : []
   const content = messages[messages.length - 1]?.content
 
@@ -909,6 +1060,14 @@ function extractImagePromptText(body) {
 }
 
 function extractImageMediaCounts(body) {
+  const parts = readGeminiRequestParts(body)
+  if (parts.length > 0) {
+    const imageCount = parts.filter((item) => (
+      item?.inline_data?.data || item?.inlineData?.data
+    )).length
+    return { images: imageCount, videos: 0, audios: 0 }
+  }
+
   const messages = Array.isArray(body?.messages) ? body.messages : []
   const content = messages[messages.length - 1]?.content
   if (!Array.isArray(content)) {
@@ -920,6 +1079,12 @@ function extractImageMediaCounts(body) {
   )).length
 
   return { images: imageCount, videos: 0, audios: 0 }
+}
+
+function readGeminiRequestParts(body) {
+  const contents = Array.isArray(body?.contents) ? body.contents : []
+  const lastContent = contents[contents.length - 1]
+  return Array.isArray(lastContent?.parts) ? lastContent.parts : []
 }
 
 function buildImageResponseParseError(data) {
@@ -3609,19 +3774,24 @@ function stripTrailingSlash(value) {
   return value.replace(/\/+$/, '')
 }
 
-function normalizeOpenAiBaseUrl(value) {
+function normalizeGeminiImageBaseUrl(value) {
   const normalized = stripTrailingSlash(String(value || '').trim())
 
   try {
     const url = new URL(normalized)
     const pathname = stripTrailingSlash(url.pathname || '')
     if (pathname === '' || pathname === '/') {
-      url.pathname = '/v1'
+      url.pathname = ''
       return stripTrailingSlash(url.toString())
     }
 
     if (pathname.endsWith('/chat/completions')) {
-      url.pathname = pathname.slice(0, -'/chat/completions'.length) || '/v1'
+      url.pathname = pathname.slice(0, -'/chat/completions'.length) || ''
+      return stripTrailingSlash(url.toString())
+    }
+
+    if (pathname.endsWith('/v1') || pathname.endsWith('/v1beta')) {
+      url.pathname = pathname.replace(/\/v1(beta)?$/, '')
       return stripTrailingSlash(url.toString())
     }
   } catch {
@@ -3629,6 +3799,12 @@ function normalizeOpenAiBaseUrl(value) {
   }
 
   return normalized
+}
+
+function buildGeminiGenerateContentUrl(baseUrl, model) {
+  const url = new URL(stripTrailingSlash(baseUrl))
+  url.pathname = `${stripTrailingSlash(url.pathname || '')}/v1beta/models/${encodeURIComponent(model)}:generateContent`
+  return url.toString()
 }
 
 function inferExtension(mimeType = '') {

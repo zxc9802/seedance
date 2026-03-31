@@ -2,10 +2,10 @@ import { YUNWU_PROVIDER_ORDER, YUNWU_PROVIDERS } from './yunwuProviders'
 
 const IMAGE_PROVIDER_NAME = readClientEnv('VITE_IMAGE_PROVIDER_NAME', 'nanobanana1')
 const IMAGE_PROVIDER_SELECTOR_LABEL = readClientEnv('VITE_IMAGE_PROVIDER_SELECTOR_LABEL', 'nanobanana1')
-const IMAGE_PROVIDER_VENDOR = readClientEnv('VITE_IMAGE_PROVIDER_VENDOR', 'OpenAI Compatible')
+const IMAGE_PROVIDER_VENDOR = readClientEnv('VITE_IMAGE_PROVIDER_VENDOR', 'Gemini Native')
 const IMAGE_MODEL_ID = readClientEnv('VITE_IMAGE_MODEL_ID', 'gemini-3.1-flash-image-preview')
 const IMAGE_MODEL_LABEL = readClientEnv('VITE_IMAGE_MODEL_LABEL', 'Gemini 3.1 Flash')
-const IMAGE_MODEL_TAG = readClientEnv('VITE_IMAGE_MODEL_TAG', 'compatible')
+const IMAGE_MODEL_TAG = readClientEnv('VITE_IMAGE_MODEL_TAG', 'native')
 const IMAGE_AGGREGATION_PROVIDER_NAME = readClientEnv('VITE_IMAGE_AGGREGATION_PROVIDER_NAME', 'nanobanana2')
 const IMAGE_AGGREGATION_PROVIDER_SELECTOR_LABEL = readClientEnv('VITE_IMAGE_AGGREGATION_PROVIDER_SELECTOR_LABEL', 'nanobanana2')
 const IMAGE_AGGREGATION_PROVIDER_VENDOR = readClientEnv('VITE_IMAGE_AGGREGATION_PROVIDER_VENDOR', 'AI Aggregation')
@@ -318,7 +318,7 @@ const BASE_PROVIDERS = {
       { value: IMAGE_MODEL_ID, label: IMAGE_MODEL_LABEL, tag: IMAGE_MODEL_TAG },
     ],
     aspectRatios: ['1:1', '16:9', '9:16', '3:4', '4:3'],
-    resolutions: { default: [] },
+    resolutions: { default: ['512', '1K', '2K', '4K'] },
     durations: [],
     sampleCounts: [1],
     features: {
@@ -368,6 +368,7 @@ const BASE_PROVIDERS = {
     defaults: {
       model: IMAGE_MODEL_ID,
       aspectRatio: '1:1',
+      resolution: '1K',
       sampleCount: 1,
     },
     backendKind: 'openai-image',
