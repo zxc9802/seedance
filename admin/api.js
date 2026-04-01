@@ -465,6 +465,21 @@ function runCostImportUpload(req, res) {
   })
 }
 
+function queueCostImportBackupSync(logIds, meta = {}) {
+  const uniqueIds = [...new Set((Array.isArray(logIds) ? logIds : [logIds]).filter(Boolean))]
+  if (uniqueIds.length === 0) return
+
+  setImmediate(() => {
+    syncUsageLogBackupByIds(uniqueIds).catch((error) => {
+      console.error('[cost-import] Lark backup sync failed:', {
+        ...meta,
+        count: uniqueIds.length,
+        error: error.message,
+      })
+    })
+  })
+}
+
 async function applyCostImportActions(client, actions) {
   const appliedTargetIds = new Set()
 
@@ -922,13 +937,11 @@ router.post('/cost-import/apply', async (req, res) => {
       }
     }
 
-    if (updatedUsageLogIds.length > 0) {
-      try {
-        await syncUsageLogBackupByIds(updatedUsageLogIds)
-      } catch (error) {
-        console.error('[cost-import] Lark backup sync failed:', error.message)
-      }
-    }
+    queueCostImportBackupSync(updatedUsageLogIds, {
+      actor,
+      channel,
+      fileName: parsedFile.fileName,
+    })
 
     const actionByRowNumber = new Map(preview.actions.map((action) => [action.rowNumber, action]))
     const appliedDetailRows = preview.detailRows.map((row) => {
