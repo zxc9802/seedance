@@ -1362,14 +1362,13 @@ function normalizeYunwuTask(data) {
 
 function normalizeAggregationImageTask(payload, fallbackPrompt) {
   const message = extractAggregationTaskMessage(payload)
-  const imageResult = parseImageChatResponse(payload, fallbackPrompt)
-    || extractImageUrlFromString(message || '', fallbackPrompt)
+  const imageUrl = extractAggregationImageUrl(payload, fallbackPrompt, message)
 
   return {
     taskId: extractTaskId(payload),
     status: extractAggregationTaskStatus(payload),
     message,
-    imageUrl: imageResult?.url || null,
+    imageUrl,
   }
 }
 
@@ -2326,8 +2325,12 @@ function normalizeTaskState(value) {
   const normalized = value.trim().toLowerCase()
   switch (normalized) {
     case '2':
+    case 'done':
+    case 'finish':
+    case 'finished':
     case 'succeeded':
     case 'success':
+    case 'successed':
       return 'succeeded'
     case '0':
     case '1':
@@ -2358,6 +2361,45 @@ function normalizeTaskState(value) {
 
 function normalizeAggregationTaskState(value) {
   return normalizeTaskState(value)
+}
+
+function extractAggregationImageUrl(payload, fallbackPrompt, fallbackMessage = null) {
+  const parsed = parseImageChatResponse(payload, fallbackPrompt)
+    || extractImageUrlFromString(fallbackMessage || '', fallbackPrompt)
+
+  if (parsed?.url) {
+    return parsed.url
+  }
+
+  return (
+    findFirstMatchingPathValue(payload, [
+      'imageUrl',
+      'image_url',
+      'resultUrl',
+      'url',
+      'content',
+      'message',
+      'data.imageUrl',
+      'data.image_url',
+      'data.resultUrl',
+      'data.url',
+      'data.content',
+      'data.message',
+      'data.result.imageUrl',
+      'data.result.image_url',
+      'data.result.resultUrl',
+      'data.result.url',
+      'data.result.content',
+      'data.result.message',
+      'result.imageUrl',
+      'result.image_url',
+      'result.resultUrl',
+      'result.url',
+      'result.content',
+      'result.message',
+    ], isLikelyImageTextUrl)
+    || findFirstMediaUrlDeep(payload, 0, '', isLikelyImageTextUrl)
+  )
 }
 
 function normalizeTaskIdValue(value) {
@@ -2747,6 +2789,59 @@ function extractImageTextFailureMessage(data) {
     const normalizedMessage = normalizeImageTextFailureMessage(candidate)
     if (normalizedMessage) {
       return normalizedMessage
+    }
+  }
+
+  return null
+}
+
+function findFirstMatchingPathValue(target, paths, predicate) {
+  for (const path of paths) {
+    const value = getPathValue(target, path)
+    if (typeof value !== 'string') continue
+
+    const normalized = normalizeParsedImageUrl(value)
+    if (normalized && predicate(normalized)) {
+      return normalized
+    }
+  }
+
+  return null
+}
+
+function findFirstMediaUrlDeep(target, depth = 0, keyPath = '', predicate = isLikelyImageTextUrl) {
+  if (!target || depth > 6) {
+    return null
+  }
+
+  if (typeof target === 'string') {
+    const normalized = normalizeParsedImageUrl(target)
+    return normalized && predicate(normalized, keyPath) ? normalized : null
+  }
+
+  if (Array.isArray(target)) {
+    for (let index = 0; index < target.length; index += 1) {
+      const match = findFirstMediaUrlDeep(
+        target[index],
+        depth + 1,
+        keyPath ? `${keyPath}.${index}` : String(index),
+        predicate,
+      )
+      if (match) {
+        return match
+      }
+    }
+
+    return null
+  }
+
+  if (typeof target === 'object') {
+    for (const [key, value] of Object.entries(target)) {
+      const nextPath = keyPath ? `${keyPath}.${key}` : key
+      const match = findFirstMediaUrlDeep(value, depth + 1, nextPath, predicate)
+      if (match) {
+        return match
+      }
     }
   }
 

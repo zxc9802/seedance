@@ -4666,9 +4666,9 @@ async function fetchAggregationLogsForStatusSync() {
   const retryDelaySeconds = Math.max(30, Math.floor(USAGE_STATUS_SYNC_INTERVAL_MS / 1000))
   const result = await db.query(
     `
-      SELECT id, engine_task_id, status, created_at, updated_at
+      SELECT id, channel, provider_id, engine_task_id, status, created_at, updated_at
       FROM video_usage_logs
-      WHERE channel = 'aggregation'
+      WHERE (channel = 'aggregation' OR provider_id = 'gemini-image-aggregation')
         AND status = ANY($1::text[])
         AND engine_task_id IS NOT NULL
         AND created_at >= NOW() - ($2::int * INTERVAL '1 hour')
@@ -4689,21 +4689,30 @@ async function fetchAggregationLogsForStatusSync() {
   return result.rows
 }
 
-async function queryAggregationTaskStatusForSync(taskId) {
+async function queryAggregationTaskStatusForSync(row) {
+  const taskId = normalizeTaskIdValue(row?.engine_task_id)
+  const isImageAggregationTask = row?.provider_id === 'gemini-image-aggregation'
+
   try {
-    const payload = await requestJson(videoApiBaseUrl, '/openApi/queryResult', {
-      projectCode: process.env.VIDEO_PROJECT_CODE,
-      'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
-      'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
-    }, {
+    const payload = await requestJson(
+      isImageAggregationTask ? imageAggregationApiBaseUrl : videoApiBaseUrl,
+      '/openApi/queryResult',
+      isImageAggregationTask ? buildImageAggregationHeaders() : {
+        projectCode: process.env.VIDEO_PROJECT_CODE,
+        'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
+        'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
+      },
+      {
       taskId,
-      abilityType: 'VIDEO',
-    })
+      abilityType: isImageAggregationTask ? 'IMAGE' : 'VIDEO',
+    },
+    )
 
     return buildAggregationUsageLogSyncUpdate({
       payload,
       requestedTaskId: taskId,
       traceMetadata: extractTraceMetadataFromPayload(payload),
+      mediaUrlResolver: isImageAggregationTask ? extractAggregationImageUrl : extractAggregationVideoUrl,
     })
   } catch (error) {
     return {
@@ -4732,7 +4741,7 @@ async function syncAggregationUsageStatuses() {
   }
 
   for (const row of rows) {
-    const syncUpdate = await queryAggregationTaskStatusForSync(row.engine_task_id)
+    const syncUpdate = await queryAggregationTaskStatusForSync(row)
     if (!syncUpdate?.taskId || !syncUpdate.updates) {
       continue
     }
