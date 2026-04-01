@@ -178,6 +178,17 @@ export const YUNWU_PROVIDERS = {
       default: ['720p'],
     },
     durations: [3, 5, 10],
+    durationRules: {
+      modelDefaults: {
+        'kling-v2-6': [5, 10],
+      },
+      modelModes: {
+        'kling-video-o1': {
+          t2v: [5, 10],
+          i2v: [5, 10],
+        },
+      },
+    },
     sampleCounts: [1],
     features: {
       generateAudio: true,
