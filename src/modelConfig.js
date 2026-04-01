@@ -184,6 +184,11 @@ const BASE_PROVIDERS = {
       default: ['720p'],
     },
     durations: [3, 4, 5, 6, 8, 10, 12, 15],
+    durationRules: {
+      modesWithVideoReference: {
+        fusion: [3, 4, 5, 6, 8, 10],
+      },
+    },
     sampleCounts: [1],
     features: {
       generateAudio: true,
@@ -318,7 +323,7 @@ const BASE_PROVIDERS = {
       { value: IMAGE_MODEL_ID, label: IMAGE_MODEL_LABEL, tag: IMAGE_MODEL_TAG },
     ],
     aspectRatios: ['1:1', '16:9', '9:16', '3:4', '4:3'],
-    resolutions: { default: ['512', '1K', '2K', '4K'] },
+    resolutions: { default: ['512', '1K'] },
     durations: [],
     sampleCounts: [1],
     features: {
@@ -391,7 +396,7 @@ const BASE_PROVIDERS = {
     ],
     aspectRatios: ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9', '1:4', '1:8', '4:1', '8:1'],
     resolutions: {
-      default: ['512', '1K', '2K'],
+      default: ['512', '1K'],
     },
     durations: [],
     sampleCounts: [1],

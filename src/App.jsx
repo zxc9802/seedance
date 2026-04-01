@@ -103,9 +103,9 @@ function App() {
     }
   }, [])
 
-  const params = normalizeParamsForProvider(provider, allParams[provider], generationMode)
+  const params = normalizeParamsForProvider(provider, allParams[provider], generationMode, videoReferences)
   const config = PROVIDERS[provider]
-  const panelConfig = getConfigForGenerationMode(config, generationMode)
+  const panelConfig = getConfigForGenerationMode(config, generationMode, params, videoReferences)
   const currentState = providerState[provider] || { generating: false, progress: 0, videoUrl: null, error: null }
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
   const maxImages = resolveImageLimit(config, generationMode, videoReferences)
@@ -115,9 +115,9 @@ function App() {
   const updateParam = useCallback((key, value) => {
     setAllParams((prev) => ({
       ...prev,
-      [provider]: normalizeParamsForProvider(provider, { ...prev[provider], [key]: value }, generationMode),
+      [provider]: normalizeParamsForProvider(provider, { ...prev[provider], [key]: value }, generationMode, videoReferences),
     }))
-  }, [generationMode, provider])
+  }, [generationMode, provider, videoReferences])
 
   const updateProviderState = useCallback((targetProvider, updates) => {
     setProviderState((prev) => ({
@@ -244,18 +244,20 @@ function App() {
     setSelectedTemplate(null)
     const nextConfig = PROVIDERS[nextProvider]
     const firstMode = nextConfig.generationModes?.[0]?.value || 't2v'
+    const emptyReferences = createEmptyVideoReferences()
     setAllParams((prev) => ({
       ...prev,
-      [nextProvider]: normalizeParamsForProvider(nextProvider, prev[nextProvider], firstMode),
+      [nextProvider]: normalizeParamsForProvider(nextProvider, prev[nextProvider], firstMode, emptyReferences),
     }))
     setGenerationMode(firstMode)
     resetReferences()
   }, [resetReferences])
 
   const handleModeChange = useCallback((nextMode) => {
+    const emptyReferences = createEmptyVideoReferences()
     setAllParams((prev) => ({
       ...prev,
-      [provider]: normalizeParamsForProvider(provider, prev[provider], nextMode),
+      [provider]: normalizeParamsForProvider(provider, prev[provider], nextMode, emptyReferences),
     }))
     setGenerationMode(nextMode)
     resetReferences()
@@ -613,11 +615,15 @@ function App() {
 
           const initialTask = normalizeAggregationImageTask(data, finalPrompt)
           const initialState = normalizeAggregationTaskState(initialTask.status)
-          if ((initialState === 'succeeded' || initialState === 'completed') && initialTask.imageUrl) {
-            window.clearInterval(progressTimer)
-            const previewUrl = await resolvePreviewUrl(initialTask.imageUrl)
-            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
-            return
+          if (initialState === 'succeeded' || initialState === 'completed') {
+            if (initialTask.imageUrl) {
+              window.clearInterval(progressTimer)
+              const previewUrl = await resolvePreviewUrl(initialTask.imageUrl)
+              updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+              return
+            }
+
+            throw new Error(initialTask.message || 'Image generation finished without a result image')
           }
 
           if (initialState === 'failed' || initialState === 'cancelled') {
@@ -628,8 +634,10 @@ function App() {
             throw new Error('The upstream request succeeded, but no taskId was returned')
           }
 
-          let finished = false
-          while (!finished) {
+          const pollTimeoutMs = 5 * 60 * 1000
+          const pollDeadline = Date.now() + pollTimeoutMs
+          let lastTask = initialTask
+          while (Date.now() < pollDeadline) {
             await sleep(5000)
             const pollRequest = buildAggregationImageQueryRequest(initialTask.taskId)
             const pollResponse = await fetch(pollRequest.url, {
@@ -649,12 +657,16 @@ function App() {
 
             const task = normalizeAggregationImageTask(pollData, finalPrompt)
             const state = normalizeAggregationTaskState(task.status)
-            if ((state === 'succeeded' || state === 'completed') && task.imageUrl) {
-              finished = true
-              window.clearInterval(progressTimer)
-              const previewUrl = await resolvePreviewUrl(task.imageUrl)
-              updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
-              return
+            lastTask = task
+            if (state === 'succeeded' || state === 'completed') {
+              if (task.imageUrl) {
+                window.clearInterval(progressTimer)
+                const previewUrl = await resolvePreviewUrl(task.imageUrl)
+                updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+                return
+              }
+
+              throw new Error(task.message || 'Image generation finished without a result image')
             }
 
             if (state === 'failed' || state === 'cancelled') {
@@ -662,7 +674,9 @@ function App() {
             }
           }
 
-          throw new Error('Image generation finished without a result URL')
+          const timeoutStatus = normalizeAggregationTaskState(lastTask?.status) || 'unknown'
+          const timeoutMessage = lastTask?.message ? ` ${lastTask.message}` : ''
+          throw new Error(`Image generation timed out while waiting for the upstream task. Last status: ${timeoutStatus}.${timeoutMessage}`)
         }
 
         const requestInfo = buildOpenAiImageRequest(provider, params, finalPrompt, generationMode, referenceMedia)
@@ -984,11 +998,13 @@ function normalizeAllParams(allParams) {
   return changed ? next : allParams
 }
 
-function normalizeParamsForProvider(provider, params, mode = 't2v') {
+function normalizeParamsForProvider(provider, params, mode = 't2v', references = createEmptyVideoReferences()) {
   const config = PROVIDERS[provider]
   if (!config) return params
 
-  let nextParams = params
+  const sourceParams = params && typeof params === 'object' ? params : {}
+  let nextParams = sourceParams
+  let changed = nextParams !== params
   const availableModels = resolveAvailableModels(config, mode)
 
   if (availableModels.length > 0 && !availableModels.includes(nextParams.model)) {
@@ -996,25 +1012,47 @@ function normalizeParamsForProvider(provider, params, mode = 't2v') {
       ...nextParams,
       model: availableModels[0],
     }
+    changed = true
   }
 
   const resolutionOptions = config.resolutions?.[nextParams.model] || config.resolutions?.default || []
 
   if (resolutionOptions.length > 0 && !resolutionOptions.includes(nextParams.resolution)) {
-    return {
+    nextParams = {
       ...nextParams,
       resolution: resolutionOptions[0],
     }
+    changed = true
   }
 
-  return nextParams
+  const durationOptions = resolveDurationOptions(config, nextParams, mode, references)
+  const normalizedDuration = resolveSupportedDurationValue(
+    nextParams.duration,
+    durationOptions,
+    config.defaults?.duration,
+  )
+
+  if (durationOptions.length > 0 && nextParams.duration !== normalizedDuration) {
+    nextParams = {
+      ...nextParams,
+      duration: normalizedDuration,
+    }
+    changed = true
+  }
+
+  return changed ? nextParams : sourceParams
 }
 
-function getConfigForGenerationMode(config, mode) {
+function getConfigForGenerationMode(config, mode, params, references = createEmptyVideoReferences()) {
   if (!config) return config
 
   const availableModels = resolveAvailableModels(config, mode)
-  if (availableModels.length === config.models.length) {
+  const durationOptions = resolveDurationOptions(config, params, mode, references)
+  const modelsUnchanged = availableModels.length === config.models.length
+  const durationsUnchanged = durationOptions.length === config.durations.length
+    && durationOptions.every((duration, index) => duration === config.durations[index])
+
+  if (modelsUnchanged && durationsUnchanged) {
     return config
   }
 
@@ -1022,7 +1060,87 @@ function getConfigForGenerationMode(config, mode) {
   return {
     ...config,
     models: config.models.filter((model) => allowedSet.has(model.value)),
+    durations: durationOptions,
   }
+}
+
+function resolveDurationOptions(config, params, mode, references = createEmptyVideoReferences()) {
+  const baseOptions = Array.isArray(config?.durations)
+    ? config.durations.filter((duration) => Number.isFinite(Number(duration)))
+    : []
+  if (baseOptions.length === 0) return []
+
+  const durationRules = config?.durationRules
+  if (!durationRules || typeof durationRules !== 'object') {
+    return baseOptions
+  }
+
+  const model = typeof params?.model === 'string' ? params.model.trim() : ''
+  const hasVideoReference = Array.isArray(references?.videos) && references.videos.length > 0
+  let nextOptions = [...baseOptions]
+
+  nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modelDefaults?.[model])
+  nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modes?.[mode])
+  nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modelModes?.[model]?.[mode])
+
+  if (hasVideoReference) {
+    nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modesWithVideoReference?.[mode])
+  }
+
+  return nextOptions
+}
+
+function applyDurationRuleOptions(currentOptions, ruleOptions) {
+  if (!Array.isArray(ruleOptions) || ruleOptions.length === 0) {
+    return currentOptions
+  }
+
+  const allowedSet = new Set(ruleOptions)
+  const filtered = currentOptions.filter((option) => allowedSet.has(option))
+  return filtered.length > 0 ? filtered : currentOptions
+}
+
+function resolveSupportedDurationValue(currentValue, durationOptions, fallbackValue) {
+  if (!Array.isArray(durationOptions) || durationOptions.length === 0) {
+    return currentValue
+  }
+
+  const currentDuration = normalizeDurationNumber(currentValue)
+  if (currentDuration !== null && durationOptions.includes(currentDuration)) {
+    return currentDuration
+  }
+
+  const fallbackDuration = normalizeDurationNumber(fallbackValue)
+  if (fallbackDuration !== null && durationOptions.includes(fallbackDuration)) {
+    return fallbackDuration
+  }
+
+  const targetDuration = currentDuration ?? fallbackDuration
+  if (targetDuration !== null) {
+    return pickClosestDurationOption(durationOptions, targetDuration)
+  }
+
+  return durationOptions[0]
+}
+
+function normalizeDurationNumber(value) {
+  const numericValue = Math.trunc(Number(value))
+  return Number.isFinite(numericValue) ? numericValue : null
+}
+
+function pickClosestDurationOption(durationOptions, targetDuration) {
+  let closest = durationOptions[0]
+  let minDistance = Math.abs(closest - targetDuration)
+
+  for (const option of durationOptions.slice(1)) {
+    const distance = Math.abs(option - targetDuration)
+    if (distance < minDistance) {
+      closest = option
+      minDistance = distance
+    }
+  }
+
+  return closest
 }
 
 function resolveAvailableModels(config, mode) {
@@ -1243,12 +1361,14 @@ function normalizeYunwuTask(data) {
 }
 
 function normalizeAggregationImageTask(payload, fallbackPrompt) {
+  const message = extractAggregationTaskMessage(payload)
   const imageResult = parseImageChatResponse(payload, fallbackPrompt)
+    || extractImageUrlFromString(message || '', fallbackPrompt)
 
   return {
     taskId: extractTaskId(payload),
     status: extractAggregationTaskStatus(payload),
-    message: extractAggregationTaskMessage(payload),
+    message,
     imageUrl: imageResult?.url || null,
   }
 }
@@ -1914,7 +2034,8 @@ function resolveVideoLimit(config, mode, references) {
 function validateVideoReferenceInput(provider, params, mode, references) {
   const wanValidationError = validateWanReferenceInput(provider, mode, references)
   const klingValidationError = validateKlingReferenceInput(provider, params, mode, references)
-  if (mode === 't2v') return null
+  const durationValidationError = validateRequestedDuration(provider, params, mode, references)
+  if (mode !== 't2v') {
   if (mode === 'i2v' && references.images.length !== 1) return '图生视频模式需要 1 张参考图片'
   if (mode === 'flf' && references.images.length !== 2) return '首尾帧模式需要 2 张图片，第一张是首帧，第二张是尾帧'
 
@@ -1940,11 +2061,52 @@ function validateVideoReferenceInput(provider, params, mode, references) {
     }
   }
 
+  }
+
   if (wanValidationError) {
     return wanValidationError
   }
 
-  return klingValidationError
+  if (klingValidationError) {
+    return klingValidationError
+  }
+
+  return durationValidationError
+}
+
+function validateRequestedDuration(provider, params, mode, references) {
+  const config = PROVIDERS[provider]
+  if (!config || !isVideoProvider(provider)) {
+    return null
+  }
+
+  const durationOptions = resolveDurationOptions(config, params, mode, references)
+  if (durationOptions.length === 0) {
+    return null
+  }
+
+  const requestedDuration = normalizeDurationNumber(params?.duration)
+  if (requestedDuration !== null && durationOptions.includes(requestedDuration)) {
+    return null
+  }
+
+  if (provider === 'kling' && mode === 'fusion' && references.videos.length > 0) {
+    return `Kling with a reference video only supports ${durationOptions.join('/')} second durations`
+  }
+
+  if (provider === 'yunwu-kling') {
+    const modelLabel = resolveModelLabel(config, params?.model)
+    return `${modelLabel} only supports ${durationOptions.join('/')} second durations in this mode`
+  }
+
+  return `${config.name || 'Current model'} only supports ${durationOptions.join('/')} second durations`
+}
+
+function resolveModelLabel(config, modelValue) {
+  const matchedModel = Array.isArray(config?.models)
+    ? config.models.find((model) => model.value === modelValue)
+    : null
+  return matchedModel?.label || config?.name || 'Current model'
 }
 
 function validateWanReferenceInput(provider, mode, references) {

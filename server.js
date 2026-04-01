@@ -343,6 +343,7 @@ app.post('/api/veo/generate', async (req, res) => {
 
   const body = req.body || {}
   const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
+  const requestedParams = extractRequestedVideoParams(body)
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
@@ -354,14 +355,14 @@ app.post('/api/veo/generate', async (req, res) => {
       session: req.videoSiteSession,
       channel: 'aggregation',
       providerId: body.providerId || null,
-      model: body.modelId || body.model || null,
+      model: requestedParams.model || null,
       generationMode: body.mode || 't2v',
       prompt: body.prompt || null,
-      aspectRatio: body.params?.aspectRatio || body.aspectRatio || null,
-      resolution: body.params?.resolution || null,
-      duration: body.params?.duration || null,
-      sampleCount: body.sampleCount || 1,
-      requestParams: attachUsageMediaSummary(body, mediaSummary),
+      aspectRatio: requestedParams.aspectRatio || null,
+      resolution: requestedParams.resolution || null,
+      duration: requestedParams.duration ?? null,
+      sampleCount: requestedParams.sampleCount || 1,
+      requestParams: attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
       engineTaskId: taskId || null,
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
@@ -637,6 +638,7 @@ app.post('/api/yunwu/generate', async (req, res) => {
   try {
     const body = req.body || {}
     const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
+    const requestedParams = extractRequestedVideoParams(body)
     const requestSpec = buildYunwuGenerateRequest(body)
     const upstream = await requestYunwu(requestSpec)
     const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
@@ -646,13 +648,13 @@ app.post('/api/yunwu/generate', async (req, res) => {
       session: req.videoSiteSession,
       channel: 'yunwu',
       providerId: body.providerId || null,
-      model: body.params?.model || requestSpec.body?.model || null,
+      model: requestedParams.model || requestSpec.body?.model || requestSpec.body?.model_name || null,
       generationMode: body.mode || 't2v',
       prompt: body.prompt || null,
-      aspectRatio: body.params?.aspectRatio || null,
-      resolution: body.params?.resolution || null,
-      duration: body.params?.duration || null,
-      requestParams: attachUsageMediaSummary(body, mediaSummary),
+      aspectRatio: requestedParams.aspectRatio || null,
+      resolution: requestedParams.resolution || null,
+      duration: requestedParams.duration ?? null,
+      requestParams: attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
       engineTaskId: normalized.taskId || null,
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
@@ -742,6 +744,7 @@ app.post('/api/wan/generate', async (req, res) => {
   try {
     const body = req.body || {}
     const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
+    const requestedParams = extractRequestedVideoParams(body)
     const requestSpec = buildDashScopeWanGenerateRequest(body)
     const upstream = await requestDashScope(requestSpec)
     const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
@@ -751,13 +754,13 @@ app.post('/api/wan/generate', async (req, res) => {
       session: req.videoSiteSession,
       channel: 'wan',
       providerId: body.providerId || 'wan1',
-      model: body.params?.model || requestSpec.body?.model || null,
+      model: requestedParams.model || requestSpec.body?.model || null,
       generationMode: body.mode || 'fusion',
       prompt: body.prompt || null,
-      aspectRatio: body.params?.aspectRatio || null,
-      resolution: body.params?.resolution || null,
-      duration: body.params?.duration || null,
-      requestParams: attachUsageMediaSummary(body, mediaSummary),
+      aspectRatio: requestedParams.aspectRatio || null,
+      resolution: requestedParams.resolution || null,
+      duration: requestedParams.duration ?? null,
+      requestParams: attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
       engineTaskId: normalized.taskId || null,
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
@@ -1710,6 +1713,42 @@ function attachUsageMediaSummary(requestParams, mediaSummary) {
   return {
     ...(requestParams && typeof requestParams === 'object' ? requestParams : {}),
     mediaSummary,
+  }
+}
+
+function attachRequestedVideoParams(requestParams, requestedParams) {
+  if (!requestedParams || typeof requestedParams !== 'object') {
+    return requestParams
+  }
+
+  const filteredEntries = Object.entries(requestedParams).filter(([, value]) => (
+    value !== null
+    && value !== undefined
+    && value !== ''
+  ))
+  if (filteredEntries.length === 0) {
+    return requestParams
+  }
+
+  return {
+    ...(requestParams && typeof requestParams === 'object' ? requestParams : {}),
+    requestedParams: Object.fromEntries(filteredEntries),
+  }
+}
+
+function extractRequestedVideoParams(requestBody) {
+  const body = requestBody && typeof requestBody === 'object' ? requestBody : {}
+  const params = body.params && typeof body.params === 'object' ? body.params : {}
+  const payloadParams = body.payload?.params && typeof body.payload.params === 'object'
+    ? body.payload.params
+    : {}
+
+  return {
+    model: readFirstString(params.model, body.modelId, body.model),
+    aspectRatio: readFirstString(params.aspectRatio, payloadParams.scale, body.aspectRatio, body.scale),
+    resolution: readFirstString(params.resolution, payloadParams.resolution, body.resolution),
+    duration: readFirstFiniteNumber(params.duration, payloadParams.duration, body.duration),
+    sampleCount: readFirstFiniteNumber(params.sampleCount, body.sampleCount),
   }
 }
 
@@ -2724,7 +2763,7 @@ function buildYunwuGenerateRequest(input) {
       return {
         method: 'POST',
         path: mapYunwuKlingCreatePath(createKind),
-        body: buildYunwuKlingBody(createKind, prompt, params, references),
+        body: buildYunwuKlingBody(createKind, prompt, params, references, mode),
         queryContext: { createKind },
       }
     }
@@ -3058,13 +3097,42 @@ function mapYunwuKlingQueryPath(createKind, taskId) {
   }
 }
 
-function buildYunwuKlingBody(createKind, prompt, params, references) {
+function resolveYunwuKlingDurationOptions(modelName, mode) {
+  if (modelName === 'kling-v2-6') {
+    return [5, 10]
+  }
+
+  if (modelName === 'kling-video-o1' && (mode === 't2v' || mode === 'i2v')) {
+    return [5, 10]
+  }
+
+  return [3, 5, 10]
+}
+
+function resolveYunwuKlingDuration(params, mode) {
+  const duration = Math.trunc(coercePositiveNumber(params?.duration, 5))
+  const modelName = String(params?.model || '').trim()
+  const allowedDurations = resolveYunwuKlingDurationOptions(modelName, mode)
+
+  if (!allowedDurations.includes(duration)) {
+    throw createHttpError(
+      400,
+      `Yunwu Kling model ${modelName || 'default'} in ${mode} mode only supports ${allowedDurations.join(', ')} second durations.`,
+    )
+  }
+
+  return duration
+}
+
+function buildYunwuKlingBody(createKind, prompt, params, references, mode) {
+  const duration = String(resolveYunwuKlingDuration(params, mode))
+
   if (createKind === 'text2video') {
     return {
       model_name: params.model,
       prompt,
       aspect_ratio: params.aspectRatio || '16:9',
-      duration: String(coercePositiveNumber(params.duration, 5)),
+      duration,
       sound: Boolean(params.generateAudio),
     }
   }
@@ -3075,7 +3143,7 @@ function buildYunwuKlingBody(createKind, prompt, params, references) {
       prompt,
       image_list: references.images.map((image) => ({ image })),
       aspect_ratio: params.aspectRatio || '16:9',
-      duration: String(coercePositiveNumber(params.duration, 5)),
+      duration,
       mode: 'std',
     }
   }
@@ -3108,7 +3176,7 @@ function buildYunwuKlingBody(createKind, prompt, params, references) {
       mode: 'std',
       sound: params.generateAudio ? 'on' : 'off',
       aspect_ratio: params.aspectRatio || '16:9',
-      duration: String(coercePositiveNumber(params.duration, 5)),
+      duration,
     }
   }
 
@@ -3118,7 +3186,7 @@ function buildYunwuKlingBody(createKind, prompt, params, references) {
     image: references.images[0],
     ...(references.images[1] ? { image_tail: references.images[1] } : {}),
     aspect_ratio: params.aspectRatio || '16:9',
-    duration: String(coercePositiveNumber(params.duration, 5)),
+    duration,
     sound: Boolean(params.generateAudio),
   }
 }
@@ -3592,6 +3660,17 @@ function readFirstString(...values) {
   for (const value of values) {
     if (typeof value === 'string' && value.trim()) {
       return value.trim()
+    }
+  }
+
+  return null
+}
+
+function readFirstFiniteNumber(...values) {
+  for (const value of values) {
+    const numericValue = Number(value)
+    if (Number.isFinite(numericValue)) {
+      return numericValue
     }
   }
 
