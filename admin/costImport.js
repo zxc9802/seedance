@@ -1,4 +1,7 @@
 import * as XLSX from 'xlsx'
+import { buildUsageChannelSql } from './usageChannel.js'
+
+const USAGE_CHANNEL_SQL = buildUsageChannelSql()
 
 const TASK_ID_ALIASES = [
   'task_id',
@@ -255,25 +258,15 @@ export async function buildCostImportPreview({ db, channel, parsedFile }) {
   const matchesByTaskId = new Map()
 
   if (candidateTaskIds.length > 0) {
-    const result = channel === 'zhouzong'
-      ? await db.query(
-        `
-          SELECT id, engine_task_id, estimated_cost
-          FROM video_usage_logs
-          WHERE channel = ANY($1::text[])
-            AND engine_task_id = ANY($2::text[])
-        `,
-        [['veo_fast', 'image'], candidateTaskIds]
-      )
-      : await db.query(
-        `
-          SELECT id, engine_task_id, estimated_cost
-          FROM video_usage_logs
-          WHERE channel = $1
-            AND engine_task_id = ANY($2::text[])
-        `,
-        [channel, candidateTaskIds]
-      )
+    const result = await db.query(
+      `
+        SELECT id, engine_task_id, estimated_cost
+        FROM video_usage_logs
+        WHERE ${USAGE_CHANNEL_SQL} = $1
+          AND engine_task_id = ANY($2::text[])
+      `,
+      [channel, candidateTaskIds]
+    )
 
     result.rows.forEach((row) => {
       const group = matchesByTaskId.get(row.engine_task_id) || []

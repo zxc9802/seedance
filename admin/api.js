@@ -5,6 +5,7 @@ import multer from 'multer'
 import { getPool } from '../db/postgres.js'
 import { syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
+import { buildUsageChannelSql, formatUsageChannelLabel, resolveUsageChannel } from './usageChannel.js'
 
 const router = express.Router()
 const costImportUpload = multer({
@@ -173,9 +174,14 @@ function enhanceUsageLog(log) {
 
   const mediaCounts = extractMediaCounts(log)
   const mediaSizes = extractMediaSizes(log)
+  const rawChannel = log?.channel || null
+  const statsChannel = resolveUsageChannel(rawChannel, log?.provider_id) || rawChannel
 
   return {
     ...log,
+    rawChannel,
+    statsChannel,
+    channel: statsChannel,
     promptText,
     imageCount: mediaCounts.images,
     videoCount: mediaCounts.videos,
@@ -185,12 +191,6 @@ function enhanceUsageLog(log) {
     audioBytes: mediaSizes.audios,
   }
 }
-
-const CHANNEL_LABELS = Object.freeze({
-  aggregation: '\u56fd\u8fbe\u4e30',
-  veo_fast: '\u5468\u603b',
-  image: '\u5468\u603b',
-})
 
 const STATUS_LABELS = Object.freeze({
   submitted: '\u5df2\u63d0\u4ea4',
@@ -228,8 +228,10 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
   { header: '\u8d39\u7528', width: 14, align: 'right', type: 'amount', value: (log) => safeExcelAmount(log.estimated_cost) },
 ])
 
-function formatChannelLabel(channel) {
-  return CHANNEL_LABELS[channel] || channel || ''
+const USAGE_CHANNEL_SQL = buildUsageChannelSql()
+
+function formatChannelLabel(channel, providerId = null) {
+  return formatUsageChannelLabel(channel, providerId)
 }
 
 function formatStatusLabel(status) {
@@ -555,11 +557,8 @@ function buildUsageLogWhereClause(query = {}) {
     conditions.push(`engine_task_id ILIKE $${paramIdx++}`)
     params.push(`%${taskId}%`)
   }
-  if (query.channel === 'zhouzong') {
-    conditions.push(`channel = ANY($${paramIdx++})`)
-    params.push(['veo_fast', 'image'])
-  } else if (query.channel) {
-    conditions.push(`channel = $${paramIdx++}`)
+  if (query.channel) {
+    conditions.push(`${USAGE_CHANNEL_SQL} = $${paramIdx++}`)
     params.push(query.channel)
   }
   if (query.model) {
@@ -694,13 +693,13 @@ router.get('/by-model', async (req, res) => {
     const result = await db.query(`
       SELECT
         COALESCE(model, 'unknown') AS model,
-        channel,
+        ${USAGE_CHANNEL_SQL} AS channel,
         COUNT(*)::int AS requests,
         COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
       WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)
-      GROUP BY model, channel
+      GROUP BY model, ${USAGE_CHANNEL_SQL}
       ORDER BY requests DESC
     `, [days])
 
@@ -756,13 +755,13 @@ router.get('/by-channel', async (req, res) => {
   try {
     const result = await db.query(`
       SELECT
-        channel,
+        ${USAGE_CHANNEL_SQL} AS channel,
         COUNT(*)::int AS requests,
         COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
       WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)
-      GROUP BY channel
+      GROUP BY ${USAGE_CHANNEL_SQL}
       ORDER BY requests DESC
     `, [days])
 
