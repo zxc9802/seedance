@@ -3,9 +3,12 @@ import multer from 'multer'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
+import { execFile } from 'node:child_process'
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { createServer as createHttpServer } from 'node:http'
+import { promisify } from 'node:util'
 import { createServer as createViteServer, loadEnv } from 'vite'
 import { getPool, initDatabase, closePool } from './db/postgres.js'
 import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
@@ -13,6 +16,7 @@ import adminRouter from './admin/api.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+const execFileAsync = promisify(execFile)
 const isProduction = process.argv.includes('--production') || process.env.NODE_ENV === 'production'
 const mode = isProduction ? 'production' : 'development'
 const env = loadEnv(mode, __dirname, '')
@@ -65,6 +69,11 @@ const USAGE_STATUS_SYNC_LOOKBACK_HOURS = Math.max(1, Number(process.env.USAGE_ST
 const USAGE_STATUS_SYNC_MIN_AGE_MINUTES = Math.max(1, Number(process.env.USAGE_STATUS_SYNC_MIN_AGE_MINUTES || 3))
 const UNTRACKED_USAGE_REVIEW_DELAY_MINUTES = Math.max(3, Number(process.env.UNTRACKED_USAGE_REVIEW_DELAY_MINUTES || 10))
 const UNTRACKED_USAGE_STATUS_MESSAGE = '上游响应未返回 task_id，无法自动查询状态，请结合供应商后台核对。'
+const DREAMINA_ALLOWED_PROVIDER_IDS = new Set(['seedance2'])
+const DREAMINA_ALLOWED_MODELS = new Set(['seedance2.0_vip', 'seedance2.0fast_vip'])
+const DREAMINA_ALLOWED_RATIOS = new Set(['1:1', '3:4', '16:9', '4:3', '9:16', '21:9'])
+const DREAMINA_ALLOWED_RESOLUTIONS = new Set(['720p'])
+const DREAMINA_CLI_TIMEOUT_MS = Math.max(30000, Number(process.env.DREAMINA_CLI_TIMEOUT_MS || 600000))
 const uploadedReferenceMetadata = new Map()
 let usageStatusSyncTimer = null
 let usageStatusSyncRunning = false
@@ -143,7 +152,7 @@ app.get('/api/health', (_, res) => {
 })
 
 app.get('/api/session', (req, res) => {
-  const session = req.videoSiteSession
+  const session = req.videoSiteSession || resolveLocalDevSession()
   if (!session) {
     res.status(401).json({
       success: false,
@@ -163,6 +172,30 @@ app.get('/api/session', (req, res) => {
     },
   })
 })
+
+function resolveLocalDevSession() {
+  if (requireMainAppSso) return null
+
+  const userId = process.env.DEV_USAGE_USER_ID?.trim()
+  if (!userId) return null
+
+  const email = process.env.DEV_USAGE_USER_EMAIL?.trim() || `${userId}@local.dev`
+  const nickname = process.env.DEV_USAGE_USER_NICKNAME?.trim() || userId
+  const groupName = process.env.DEV_USAGE_USER_GROUP?.trim() || 'local-dev'
+
+  return {
+    token: 'local-dev-session',
+    mainAppUrl: publicBaseUrl || `http://localhost:${port}`,
+    expiresAt: Date.now() + videoSiteSessionTtlMs,
+    user: {
+      id: userId,
+      account: userId,
+      email,
+      nickname,
+      groupName,
+    },
+  }
+}
 
 app.use(async (req, res, next) => {
   if (!requireMainAppSso) {
@@ -833,6 +866,130 @@ app.post('/api/wan/query', async (req, res) => {
       message: error.message || 'DashScope Wan query failed',
       ...(error.requestId ? { requestId: error.requestId } : {}),
       ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
+app.post('/api/dreamina/generate', async (req, res) => {
+  try {
+    const body = req.body || {}
+    const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
+    const requestedParams = extractRequestedVideoParams(body)
+    const requestSpec = await buildDreaminaGenerateRequest(body)
+    const cliResult = await executeDreaminaCli(requestSpec.args)
+    const normalized = normalizeDreaminaGenerateResponse(cliResult.payload, requestSpec)
+    const terminalStatus = normalizeDreaminaTerminalUsageStatus(normalized.status)
+
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'dreamina',
+      providerId: requestSpec.providerId,
+      model: requestSpec.model,
+      generationMode: requestSpec.mode,
+      prompt: body.prompt || null,
+      aspectRatio: requestSpec.aspectRatio || requestedParams.aspectRatio || null,
+      resolution: requestSpec.resolution || requestedParams.resolution || null,
+      duration: requestSpec.duration ?? requestedParams.duration ?? null,
+      sampleCount: requestedParams.sampleCount || 1,
+      requestParams: attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
+      engineTaskId: normalized.taskId || null,
+      upstreamUrl: `dreamina-cli://${requestSpec.command}`,
+      status: terminalStatus || (normalized.taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW),
+      errorMessage: terminalStatus === 'failed' || terminalStatus === 'cancelled'
+        ? (normalized.message || null)
+        : normalized.taskId
+        ? null
+        : UNTRACKED_USAGE_STATUS_MESSAGE,
+      videoUrl: terminalStatus === 'succeeded' ? (normalized.videoUrl || null) : null,
+      completedAt: terminalStatus ? new Date().toISOString() : null,
+    }).catch(() => {})
+
+    res.json({
+      success: true,
+      data: normalized,
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Dreamina generate failed',
+    })
+  }
+})
+
+app.post('/api/dreamina/query', async (req, res) => {
+  try {
+    const requestSpec = buildDreaminaQueryRequest(req.body || {})
+    const cliResult = await executeDreaminaCli(requestSpec.args)
+    const normalized = normalizeDreaminaQueryResponse(cliResult.payload, requestSpec)
+    const terminalStatus = normalizeDreaminaTerminalUsageStatus(normalized.status)
+
+    if (terminalStatus) {
+      updateUsageLogByTaskId(requestSpec.taskId, {
+        status: terminalStatus,
+        videoUrl: terminalStatus === 'succeeded' ? (normalized.videoUrl || null) : null,
+        errorMessage: terminalStatus === 'failed' || terminalStatus === 'cancelled'
+          ? (normalized.message || null)
+          : null,
+        completedAt: new Date().toISOString(),
+      }).catch(() => {})
+    }
+
+    res.json({
+      success: true,
+      data: normalized,
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Dreamina query failed',
+    })
+  }
+})
+
+app.get('/api/dreamina/media/:taskId', async (req, res) => {
+  try {
+    const requestSpec = buildDreaminaQueryRequest({
+      providerId: 'seedance2',
+      taskId: req.params.taskId,
+    })
+    const cliResult = await executeDreaminaCli(requestSpec.args)
+    const normalized = normalizeDreaminaQueryResponse(cliResult.payload, requestSpec)
+
+    if (normalized.status !== 'succeeded' && normalized.status !== 'completed') {
+      throw createHttpError(409, 'Dreamina task is not ready for playback yet.')
+    }
+
+    if (!normalized.videoUrl) {
+      throw createHttpError(404, 'Dreamina task succeeded, but no playable video URL was returned.')
+    }
+
+    const upstream = await fetch(normalized.videoUrl, {
+      headers: buildDreaminaMediaProxyHeaders(req),
+      redirect: 'follow',
+    })
+
+    if (!upstream.ok) {
+      const message = await readDreaminaUpstreamError(upstream)
+      throw createHttpError(upstream.status, message || 'Dreamina media fetch failed.')
+    }
+
+    res.status(upstream.status)
+    copyUpstreamResponseHeaders(res, upstream.headers)
+    res.setHeader('Cache-Control', 'private, max-age=300')
+
+    if (req.method === 'HEAD' || !upstream.body) {
+      res.end()
+      return
+    }
+
+    Readable.fromWeb(upstream.body).pipe(res)
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Dreamina media proxy failed',
     })
   }
 })
@@ -2338,7 +2495,6 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onRespo
 }
 
 const YUNWU_VIDEO_PROVIDERS = {
-  'yunwu-seedance': { family: 'seedance' },
   'yunwu-veo': { family: 'veo' },
   'yunwu-kling': { family: 'kling' },
   'yunwu-sora': { family: 'sora' },
@@ -2643,6 +2799,654 @@ function normalizeDashScopeWanSeed(value) {
   }
 
   return seed
+}
+
+async function buildDreaminaGenerateRequest(input) {
+  const providerId = normalizeDreaminaProviderId(input.providerId)
+  const prompt = String(input.prompt || '').trim()
+  if (!prompt) {
+    throw createHttpError(400, 'Prompt is required.')
+  }
+
+  const mode = normalizeDreaminaMode(input.mode)
+  const params = input.params && typeof input.params === 'object' ? input.params : {}
+  const references = await resolveDreaminaLocalReferences(input.references)
+  const model = normalizeDreaminaModelVersion(params.model)
+  const duration = normalizeDreaminaDuration(params.duration)
+  const resolution = normalizeDreaminaResolution(params.resolution)
+  const aspectRatio = normalizeDreaminaRatio(params.aspectRatio)
+  const args = []
+  let command = ''
+
+  switch (mode) {
+    case 't2v':
+      ensureDreaminaReferenceCount(references.images.length === 0 && references.videos.length === 0 && references.audios.length === 0, '文生视频不支持参考素材，请先清空已上传的图片、视频和音频。')
+      command = 'text2video'
+      args.push(
+        command,
+        '--prompt', prompt,
+        '--duration', String(duration),
+        '--ratio', aspectRatio,
+        '--video_resolution', resolution,
+        '--model_version', model,
+        '--poll', '0',
+      )
+      break
+    case 'i2v':
+      ensureDreaminaReferenceCount(references.images.length === 1, '图生视频需要且仅支持 1 张参考图片。')
+      ensureDreaminaReferenceCount(references.videos.length === 0 && references.audios.length === 0, '图生视频不支持额外的参考视频或音频。')
+      command = 'image2video'
+      args.push(
+        command,
+        '--image', references.images[0],
+        '--prompt', prompt,
+        '--duration', String(duration),
+        '--video_resolution', resolution,
+        '--model_version', model,
+        '--poll', '0',
+      )
+      break
+    case 'flf':
+      ensureDreaminaReferenceCount(references.images.length === 2, '首尾帧模式需要按顺序上传 2 张参考图片。')
+      ensureDreaminaReferenceCount(references.videos.length === 0 && references.audios.length === 0, '首尾帧模式不支持额外的参考视频或音频。')
+      command = 'frames2video'
+      args.push(
+        command,
+        '--first', references.images[0],
+        '--last', references.images[1],
+        '--prompt', prompt,
+        '--duration', String(duration),
+        '--video_resolution', resolution,
+        '--model_version', model,
+        '--poll', '0',
+      )
+      break
+    case 'fusion':
+      ensureDreaminaReferenceCount(references.images.length <= 9, '融合参考模式最多支持 9 张参考图片。')
+      ensureDreaminaReferenceCount(references.videos.length <= 3, '融合参考模式最多支持 3 段参考视频。')
+      ensureDreaminaReferenceCount(references.audios.length <= 3, '融合参考模式最多支持 3 段参考音频。')
+      ensureDreaminaReferenceCount(references.images.length + references.videos.length > 0, '融合参考模式至少需要 1 张参考图片或 1 段参考视频。')
+      command = 'multimodal2video'
+      args.push(
+        command,
+        '--prompt', prompt,
+        '--duration', String(duration),
+        '--ratio', aspectRatio,
+        '--video_resolution', resolution,
+        '--model_version', model,
+        '--poll', '0',
+      )
+      for (const imagePath of references.images) {
+        args.push('--image', imagePath)
+      }
+      for (const videoPath of references.videos) {
+        args.push('--video', videoPath)
+      }
+      for (const audioPath of references.audios) {
+        args.push('--audio', audioPath)
+      }
+      break
+    default:
+      throw createHttpError(400, `Unsupported Dreamina mode: ${mode}`)
+  }
+
+  return {
+    providerId,
+    mode,
+    command,
+    args,
+    model,
+    duration,
+    resolution,
+    aspectRatio: mode === 't2v' || mode === 'fusion' ? aspectRatio : null,
+  }
+}
+
+function buildDreaminaQueryRequest(input) {
+  const providerId = normalizeDreaminaProviderId(input.providerId)
+  const taskId = normalizeTaskIdValue(input.taskId)
+  if (!taskId) {
+    throw createHttpError(400, 'taskId is required.')
+  }
+
+  return {
+    providerId,
+    taskId,
+    args: [
+      'query_result',
+      '--submit_id', taskId,
+    ],
+  }
+}
+
+function normalizeDreaminaProviderId(value) {
+  const providerId = String(value || 'seedance2').trim()
+  if (!DREAMINA_ALLOWED_PROVIDER_IDS.has(providerId)) {
+    throw createHttpError(400, `Unsupported Dreamina provider: ${providerId || 'unknown'}`)
+  }
+  return providerId
+}
+
+function normalizeDreaminaMode(value) {
+  const mode = String(value || 't2v').trim().toLowerCase()
+  if (!['t2v', 'i2v', 'flf', 'fusion'].includes(mode)) {
+    throw createHttpError(400, `Unsupported Dreamina mode: ${mode || 'unknown'}`)
+  }
+  return mode
+}
+
+function normalizeDreaminaModelVersion(value) {
+  const model = String(value || 'seedance2.0_vip').trim()
+  if (!DREAMINA_ALLOWED_MODELS.has(model)) {
+    throw createHttpError(400, `Unsupported Dreamina model_version: ${model || 'unknown'}`)
+  }
+  return model
+}
+
+function normalizeDreaminaDuration(value) {
+  const duration = Math.trunc(coercePositiveNumber(value, 5))
+  if (!Number.isFinite(duration) || duration < 4 || duration > 15) {
+    throw createHttpError(400, 'Dreamina duration must be an integer between 4 and 15 seconds.')
+  }
+  return duration
+}
+
+function normalizeDreaminaResolution(value) {
+  const resolution = String(value || '720p').trim().toLowerCase()
+  if (!DREAMINA_ALLOWED_RESOLUTIONS.has(resolution)) {
+    throw createHttpError(400, `Unsupported Dreamina video_resolution: ${resolution || 'unknown'}`)
+  }
+  return resolution
+}
+
+function normalizeDreaminaRatio(value) {
+  const ratio = String(value || '9:16').trim()
+  if (!DREAMINA_ALLOWED_RATIOS.has(ratio)) {
+    throw createHttpError(400, `Unsupported Dreamina ratio: ${ratio || 'unknown'}`)
+  }
+  return ratio
+}
+
+function ensureDreaminaReferenceCount(condition, message) {
+  if (!condition) {
+    throw createHttpError(400, message)
+  }
+}
+
+async function resolveDreaminaLocalReferences(references) {
+  const normalized = normalizeYunwuReferences(references)
+
+  return {
+    images: await Promise.all(
+      normalized.images.map((reference, index) => resolveDreaminaLocalReference(reference, `参考图片 ${index + 1}`)),
+    ),
+    videos: await Promise.all(
+      normalized.videos.map((reference, index) => resolveDreaminaLocalReference(reference, `参考视频 ${index + 1}`)),
+    ),
+    audios: await Promise.all(
+      normalized.audios.map((reference, index) => resolveDreaminaLocalReference(reference, `参考音频 ${index + 1}`)),
+    ),
+  }
+}
+
+async function resolveDreaminaLocalReference(reference, label) {
+  const absolutePath = resolveDreaminaTempAssetPath(reference)
+
+  let stat = null
+  try {
+    stat = await fsp.stat(absolutePath)
+  } catch {
+    stat = null
+  }
+
+  if (!stat?.isFile()) {
+    throw createHttpError(400, `${label} 已失效或不存在，请重新上传后再试。`)
+  }
+
+  return absolutePath
+}
+
+function resolveDreaminaTempAssetPath(reference) {
+  const rawReference = String(reference || '').trim()
+  if (!rawReference) {
+    throw createHttpError(400, 'Dreamina reference is required.')
+  }
+
+  if (path.isAbsolute(rawReference)) {
+    return rawReference
+  }
+
+  let parsedUrl
+  try {
+    parsedUrl = new URL(rawReference)
+  } catch {
+    try {
+      parsedUrl = new URL(rawReference, 'http://localhost')
+    } catch {
+      throw createHttpError(400, 'Dreamina reference must be a temp asset URL or local absolute path.')
+    }
+  }
+
+  const pathname = decodeURIComponent(parsedUrl.pathname || '')
+  if (!pathname.startsWith('/temp-assets/')) {
+    throw createHttpError(400, 'Dreamina only accepts files uploaded through the current project.')
+  }
+
+  const filename = sanitizeTempAssetName(pathname.slice('/temp-assets/'.length))
+  if (!filename) {
+    throw createHttpError(400, 'Dreamina reference filename is invalid.')
+  }
+
+  const expiresAt = Number(parsedUrl.searchParams.get('exp') || 0)
+  const signature = parsedUrl.searchParams.get('sig') || ''
+  if (expiresAt > 0 && signature) {
+    if (expiresAt <= Date.now()) {
+      throw createHttpError(400, 'Dreamina reference has expired. Please upload it again.')
+    }
+    if (!verifyTempAssetSignature(filename, expiresAt, signature)) {
+      throw createHttpError(400, 'Dreamina reference signature is invalid. Please upload it again.')
+    }
+  }
+
+  return path.join(uploadDir, filename)
+}
+
+function resolveDreaminaCliBin() {
+  const explicitPath = process.env.DREAMINA_CLI_BIN?.trim()
+  if (explicitPath) {
+    return path.isAbsolute(explicitPath) ? explicitPath : path.resolve(__dirname, explicitPath)
+  }
+
+  const homeDir = process.env.HOME?.trim()
+  if (homeDir) {
+    return path.join(homeDir, '.local', 'bin', 'dreamina')
+  }
+
+  return 'dreamina'
+}
+
+function resolveDreaminaCliHome() {
+  const configured = process.env.DREAMINA_CLI_HOME?.trim()
+  if (!configured) {
+    return null
+  }
+
+  return path.isAbsolute(configured) ? configured : path.resolve(__dirname, configured)
+}
+
+function buildDreaminaCliEnv(cliBin) {
+  const nextEnv = { ...process.env }
+  const cliHome = resolveDreaminaCliHome()
+  if (cliHome) {
+    nextEnv.HOME = cliHome
+    nextEnv.USERPROFILE = cliHome
+    nextEnv.DREAMINA_CLI_HOME = cliHome
+  }
+
+  const binDir = path.dirname(cliBin)
+  const currentPath = nextEnv.PATH || ''
+  const pathEntries = currentPath ? currentPath.split(path.delimiter) : []
+  if (binDir && !pathEntries.includes(binDir)) {
+    nextEnv.PATH = currentPath ? `${binDir}${path.delimiter}${currentPath}` : binDir
+  }
+
+  return nextEnv
+}
+
+async function executeDreaminaCli(args) {
+  const cliBin = resolveDreaminaCliBin()
+  const cliEnv = buildDreaminaCliEnv(cliBin)
+  const cliHome = resolveDreaminaCliHome()
+
+  if (cliHome) {
+    await fsp.mkdir(cliHome, { recursive: true })
+  }
+
+  try {
+    const result = await execFileAsync(cliBin, args, {
+      cwd: __dirname,
+      env: cliEnv,
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: DREAMINA_CLI_TIMEOUT_MS,
+      windowsHide: true,
+    })
+
+    return {
+      stdout: result.stdout || '',
+      stderr: result.stderr || '',
+      payload: parseDreaminaCliPayload(result.stdout, result.stderr),
+    }
+  } catch (error) {
+    throw normalizeDreaminaCliError(error)
+  }
+}
+
+function normalizeDreaminaCliError(error) {
+  const stdout = typeof error?.stdout === 'string'
+    ? error.stdout
+    : Buffer.isBuffer(error?.stdout)
+    ? error.stdout.toString('utf8')
+    : ''
+  const stderr = typeof error?.stderr === 'string'
+    ? error.stderr
+    : Buffer.isBuffer(error?.stderr)
+    ? error.stderr.toString('utf8')
+    : ''
+  const payload = parseDreaminaCliPayload(stdout, stderr)
+  const combinedText = [stderr, stdout, error?.message]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join('\n')
+
+  if (combinedText.includes('未检测到有效登录态')) {
+    throw createHttpError(
+      401,
+      'Dreamina CLI 未登录，请先执行 dreamina login。若本地调试同时提示 .dreamina_cli 无写权限，请设置 DREAMINA_CLI_HOME 到可写目录后，在同一目录重新登录。',
+    )
+  }
+
+  if (/AigcComplianceConfirmationRequired/i.test(combinedText)) {
+    throw createHttpError(409, 'Dreamina 账号需要先在即梦网页端完成内容安全授权确认，然后再重试生成。')
+  }
+
+  if (/\.dreamina_cli[\\/].*operation not permitted/i.test(combinedText)) {
+    throw createHttpError(500, 'Dreamina CLI 无法写入本地运行目录。请设置 DREAMINA_CLI_HOME 到一个可写目录，并在该目录下重新执行 dreamina login。')
+  }
+
+  if (error?.code === 'ENOENT') {
+    throw createHttpError(500, `Dreamina CLI not found: ${resolveDreaminaCliBin()}`)
+  }
+
+  const message = extractDreaminaMessage(payload?.data, payload?.rawText)
+    || readLastNonEmptyLine(stderr)
+    || readLastNonEmptyLine(stdout)
+    || error?.message
+    || 'Dreamina CLI request failed.'
+
+  throw createHttpError(502, message)
+}
+
+function parseDreaminaCliPayload(...chunks) {
+  const cleanedChunks = chunks
+    .filter((chunk) => typeof chunk === 'string' && chunk.trim())
+    .map((chunk) => chunk.trim())
+
+  const rawText = cleanedChunks[0] || ''
+  for (const chunk of cleanedChunks) {
+    const parsed = tryParseDreaminaJsonChunk(chunk)
+    if (parsed !== null) {
+      return {
+        rawText,
+        data: expandDreaminaJsonValue(parsed),
+      }
+    }
+  }
+
+  return {
+    rawText,
+    data: null,
+  }
+}
+
+function tryParseDreaminaJsonChunk(text) {
+  if (typeof text !== 'string') {
+    return null
+  }
+
+  const direct = tryParseDreaminaJson(text)
+  if (direct !== null) {
+    return direct
+  }
+
+  const objectStart = text.indexOf('{')
+  const objectEnd = text.lastIndexOf('}')
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    const sliced = tryParseDreaminaJson(text.slice(objectStart, objectEnd + 1))
+    if (sliced !== null) {
+      return sliced
+    }
+  }
+
+  const arrayStart = text.indexOf('[')
+  const arrayEnd = text.lastIndexOf(']')
+  if (arrayStart >= 0 && arrayEnd > arrayStart) {
+    return tryParseDreaminaJson(text.slice(arrayStart, arrayEnd + 1))
+  }
+
+  return null
+}
+
+function tryParseDreaminaJson(text) {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+function expandDreaminaJsonValue(value, depth = 0) {
+  if (depth > 4) {
+    return value
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (
+      (trimmed.startsWith('{') && trimmed.endsWith('}'))
+      || (trimmed.startsWith('[') && trimmed.endsWith(']'))
+    ) {
+      const parsed = tryParseDreaminaJson(trimmed)
+      if (parsed !== null) {
+        return expandDreaminaJsonValue(parsed, depth + 1)
+      }
+    }
+    return value
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => expandDreaminaJsonValue(item, depth + 1))
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nestedValue]) => [key, expandDreaminaJsonValue(nestedValue, depth + 1)]),
+    )
+  }
+
+  return value
+}
+
+function normalizeDreaminaGenerateResponse(payload, requestSpec) {
+  return {
+    taskId: extractDreaminaTaskId(payload?.data, payload?.rawText),
+    status: normalizeDreaminaStatus(
+      extractDreaminaStatus(payload?.data, payload?.rawText) || 'submitted',
+      'submitted',
+    ),
+    message: extractDreaminaMessage(payload?.data, payload?.rawText),
+    videoUrl: extractDreaminaVideoUrl(payload?.data, payload?.rawText),
+  }
+}
+
+function normalizeDreaminaQueryResponse(payload, requestSpec) {
+  return {
+    taskId: extractDreaminaTaskId(payload?.data, payload?.rawText) || requestSpec.taskId,
+    status: normalizeDreaminaStatus(
+      extractDreaminaStatus(payload?.data, payload?.rawText) || 'processing',
+      'processing',
+    ),
+    message: extractDreaminaMessage(payload?.data, payload?.rawText),
+    videoUrl: extractDreaminaVideoUrl(payload?.data, payload?.rawText),
+  }
+}
+
+function normalizeDreaminaTerminalUsageStatus(status) {
+  if (status === 'succeeded' || status === 'failed' || status === 'cancelled') {
+    return status
+  }
+  return null
+}
+
+function buildDreaminaMediaProxyHeaders(req) {
+  const headers = {}
+  const range = req.get('range')
+  if (range) {
+    headers.Range = range
+  }
+  return headers
+}
+
+async function readDreaminaUpstreamError(response) {
+  const contentType = (response.headers.get('content-type') || '').toLowerCase()
+
+  if (contentType.includes('application/json')) {
+    const payload = await response.json().catch(() => null)
+    return payload?.message || payload?.error?.message || JSON.stringify(payload || {})
+  }
+
+  const text = await response.text().catch(() => '')
+  return text.trim() || null
+}
+
+function extractDreaminaTaskId(payload, rawText = '') {
+  const taskId = normalizeTaskIdValue(findFirstPathValue(payload, [
+    'submit_id',
+    'submitId',
+    'taskId',
+    'task_id',
+    'data.submit_id',
+    'data.submitId',
+    'data.taskId',
+    'data.task_id',
+    'result.submit_id',
+    'result.submitId',
+    'result.taskId',
+    'result.task_id',
+  ]))
+  if (taskId) {
+    return taskId
+  }
+
+  const matched = rawText.match(/submit_id["'\s:=]+([A-Za-z0-9_-]+)/i)
+  return matched?.[1] || null
+}
+
+function extractDreaminaStatus(payload, rawText = '') {
+  const status = readFirstString(findFirstPathValue(payload, [
+    'gen_status',
+    'status',
+    'state',
+    'data.gen_status',
+    'data.status',
+    'data.state',
+    'result.gen_status',
+    'result.status',
+    'result.state',
+  ]))
+  if (status) {
+    return status
+  }
+
+  const matched = rawText.match(/gen_status["'\s:=]+([A-Za-z0-9_-]+)/i)
+  return matched?.[1] || null
+}
+
+function extractDreaminaMessage(payload, rawText = '') {
+  const message = findFirstPathValue(payload, [
+    'fail_reason',
+    'error_msg',
+    'error_message',
+    'message',
+    'msg',
+    'error.message',
+    'error',
+    'data.fail_reason',
+    'data.error_msg',
+    'data.error_message',
+    'data.message',
+    'data.msg',
+    'result.fail_reason',
+    'result.error_msg',
+    'result.error_message',
+    'result.message',
+    'result.msg',
+  ])
+
+  if (typeof message === 'string' && message.trim()) {
+    return message.trim()
+  }
+
+  const lines = rawText
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !line.startsWith('{') && !line.startsWith('['))
+
+  if (lines.length === 0) {
+    return null
+  }
+
+  const lastLine = lines[lines.length - 1]
+  return lastLine || null
+}
+
+function extractDreaminaVideoUrl(payload, rawText = '') {
+  const payloadUrl = extractAggregationVideoUrl(payload)
+  if (payloadUrl) {
+    return payloadUrl
+  }
+
+  const matched = rawText.match(/https?:\/\/\S+/i)
+  if (matched && isLikelyRemoteVideoUrl(matched[0])) {
+    return matched[0]
+  }
+
+  return null
+}
+
+function normalizeDreaminaStatus(value, fallbackStatus = 'processing') {
+  if (typeof value !== 'string') {
+    return fallbackStatus
+  }
+
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) {
+    return fallbackStatus
+  }
+
+  if (['success', 'succeeded', 'completed', 'complete', 'finished', 'done'].includes(normalized)) {
+    return 'succeeded'
+  }
+
+  if (['failed', 'failure', 'error', 'rejected'].includes(normalized)) {
+    return 'failed'
+  }
+
+  if (['cancelled', 'canceled'].includes(normalized)) {
+    return 'cancelled'
+  }
+
+  if (['submitted', 'submit', 'created'].includes(normalized)) {
+    return 'submitted'
+  }
+
+  if (['pending', 'queued', 'queueing', 'processing', 'running', 'inprogress', 'in_progress'].includes(normalized)) {
+    return 'processing'
+  }
+
+  return normalized
+}
+
+function readLastNonEmptyLine(text) {
+  if (typeof text !== 'string') {
+    return null
+  }
+
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+
+  return lines.length > 0 ? lines[lines.length - 1] : null
 }
 
 function getYunwuProviderConfig(providerId) {

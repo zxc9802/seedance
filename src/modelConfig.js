@@ -18,12 +18,12 @@ const BASE_PROVIDERS = {
     id: 'veo',
     typeId: 'seedance',
     typeLabel: 'Seedance',
-    selectorLabel: 'seedance2.0',
-    name: 'Seedance 2.0',
+    selectorLabel: 'seedance1',
+    name: 'Seedance 1',
     vendor: '聚合 API',
     color: '#2563eb',
     models: [
-      { value: 'doubao-seedance-2-0-260128', label: 'Seedance 2.0', tag: '已接入' },
+      { value: 'doubao-seedance-2-0-260128', label: 'Seedance 1', tag: '已接入' },
     ],
     aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {
@@ -73,6 +73,68 @@ const BASE_PROVIDERS = {
       { value: 'scene', label: '场景审核' },
       { value: 'direct', label: '直接原图' },
     ],
+  },
+  seedance2: {
+    id: 'seedance2',
+    typeId: 'seedance',
+    typeLabel: 'Seedance',
+    selectorLabel: 'seedance2',
+    name: 'Seedance 2',
+    vendor: 'Dreamina CLI',
+    color: '#0f766e',
+    models: [
+      { value: 'seedance2.0_vip', label: 'seedance2.0', tag: 'Dreamina' },
+      { value: 'seedance2.0fast_vip', label: 'seedance2 fast', tag: 'Dreamina' },
+    ],
+    aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
+    resolutions: {
+      default: ['720p'],
+    },
+    durations: [4, 5, 6, 8, 10, 12, 15],
+    sampleCounts: [1],
+    features: {
+      generateAudio: false,
+      negativePrompt: false,
+      referenceImage: true,
+      referenceVideo: true,
+      referenceAudio: true,
+    },
+    generationModes: [
+      { value: 't2v', label: '文生视频' },
+      { value: 'i2v', label: '图生视频' },
+      { value: 'flf', label: '首尾帧' },
+      { value: 'fusion', label: '融合参考' },
+    ],
+    referenceInputMode: 'local',
+    maxReferenceImages: {
+      t2v: 0,
+      i2v: 1,
+      flf: 2,
+      fusion: 9,
+    },
+    maxReferenceVideos: {
+      fusion: 3,
+    },
+    maxReferenceAudios: {
+      fusion: 3,
+    },
+    defaults: {
+      model: 'seedance2.0_vip',
+      aspectRatio: '9:16',
+      resolution: '720p',
+      duration: 5,
+      sampleCount: 1,
+      generateAudio: false,
+    },
+    imageMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+    imageMimeTypeLabel: 'JPG/JPEG、PNG、WebP',
+    imageMaxSizeMb: 20,
+    videoMimeTypes: ['video/mp4', 'video/quicktime'],
+    videoMimeTypeLabel: 'MP4、MOV',
+    videoMaxSizeMb: 200,
+    audioMaxSizeMb: 20,
+    referenceHelpText: 'Dreamina CLI 会直接读取后端临时目录中的本地文件。融合参考模式支持最多 9 张图片、3 段视频、3 段音频；图生视频使用 1 张图，首尾帧使用 2 张图。',
+    backendKind: 'dreamina',
   },
   ve31p: {
     id: 've31p',
@@ -422,7 +484,7 @@ export const PROVIDERS = {
   ...YUNWU_PROVIDERS,
 }
 
-const BASE_PROVIDER_ORDER = ['veo', 've31p', 'veo31fast', 'kling', 'wan1', 'gemini-image', 'gemini-image-aggregation']
+const BASE_PROVIDER_ORDER = ['veo', 'seedance2', 've31p', 'veo31fast', 'kling', 'wan1', 'gemini-image', 'gemini-image-aggregation']
 
 export const PROVIDER_ORDER = [...BASE_PROVIDER_ORDER, ...YUNWU_PROVIDER_ORDER]
 

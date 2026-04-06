@@ -1,88 +1,4 @@
 export const YUNWU_PROVIDERS = {
-  'yunwu-seedance': {
-    id: 'yunwu-seedance',
-    typeId: 'seedance',
-    typeLabel: 'Seedance',
-    selectorLabel: 'seedance1.5pro',
-    name: 'Seedance 1.5 Pro',
-    vendor: 'Yunwu API',
-    color: '#1d4ed8',
-    models: [
-      { value: 'doubao-seedance-1-0-lite-t2v-250428', label: 'Seedance 1.0 Lite T2V', tag: 'Yunwu' },
-      { value: 'doubao-seedance-1-0-lite-i2v-250428', label: 'Seedance 1.0 Lite I2V', tag: 'Yunwu' },
-      { value: 'doubao-seedance-1-0-pro-250528', label: 'Seedance 1.0 Pro', tag: 'Yunwu' },
-      { value: 'doubao-seedance-1-0-pro-fast-251015', label: 'Seedance 1.0 Pro Fast', tag: 'Yunwu' },
-      { value: 'doubao-seedance-1-5-pro-251215', label: 'Seedance 1.5 Pro', tag: 'Yunwu' },
-      { value: 'doubao-seedance-2-0-260128', label: 'Seedance 2.0', tag: 'Yunwu' },
-    ],
-    aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
-    resolutions: {
-      default: ['480p'],
-    },
-    durations: [5, 10],
-    sampleCounts: [1],
-    features: {
-      generateAudio: false,
-      negativePrompt: false,
-      referenceImage: true,
-      referenceVideo: false,
-      referenceAudio: false,
-      watermark: true,
-    },
-    generationModes: [
-      { value: 't2v', label: '文生视频' },
-      { value: 'i2v', label: '图生视频' },
-      { value: 'flf', label: '首尾帧' },
-      { value: 'ref', label: '参考图片' },
-    ],
-    modeModels: {
-      t2v: [
-        'doubao-seedance-1-0-lite-t2v-250428',
-        'doubao-seedance-1-0-pro-250528',
-        'doubao-seedance-1-0-pro-fast-251015',
-        'doubao-seedance-1-5-pro-251215',
-        'doubao-seedance-2-0-260128',
-      ],
-      i2v: [
-        'doubao-seedance-1-0-lite-i2v-250428',
-        'doubao-seedance-1-0-pro-250528',
-        'doubao-seedance-1-0-pro-fast-251015',
-        'doubao-seedance-1-5-pro-251215',
-        'doubao-seedance-2-0-260128',
-      ],
-      flf: [
-        'doubao-seedance-1-0-lite-i2v-250428',
-        'doubao-seedance-1-0-pro-250528',
-        'doubao-seedance-1-0-pro-fast-251015',
-        'doubao-seedance-1-5-pro-251215',
-        'doubao-seedance-2-0-260128',
-      ],
-      ref: [
-        'doubao-seedance-1-0-lite-i2v-250428',
-        'doubao-seedance-1-0-pro-250528',
-        'doubao-seedance-1-0-pro-fast-251015',
-        'doubao-seedance-1-5-pro-251215',
-        'doubao-seedance-2-0-260128',
-      ],
-    },
-    referenceInputMode: 'url',
-    maxReferenceImages: {
-      t2v: 0,
-      i2v: 1,
-      flf: 2,
-      ref: 5,
-    },
-    defaults: {
-      model: 'doubao-seedance-1-5-pro-251215',
-      aspectRatio: '16:9',
-      resolution: '480p',
-      duration: 5,
-      sampleCount: 1,
-      generateAudio: false,
-      watermark: false,
-    },
-    backendKind: 'yunwu',
-  },
   'yunwu-veo': {
     id: 'yunwu-veo',
     typeId: 'veo',
@@ -538,6 +454,5 @@ export const YUNWU_PROVIDERS = {
 }
 
 export const YUNWU_PROVIDER_ORDER = [
-  'yunwu-seedance',
   'yunwu-veo',
 ]

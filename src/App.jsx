@@ -30,6 +30,10 @@ function isWanProvider(id) {
   return PROVIDERS[id]?.backendKind === 'dashscope-wan'
 }
 
+function isDreaminaProvider(id) {
+  return PROVIDERS[id]?.backendKind === 'dreamina'
+}
+
 function isYunwuProvider(id) {
   return PROVIDERS[id]?.backendKind === 'yunwu'
 }
@@ -391,7 +395,7 @@ function App() {
         const initialTask = normalizeYunwuTask(data?.data)
         if (initialTask.videoUrl) {
           window.clearInterval(progressTimer)
-          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl)
+          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl, provider)
           updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
           return
         }
@@ -427,7 +431,7 @@ function App() {
           if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
             finished = true
             window.clearInterval(progressTimer)
-            const previewUrl = await resolvePreviewUrl(task.videoUrl)
+            const previewUrl = await resolvePreviewUrl(task.videoUrl, provider)
             updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
             return
           }
@@ -466,7 +470,7 @@ function App() {
         const initialTask = normalizeYunwuTask(data?.data)
         if (initialTask.videoUrl) {
           window.clearInterval(progressTimer)
-          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl)
+          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl, provider)
           updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
           return
         }
@@ -499,12 +503,77 @@ function App() {
           if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
             finished = true
             window.clearInterval(progressTimer)
-            const previewUrl = await resolvePreviewUrl(task.videoUrl)
+            const previewUrl = await resolvePreviewUrl(task.videoUrl, provider)
             updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
             return
           }
 
           if (state === 'failed') {
+            throw new Error(task.message || '视频生成失败')
+          }
+        }
+      } else if (isDreaminaProvider(provider)) {
+        const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
+        const requestInfo = buildDreaminaVideoRequest(provider, params, finalPrompt, generationMode, uploadedReferences)
+        updateProviderState(provider, { progress: 18 })
+
+        const response = await fetch(requestInfo.url, {
+          method: 'POST',
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
+          body: JSON.stringify(requestInfo.body),
+        })
+
+        if (!response.ok) {
+          throw new Error(await formatHttpError(response))
+        }
+
+        const data = await response.json()
+        if (!data?.success) {
+          throw new Error(data?.message || '视频生成请求失败')
+        }
+
+        const initialTask = normalizeYunwuTask(data?.data)
+        if (initialTask.videoUrl) {
+          window.clearInterval(progressTimer)
+          const previewUrl = await resolveDreaminaPlaybackUrl(initialTask, provider)
+          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          return
+        }
+
+        if (!initialTask.taskId) {
+          throw new Error('接口已响应，但没有返回 submit_id')
+        }
+
+        let finished = false
+        while (!finished) {
+          await sleep(5000)
+          const pollRequest = buildDreaminaQueryRequest(provider, initialTask.taskId)
+          const pollResponse = await fetch(pollRequest.url, {
+            method: 'POST',
+            headers: pollRequest.headers,
+            body: JSON.stringify(pollRequest.body),
+          })
+
+          if (!pollResponse.ok) {
+            throw new Error(await formatHttpError(pollResponse))
+          }
+
+          const pollData = await pollResponse.json()
+          if (!pollData?.success) {
+            throw new Error(pollData?.message || '查询任务状态失败')
+          }
+
+          const task = normalizeYunwuTask(pollData.data)
+          const state = normalizeTaskState(task.status)
+          if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
+            finished = true
+            window.clearInterval(progressTimer)
+            const previewUrl = await resolveDreaminaPlaybackUrl(task, provider)
+            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            return
+          }
+
+          if (state === 'failed' || state === 'cancelled') {
             throw new Error(task.message || '视频生成失败')
           }
         }
@@ -942,11 +1011,12 @@ async function serializeProviderState(state) {
   const serialized = {}
   for (const key of PROVIDER_ORDER) {
     const current = state?.[key] || createProviderRuntimeState()
+    const previewUrl = resolvePersistableSnapshotPreviewUrl(key, current.videoUrl)
     serialized[key] = {
       generating: false,
       progress: 0,
       error: null,
-      previewAsset: await serializePreviewAsset(current.videoUrl),
+      previewAsset: await serializePreviewAsset(previewUrl),
     }
   }
   return serialized
@@ -961,7 +1031,10 @@ function hydrateSnapshotProviderState(snapshotState) {
 
     initial[key] = {
       ...initial[key],
-      videoUrl: hydratePreviewAsset(current.previewAsset) || (isPersistablePreviewUrl(current.videoUrl) ? current.videoUrl : null),
+      videoUrl: resolvePersistableSnapshotPreviewUrl(
+        key,
+        hydratePreviewAsset(current.previewAsset) || current.videoUrl || null,
+      ),
     }
   }
 
@@ -1199,24 +1272,6 @@ async function serializePreviewAsset(url) {
     }
   }
 
-  if (isKlingProvider(provider) && mode === 'fusion') {
-    if (references.videos.length > 1) {
-      return '可灵参考模式最多上传 1 段参考视频'
-    }
-
-    if (references.videos.length > 0 && references.images.length > 4) {
-      return '可灵带参考视频时，参考图片最多 4 张'
-    }
-
-    if (references.videos.length === 0 && references.images.length > 7) {
-      return '可灵参考模式最多上传 7 张参考图片'
-    }
-
-    if (references.videos.length > 0 && params.generateAudio) {
-      return '可灵带参考视频时仅支持无声，请关闭“生成音频”'
-    }
-  }
-
   return null
 }
 
@@ -1237,6 +1292,37 @@ function hydratePreviewAsset(asset) {
 
 function isPersistablePreviewUrl(url) {
   return typeof url === 'string' && url.length > 0 && !url.startsWith('blob:')
+}
+
+function resolvePersistableSnapshotPreviewUrl(providerId, url) {
+  if (!isPersistablePreviewUrl(url)) {
+    return null
+  }
+
+  if (!isDreaminaProvider(providerId)) {
+    return url
+  }
+
+  const taskId = extractDreaminaTaskIdFromPreviewUrl(url)
+  if (!taskId) {
+    return null
+  }
+
+  return `/api/dreamina/media/${encodeURIComponent(taskId)}`
+}
+
+function extractDreaminaTaskIdFromPreviewUrl(url) {
+  if (typeof url !== 'string' || !url.trim()) {
+    return null
+  }
+
+  try {
+    const parsed = new URL(url, window.location.origin)
+    const matched = parsed.pathname.match(/^\/api\/dreamina\/media\/([^/?#]+)/)
+    return matched?.[1] ? decodeURIComponent(matched[1]) : null
+  } catch {
+    return null
+  }
 }
 
 function formatSnapshotTime(timestamp) {
@@ -1303,6 +1389,24 @@ function buildYunwuVideoRequest(provider, params, prompt, mode, references) {
   }
 }
 
+function buildDreaminaVideoRequest(provider, params, prompt, mode, references) {
+  return {
+    url: '/api/dreamina/generate',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      prompt,
+      mode,
+      params: {
+        ...params,
+      },
+      references,
+    },
+  }
+}
+
 function buildWanVideoRequest(provider, params, prompt, mode, references) {
   return {
     url: '/api/wan/generate',
@@ -1319,6 +1423,19 @@ function buildWanVideoRequest(provider, params, prompt, mode, references) {
         watermark: Boolean(params.watermark),
       },
       references,
+    },
+  }
+}
+
+function buildDreaminaQueryRequest(provider, taskId) {
+  return {
+    url: '/api/dreamina/query',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      taskId,
     },
   }
 }
@@ -2274,8 +2391,25 @@ function revokeObjectUrl(url) {
   }
 }
 
-async function resolvePreviewUrl(url) {
+async function resolveDreaminaPlaybackUrl(task, providerId) {
+  if (!isDreaminaProvider(providerId)) {
+    return resolvePreviewUrl(task?.videoUrl || null, providerId)
+  }
+
+  const taskId = typeof task?.taskId === 'string' ? task.taskId.trim() : ''
+  if (taskId) {
+    return `/api/dreamina/media/${encodeURIComponent(taskId)}`
+  }
+
+  return resolvePreviewUrl(task?.videoUrl || null, providerId)
+}
+
+async function resolvePreviewUrl(url, providerId = null) {
   if (!url || url.startsWith('blob:') || url.startsWith('data:')) return url
+
+  if (isDreaminaProvider(providerId)) {
+    return url
+  }
 
   const response = await fetch(url)
   if (!response.ok) {

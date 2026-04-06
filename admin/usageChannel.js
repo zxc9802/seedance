@@ -3,6 +3,7 @@ export const CHANNEL_LABELS = Object.freeze({
   zhouzong: '周总',
   veo_fast: '周总',
   image: '周总',
+  dreamina: '即梦',
 })
 
 function normalizeChannelValue(value) {

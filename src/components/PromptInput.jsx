@@ -393,11 +393,25 @@ export default function PromptInput({
 
             {isVideoProvider && (
               <div className="ref-url-note">
-                本地文件会先上传到项目后端的临时目录，再转成素材 URL 提交给模型。若要在本机开发环境使用参考素材，需要把后端部署到公网，或设置
-                {' '}
-                <code>PUBLIC_BASE_URL</code>
-                {' '}
-                指向公网域名/隧道。
+                {providerConfig.backendKind === 'dreamina'
+                  ? (
+                    <>
+                      本地文件会先上传到项目后端的临时目录，再由 Dreamina CLI 直接读取本地文件路径，不依赖
+                      {' '}
+                      <code>PUBLIC_BASE_URL</code>
+                      {' '}
+                      的公网映射。
+                    </>
+                  )
+                  : (
+                    <>
+                      本地文件会先上传到项目后端的临时目录，再转成素材 URL 提交给模型。若要在本机开发环境使用参考素材，需要把后端部署到公网，或设置
+                      {' '}
+                      <code>PUBLIC_BASE_URL</code>
+                      {' '}
+                      指向公网域名/隧道。
+                    </>
+                  )}
                 {providerConfig.referenceHelpText && (
                   <>
                     {' '}

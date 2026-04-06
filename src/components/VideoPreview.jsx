@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Copy, Download, Loader2, Maximize2, MonitorPlay, X } from 'lucide-react'
 import { PROVIDERS } from '../modelConfig'
@@ -10,10 +10,17 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
   const displayModelName = cfg.selectorLabel || cfg.name
   const [showFullscreen, setShowFullscreen] = useState(false)
   const [playbackError, setPlaybackError] = useState(null)
+  const [playbackRetryCount, setPlaybackRetryCount] = useState(0)
 
   useEffect(() => {
     setPlaybackError(null)
+    setPlaybackRetryCount(0)
   }, [videoUrl, provider])
+
+  const effectiveVideoUrl = useMemo(
+    () => buildRetryablePlaybackUrl(videoUrl, playbackRetryCount),
+    [videoUrl, playbackRetryCount],
+  )
 
   const frameClass = (() => {
     switch (params.aspectRatio) {
@@ -33,6 +40,26 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+  }
+
+  const handlePlaybackRecovered = () => {
+    if (playbackError) {
+      setPlaybackError(null)
+    }
+  }
+
+  const handlePlaybackError = () => {
+    if (isImageOutput) {
+      setPlaybackError('图片已返回，但浏览器无法显示该文件。请先下载检查文件内容或稍后重试。')
+      return
+    }
+
+    if (isRetryablePlaybackUrl(videoUrl) && playbackRetryCount < 2) {
+      setPlaybackRetryCount((current) => current + 1)
+      return
+    }
+
+    setPlaybackError('视频已返回，但浏览器暂时无法播放该文件。请先下载检查文件内容，或稍后重试。')
   }
 
   return (
@@ -69,15 +96,18 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
           {videoUrl && !playbackError ? (
             isImageOutput ? (
               <img
-                src={videoUrl}
+                src={effectiveVideoUrl}
                 className="preview-video preview-image"
                 alt="Generated"
                 onClick={() => setShowFullscreen(true)}
+                onLoad={handlePlaybackRecovered}
+                onError={handlePlaybackError}
                 style={{ cursor: 'pointer' }}
               />
             ) : (
               <video
-                src={videoUrl}
+                key={effectiveVideoUrl}
+                src={effectiveVideoUrl}
                 controls
                 autoPlay
                 muted
@@ -85,7 +115,9 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
                 preload="metadata"
                 loop
                 className="preview-video"
-                onError={() => setPlaybackError('视频已返回，但浏览器无法播放该文件。请先下载检查文件内容或稍后重试。')}
+                onCanPlay={handlePlaybackRecovered}
+                onLoadedData={handlePlaybackRecovered}
+                onError={handlePlaybackError}
               />
             )
           ) : generating ? (
@@ -148,10 +180,17 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
               onClick={(event) => event.stopPropagation()}
             >
               {isImageOutput ? (
-                <img src={videoUrl} className="fullscreen-image" alt="Preview" />
+                <img
+                  src={effectiveVideoUrl}
+                  className="fullscreen-image"
+                  alt="Preview"
+                  onLoad={handlePlaybackRecovered}
+                  onError={handlePlaybackError}
+                />
               ) : (
                 <video
-                  src={videoUrl}
+                  key={`fullscreen-${effectiveVideoUrl}`}
+                  src={effectiveVideoUrl}
                   controls
                   autoPlay
                   muted
@@ -159,8 +198,10 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
                   preload="metadata"
                   loop
                   className="fullscreen-video"
+                  onCanPlay={handlePlaybackRecovered}
+                  onLoadedData={handlePlaybackRecovered}
                   onError={() => {
-                    setPlaybackError('视频已返回，但浏览器无法播放该文件。请先下载检查文件内容或稍后重试。')
+                    handlePlaybackError()
                     setShowFullscreen(false)
                   }}
                 />
@@ -200,4 +241,22 @@ function inferExtension(url, isImageOutput) {
 
   if (url.includes('.mov')) return 'mov'
   return 'mp4'
+}
+
+function isRetryablePlaybackUrl(url) {
+  return typeof url === 'string' && (/^(https?:)?\/\//i.test(url) || url.startsWith('/'))
+}
+
+function buildRetryablePlaybackUrl(url, retryCount) {
+  if (!isRetryablePlaybackUrl(url) || retryCount <= 0) {
+    return url
+  }
+
+  try {
+    const parsed = new URL(url, window.location.origin)
+    parsed.searchParams.set('_playbackRetry', String(retryCount))
+    return parsed.toString()
+  } catch {
+    return url
+  }
 }
