@@ -11,7 +11,30 @@ function normalizeChannelValue(value) {
   return value.trim().toLowerCase()
 }
 
-export function resolveUsageChannel(channel, providerId = null) {
+function resolveUsageChannelByUpstreamUrl(upstreamUrl) {
+  const normalizedUrl = normalizeChannelValue(upstreamUrl)
+  if (!normalizedUrl) return ''
+
+  if (normalizedUrl.startsWith('http://14.103.147.238:19220/openapi/generate')) {
+    return 'aggregation'
+  }
+
+  if (
+    normalizedUrl.startsWith('http://47.251.43.42:3000/v1beta/models/')
+    && normalizedUrl.includes(':generatecontent')
+  ) {
+    return 'zhouzong'
+  }
+
+  return ''
+}
+
+export function resolveUsageChannel(channel, providerId = null, upstreamUrl = null) {
+  const upstreamResolvedChannel = resolveUsageChannelByUpstreamUrl(upstreamUrl)
+  if (upstreamResolvedChannel) {
+    return upstreamResolvedChannel
+  }
+
   const normalizedChannel = normalizeChannelValue(channel)
   const normalizedProviderId = normalizeChannelValue(providerId)
 
@@ -26,13 +49,19 @@ export function resolveUsageChannel(channel, providerId = null) {
   return normalizedChannel
 }
 
-export function formatUsageChannelLabel(channel, providerId = null) {
-  const resolvedChannel = resolveUsageChannel(channel, providerId)
+export function formatUsageChannelLabel(channel, providerId = null, upstreamUrl = null) {
+  const resolvedChannel = resolveUsageChannel(channel, providerId, upstreamUrl)
   return CHANNEL_LABELS[resolvedChannel] || resolvedChannel || ''
 }
 
-export function buildUsageChannelSql(channelColumn = 'channel', providerIdColumn = 'provider_id') {
+export function buildUsageChannelSql(
+  channelColumn = 'channel',
+  providerIdColumn = 'provider_id',
+  upstreamUrlColumn = 'upstream_url',
+) {
   return `CASE
+    WHEN LOWER(COALESCE(${upstreamUrlColumn}, '')) LIKE 'http://14.103.147.238:19220/openapi/generate%' THEN 'aggregation'
+    WHEN LOWER(COALESCE(${upstreamUrlColumn}, '')) LIKE 'http://47.251.43.42:3000/v1beta/models/%:generatecontent%' THEN 'zhouzong'
     WHEN ${channelColumn} = 'image' AND ${providerIdColumn} = 'gemini-image-aggregation' THEN 'aggregation'
     WHEN ${channelColumn} = 'image' THEN 'zhouzong'
     WHEN ${channelColumn} = 'veo_fast' THEN 'zhouzong'

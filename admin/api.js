@@ -175,7 +175,7 @@ function enhanceUsageLog(log) {
   const mediaCounts = extractMediaCounts(log)
   const mediaSizes = extractMediaSizes(log)
   const rawChannel = log?.channel || null
-  const statsChannel = resolveUsageChannel(rawChannel, log?.provider_id) || rawChannel
+  const statsChannel = resolveUsageChannel(rawChannel, log?.provider_id, log?.upstream_url) || rawChannel
 
   return {
     ...log,
@@ -215,7 +215,7 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
   { header: '\u65f6\u95f4', width: 22, align: 'center', value: (log) => formatExcelTimestamp(log.created_at) },
   { header: '\u7528\u6237', width: 16, value: (log) => log.user_nickname || log.user_email || log.user_id || '' },
   { header: '\u90ae\u7bb1', width: 28, value: (log) => log.user_email || '' },
-  { header: '\u901a\u9053', width: 12, align: 'center', value: (log) => formatChannelLabel(log.channel) },
+  { header: '\u901a\u9053', width: 12, align: 'center', value: (log) => formatChannelLabel(log.channel, log.provider_id, log.upstream_url) },
   { header: '\u6a21\u578b', width: 28, value: (log) => log.model || '' },
   { header: '\u6a21\u5f0f', width: 12, align: 'center', value: (log) => log.generation_mode || '' },
   { header: '\u63d0\u793a\u8bcd', width: 56, value: (log) => log.promptText || '' },
@@ -230,8 +230,8 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
 
 const USAGE_CHANNEL_SQL = buildUsageChannelSql()
 
-function formatChannelLabel(channel, providerId = null) {
-  return formatUsageChannelLabel(channel, providerId)
+function formatChannelLabel(channel, providerId = null, upstreamUrl = null) {
+  return formatUsageChannelLabel(channel, providerId, upstreamUrl)
 }
 
 function formatStatusLabel(status) {
