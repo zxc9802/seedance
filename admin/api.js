@@ -205,6 +205,7 @@ const STATUS_LABELS = Object.freeze({
 })
 
 const EXCEL_CONTENT_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+const ADMIN_DISPLAY_TIME_ZONE = 'Asia/Shanghai'
 const EXCEL_BORDER = Object.freeze({
   top: { style: 'thin', color: { argb: 'FFD8E0EF' } },
   left: { style: 'thin', color: { argb: 'FFD8E0EF' } },
@@ -218,6 +219,7 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
   { header: '\u901a\u9053', width: 12, align: 'center', value: (log) => formatChannelLabel(log.channel, log.provider_id, log.upstream_url) },
   { header: '\u6a21\u578b', width: 28, value: (log) => log.model || '' },
   { header: '\u6a21\u5f0f', width: 12, align: 'center', value: (log) => log.generation_mode || '' },
+  { header: '\u65f6\u957f(\u79d2)', width: 12, align: 'center', value: (log) => formatDurationLabel(log.duration) },
   { header: '\u63d0\u793a\u8bcd', width: 56, value: (log) => log.promptText || '' },
   { header: '\u56fe\u7247(\u6570\u91cf/\u5927\u5c0f)', width: 18, align: 'center', value: (log) => formatMediaMetric(log.imageCount, log.imageBytes) },
   { header: '\u89c6\u9891(\u6570\u91cf/\u5927\u5c0f)', width: 18, align: 'center', value: (log) => formatMediaMetric(log.videoCount, log.videoBytes) },
@@ -253,6 +255,13 @@ function formatMediaMetric(count, bytes) {
   return sizeLabel ? `${safeCount} (${sizeLabel})` : String(safeCount)
 }
 
+function formatDurationLabel(value) {
+  if (value === null || value === undefined || value === '') return ''
+  const duration = Number(value)
+  if (!Number.isFinite(duration)) return String(value)
+  return `${duration}秒`
+}
+
 function formatExcelTimestamp(value) {
   if (!value) return ''
   const date = value instanceof Date ? value : new Date(value)
@@ -260,6 +269,7 @@ function formatExcelTimestamp(value) {
     return String(value)
   }
   return date.toLocaleString('zh-CN', {
+    timeZone: ADMIN_DISPLAY_TIME_ZONE,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -599,6 +609,23 @@ function appendUsageDateWindowClause(query, conditions, params, paramIdx, fallba
   }
 
   return paramIdx
+}
+
+function parseRequestedUserIds(query = {}) {
+  const values = []
+  const pushValue = (value) => {
+    if (typeof value !== 'string') return
+    value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .forEach((item) => values.push(item))
+  }
+
+  pushValue(query.userId)
+  pushValue(query.userIds)
+
+  return [...new Set(values)]
 }
 
 router.use((req, res, next) => {
@@ -1035,12 +1062,12 @@ router.get('/user-detail', async (req, res) => {
   const db = getPool()
   if (!db) return res.json([])
 
-  const userId = req.query.userId
-  if (!userId) return res.status(400).json({ error: 'userId is required' })
+  const userIds = parseRequestedUserIds(req.query)
+  if (!userIds.length) return res.status(400).json({ error: 'userId or userIds is required' })
 
   const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
-  const conditions = ['user_id = $1']
-  const params = [userId]
+  const conditions = [`user_id = ANY($1::text[])`]
+  const params = [userIds]
   let paramIdx = 2
 
   paramIdx = appendUsageDateWindowClause(req.query, conditions, params, paramIdx, days)
@@ -1071,14 +1098,14 @@ router.get('/user-detail/export', async (req, res) => {
     return res.status(503).json({ error: 'Database not available' })
   }
 
-  const userId = req.query.userId
-  if (!userId) {
-    return res.status(400).json({ error: 'userId is required' })
+  const userIds = parseRequestedUserIds(req.query)
+  if (!userIds.length) {
+    return res.status(400).json({ error: 'userId or userIds is required' })
   }
 
   const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
-  const conditions = ['user_id = $1']
-  const params = [userId]
+  const conditions = [`user_id = ANY($1::text[])`]
+  const params = [userIds]
   let paramIdx = 2
 
   paramIdx = appendUsageDateWindowClause(req.query, conditions, params, paramIdx, days)

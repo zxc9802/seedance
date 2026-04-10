@@ -34,9 +34,10 @@
     background: #334155;
   }
   table {
-    width: max-content;
-    min-width: 100%;
+    width: 100%;
+    min-width: 1500px;
     border-collapse: collapse;
+    table-layout: fixed;
   }
   th {
     text-align: left;
@@ -53,6 +54,7 @@
     font-size: 0.85rem;
     white-space: nowrap;
     vertical-align: middle;
+    overflow: hidden;
   }
   tr:hover td {
     background: #1e293b;
@@ -125,6 +127,13 @@
   }
   .table-wrap {
     overflow-x: auto;
+  }
+  .cell-clip {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>
 </head>
@@ -266,6 +275,7 @@
             <th>通道</th>
             <th>模型</th>
             <th>模式</th>
+            <th>时长</th>
             <th>提示词</th>
             <th>图片(数量/大小)</th>
             <th>视频(数量/大小)</th>
@@ -340,6 +350,7 @@
               <th>通道</th>
               <th>模型</th>
               <th>模式</th>
+              <th>时长</th>
               <th>提示词</th>
               <th>图片(数量/大小)</th>
               <th>视频(数量/大小)</th>
@@ -501,13 +512,14 @@ function getOverviewRangeLabel(days) {
 async function refreshAll() {
   try {
     const selectedDays = getSelectedOverviewDays()
-    const [overview, trend, models, channels, users] = await Promise.all([
+    const [overview, trend, models, channels, rawUsers] = await Promise.all([
       api('/overview'),
       api('/trend'),
       api('/by-model'),
       api('/by-channel'),
-      api('/by-user?limit=20'),
+      api('/by-user?limit=100'),
     ])
+    const users = mergeUsersByName(rawUsers).slice(0, 20)
 
     document.getElementById('s-range-label').textContent = getOverviewRangeLabel(selectedDays)
     document.getElementById('s-today').textContent = overview.rangeRequests ?? overview.todayRequests ?? 0
@@ -524,7 +536,7 @@ async function refreshAll() {
     const userSelect = document.getElementById('f-user')
     const currentValue = userSelect.value
     userSelect.innerHTML = '<option value="">全部</option>'
-    users.forEach((user) => {
+    rawUsers.forEach((user) => {
       const option = document.createElement('option')
       option.value = user.user_id
       option.textContent = user.user_name
@@ -665,6 +677,86 @@ function formatMoney(value) {
   return `¥${Number(value).toFixed(2)}`
 }
 
+function formatDurationLabel(value) {
+  if (value === null || value === undefined || value === '') return '-'
+  const duration = Number(value)
+  if (!Number.isFinite(duration)) return String(value)
+  return `${duration}秒`
+}
+
+function buildUserIdsKey(userIds = []) {
+  return [...new Set((Array.isArray(userIds) ? userIds : []).map((item) => String(item || '').trim()).filter(Boolean))]
+    .sort()
+    .join(',')
+}
+
+function summarizeMergedValues(values) {
+  const uniqueValues = [...new Set(values.map((item) => String(item || '').trim()).filter(Boolean))]
+  if (uniqueValues.length === 0) return ''
+  if (uniqueValues.length === 1) return uniqueValues[0]
+  return '多个'
+}
+
+function mergeUsersByName(rows = []) {
+  const grouped = new Map()
+
+  rows.forEach((user) => {
+    const userName = String(user?.user_name || user?.user_email || user?.user_id || '').trim()
+    if (!userName) return
+
+    if (!grouped.has(userName)) {
+      grouped.set(userName, {
+        user_name: userName,
+        user_ids: new Set(),
+        user_emails: [],
+        user_groups: [],
+        requests: 0,
+        succeeded: 0,
+        failed: 0,
+        estimated_cost: 0,
+      })
+    }
+
+    const target = grouped.get(userName)
+    if (user.user_id) {
+      target.user_ids.add(String(user.user_id).trim())
+    }
+    if (user.user_email) {
+      target.user_emails.push(user.user_email)
+    }
+    if (user.user_group) {
+      target.user_groups.push(user.user_group)
+    }
+
+    target.requests += Number(user.requests) || 0
+    target.succeeded += Number(user.succeeded) || 0
+    target.failed += Number(user.failed) || 0
+    target.estimated_cost += Number(user.estimated_cost) || 0
+  })
+
+  return [...grouped.values()]
+    .map((user) => {
+      const userIds = [...user.user_ids].sort()
+      return {
+        user_name: user.user_name,
+        user_id: userIds.length === 1 ? userIds[0] : '',
+        user_ids: userIds,
+        user_ids_key: buildUserIdsKey(userIds),
+        user_email: summarizeMergedValues(user.user_emails),
+        user_group: summarizeMergedValues(user.user_groups),
+        requests: user.requests,
+        succeeded: user.succeeded,
+        failed: user.failed,
+        estimated_cost: user.estimated_cost,
+      }
+    })
+    .sort((left, right) => {
+      if (right.requests !== left.requests) return right.requests - left.requests
+      if (right.estimated_cost !== left.estimated_cost) return right.estimated_cost - left.estimated_cost
+      return String(left.user_name).localeCompare(String(right.user_name), 'zh-CN')
+    })
+}
+
 function formatBytes(bytes) {
   const value = Math.max(0, Number(bytes) || 0)
   if (!value) return ''
@@ -685,6 +777,12 @@ function formatDateInputValue(date) {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function buildShanghaiDateBoundary(dateValue, endOfDay = false) {
+  const normalized = String(dateValue || '').trim()
+  if (!normalized) return ''
+  return `${normalized}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}+08:00`
 }
 
 function applyQuickDateRange(rangeKey) {
@@ -1077,8 +1175,8 @@ function buildTaskQueryParams(options = {}) {
   if (taskId) params.set('taskId', taskId)
   if (status) params.set('status', status)
   if (userId) params.set('userId', userId)
-  if (from) params.set('dateFrom', from)
-  if (to) params.set('dateTo', `${to}T23:59:59Z`)
+  if (from) params.set('dateFrom', buildShanghaiDateBoundary(from, false))
+  if (to) params.set('dateTo', buildShanghaiDateBoundary(to, true))
 
   return params
 }
@@ -1095,18 +1193,19 @@ async function loadTasks(page) {
     tbody.innerHTML = currentTaskData.map((task) => `
       <tr>
         <td>${fmtTime(task.created_at)}</td>
-        <td>${esc(task.user_nickname || task.user_email || task.user_id || '-')}</td>
-        <td>${esc(formatChannel(task.channel))}</td>
-        <td>${esc(task.model || '-')}</td>
-        <td>${esc(task.generation_mode || '-')}</td>
-        <td>${esc(task.promptText || '-')}</td>
+        <td>${renderClipCell(task.user_nickname || task.user_email || task.user_id || '-', 140)}</td>
+        <td>${renderClipCell(formatChannel(task.channel), 96)}</td>
+        <td>${renderClipCell(task.model || '-', 220)}</td>
+        <td>${renderClipCell(task.generation_mode || '-', 96)}</td>
+        <td>${esc(formatDurationLabel(task.duration))}</td>
+        <td>${renderClipCell(task.promptText || '-', 360)}</td>
         <td>${esc(formatMediaMetric(task.imageCount, task.imageBytes))}</td>
         <td>${esc(formatMediaMetric(task.videoCount, task.videoBytes))}</td>
         <td>${esc(formatMediaMetric(task.audioCount, task.audioBytes))}</td>
         <td class="status-${task.status || 'unknown'}">${esc(formatStatus(task.status))}</td>
-        <td>${esc(task.engine_task_id || '-')}</td>
-        <td>${esc(task.upstream_url || '-')}</td>
-        <td>${esc(task.error_message || '-')}</td>
+        <td>${renderClipCell(task.engine_task_id || '-', 180)}</td>
+        <td>${renderClipCell(task.upstream_url || '-', 260)}</td>
+        <td>${renderClipCell(task.error_message || '-', 240)}</td>
         <td>${formatMoney(task.estimated_cost)}</td>
       </tr>
     `).join('')
@@ -1184,8 +1283,8 @@ function buildUserAnalysisQueryParams(options = {}) {
   if (includeLimit) {
     params.set('limit', 100)
   }
-  if (from) params.set('dateFrom', from)
-  if (to) params.set('dateTo', `${to}T23:59:59Z`)
+  if (from) params.set('dateFrom', buildShanghaiDateBoundary(from, false))
+  if (to) params.set('dateTo', buildShanghaiDateBoundary(to, true))
 
   return params
 }
@@ -1217,7 +1316,8 @@ function sanitizeFilename(value) {
 async function loadUsers() {
   try {
     const params = buildUserAnalysisQueryParams()
-    const data = await api(`/by-user?${params.toString()}`)
+    const rawData = await api(`/by-user?${params.toString()}`)
+    const data = mergeUsersByName(rawData)
     document.getElementById('user-tbody').innerHTML = data.map((user) => `
       <tr>
         <td>${esc(user.user_name)}</td>
@@ -1227,12 +1327,12 @@ async function loadUsers() {
         <td class="status-succeeded">${user.succeeded}</td>
         <td class="status-failed">${user.failed}</td>
         <td>${formatMoney(user.estimated_cost)}</td>
-        <td><button class="btn btn-secondary text-xs" data-user-id="${escAttr(encodeURIComponent(user.user_id || ''))}" data-user-name="${escAttr(encodeURIComponent(user.user_name || ''))}" onclick="showUserDetail(decodeURIComponent(this.dataset.userId), decodeURIComponent(this.dataset.userName))">查看明细</button></td>
+        <td><button class="btn btn-secondary text-xs" data-user-ids="${escAttr(encodeURIComponent(user.user_ids_key || ''))}" data-user-name="${escAttr(encodeURIComponent(user.user_name || ''))}" onclick="showUserDetail(decodeURIComponent(this.dataset.userIds), decodeURIComponent(this.dataset.userName))">查看明细</button></td>
       </tr>
     `).join('')
 
     if (currentUserDetailId) {
-      const selectedUser = data.find((user) => user.user_id === currentUserDetailId)
+      const selectedUser = data.find((user) => user.user_ids_key === currentUserDetailId)
       if (selectedUser) {
         currentUserDetailName = selectedUser.user_name || currentUserDetailName
         await showUserDetail(currentUserDetailId, currentUserDetailName)
@@ -1253,22 +1353,23 @@ async function showUserDetail(userId, userName) {
   document.getElementById('user-detail-title').textContent = `${userName} 的使用明细`
   try {
     const params = buildUserAnalysisQueryParams({ includeLimit: false })
-    params.set('userId', userId)
+    params.set('userIds', userId)
     const data = await api(`/user-detail?${params.toString()}`)
     document.getElementById('user-detail-tbody').innerHTML = data.map((task) => `
       <tr>
         <td>${fmtTime(task.created_at)}</td>
-        <td>${esc(formatChannel(task.channel))}</td>
-        <td>${esc(task.model || '-')}</td>
-        <td>${esc(task.generation_mode || '-')}</td>
-        <td>${esc(task.promptText || '-')}</td>
+        <td>${renderClipCell(formatChannel(task.channel), 96)}</td>
+        <td>${renderClipCell(task.model || '-', 220)}</td>
+        <td>${renderClipCell(task.generation_mode || '-', 96)}</td>
+        <td>${esc(formatDurationLabel(task.duration))}</td>
+        <td>${renderClipCell(task.promptText || '-', 360)}</td>
         <td>${esc(formatMediaMetric(task.imageCount, task.imageBytes))}</td>
         <td>${esc(formatMediaMetric(task.videoCount, task.videoBytes))}</td>
         <td>${esc(formatMediaMetric(task.audioCount, task.audioBytes))}</td>
         <td class="status-${task.status || 'unknown'}">${esc(formatStatus(task.status))}</td>
-        <td>${esc(task.engine_task_id || '-')}</td>
-        <td>${esc(task.upstream_url || '-')}</td>
-        <td>${esc(task.error_message || '-')}</td>
+        <td>${renderClipCell(task.engine_task_id || '-', 180)}</td>
+        <td>${renderClipCell(task.upstream_url || '-', 260)}</td>
+        <td>${renderClipCell(task.error_message || '-', 240)}</td>
         <td>${formatMoney(task.estimated_cost)}</td>
       </tr>
     `).join('')
@@ -1286,7 +1387,7 @@ async function exportUserDetailCSV() {
   const exportBtn = document.getElementById('user-detail-export-btn')
   const originalLabel = exportBtn?.textContent || '瀵煎嚭褰撳墠鐢ㄦ埛 CSV'
   const params = buildUserAnalysisQueryParams({ includeLimit: false })
-  params.set('userId', currentUserDetailId)
+  params.set('userIds', currentUserDetailId)
 
   try {
     if (exportBtn) {
@@ -1350,6 +1451,12 @@ function esc(value) {
 
 function escAttr(value) {
   return esc(value).replace(/'/g, '&#39;')
+}
+
+function renderClipCell(value, maxWidth = 240, fallback = '-') {
+  const text = String(value ?? '').trim()
+  if (!text) return esc(fallback)
+  return `<span class="cell-clip" style="max-width:${maxWidth}px" title="${escAttr(text)}">${esc(text)}</span>`
 }
 
 if (TOKEN) {
