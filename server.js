@@ -901,6 +901,53 @@ app.post('/api/ark/query', async (req, res) => {
   }
 })
 
+app.get('/api/ark/media/:taskId', async (req, res) => {
+  try {
+    const requestSpec = buildArkQueryRequest({
+      providerId: 'seedance3',
+      taskId: req.params.taskId,
+    })
+    const upstream = await requestArk(requestSpec)
+    const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
+    const normalized = normalizeYunwuQueryResponse(upstream.payload, requestSpec, traceMetadata)
+    const mediaUrl = normalized.videoUrl || null
+
+    if (normalized.status !== 'succeeded' && normalized.status !== 'completed') {
+      throw createHttpError(409, 'Ark task is not ready for preview yet.')
+    }
+
+    if (!mediaUrl) {
+      throw createHttpError(404, 'Ark task succeeded, but no media URL was returned.')
+    }
+
+    const mediaResponse = await fetch(mediaUrl, {
+      redirect: 'follow',
+    })
+
+    if (!mediaResponse.ok) {
+      const message = await readDreaminaUpstreamError(mediaResponse)
+      throw createHttpError(mediaResponse.status, message || 'Ark media fetch failed.')
+    }
+
+    res.status(mediaResponse.status)
+    copyUpstreamResponseHeaders(res, mediaResponse.headers)
+    res.setHeader('Cache-Control', 'private, max-age=300')
+
+    if (req.method === 'HEAD' || !mediaResponse.body) {
+      res.end()
+      return
+    }
+
+    Readable.fromWeb(mediaResponse.body).pipe(res)
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Ark media proxy failed',
+    })
+  }
+})
+
 app.post('/api/wan/generate', async (req, res) => {
   const missing = getMissingDashScopeConfig()
   if (missing.length > 0) {

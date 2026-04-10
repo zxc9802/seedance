@@ -424,7 +424,7 @@ function App() {
         const initialTask = normalizeYunwuTask(data?.data)
         if (initialTask.videoUrl) {
           window.clearInterval(progressTimer)
-          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl, provider)
+          const previewUrl = await resolveArkPlaybackUrl(initialTask, provider)
           updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
           return
         }
@@ -460,7 +460,7 @@ function App() {
           if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
             finished = true
             window.clearInterval(progressTimer)
-            const previewUrl = await resolvePreviewUrl(task.videoUrl, provider)
+            const previewUrl = await resolveArkPlaybackUrl(task, provider)
             updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
             return
           }
@@ -2737,6 +2737,19 @@ async function resolveDreaminaPlaybackUrl(task, providerId) {
   const taskId = typeof task?.taskId === 'string' ? task.taskId.trim() : ''
   if (taskId) {
     return `/api/dreamina/media/${encodeURIComponent(taskId)}`
+  }
+
+  return resolvePreviewUrl(task?.videoUrl || null, providerId)
+}
+
+async function resolveArkPlaybackUrl(task, providerId) {
+  if (!isArkProvider(providerId)) {
+    return resolvePreviewUrl(task?.videoUrl || null, providerId)
+  }
+
+  const taskId = typeof task?.taskId === 'string' ? task.taskId.trim() : ''
+  if (taskId) {
+    return `/api/ark/media/${encodeURIComponent(taskId)}`
   }
 
   return resolvePreviewUrl(task?.videoUrl || null, providerId)
