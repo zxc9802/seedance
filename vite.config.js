@@ -4,4 +4,7 @@ import { viteSingleFile } from 'vite-plugin-singlefile'
 
 export default defineConfig({
   plugins: [react(), viteSingleFile()],
+  server: {
+    allowedHosts: true,
+  },
 })

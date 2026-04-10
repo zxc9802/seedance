@@ -85,12 +85,28 @@ const BASE_PROVIDERS = {
     models: [
       { value: 'seedance2.0_vip', label: 'seedance2.0', tag: 'Dreamina' },
       { value: 'seedance2.0fast_vip', label: 'seedance2 fast', tag: 'Dreamina' },
+      { value: '3.5pro', label: '3.5 Pro', tag: 'Dreamina' },
+      { value: '3.0', label: '3.0', tag: 'Dreamina' },
+      { value: '3.0fast', label: '3.0 Fast', tag: 'Dreamina' },
+      { value: '3.0pro', label: '3.0 Pro', tag: 'Dreamina' },
     ],
     aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {
       default: ['720p'],
+      '3.0': ['720p', '1080p'],
+      '3.0fast': ['720p', '1080p'],
+      '3.0pro': ['1080p'],
+      '3.5pro': ['720p', '1080p'],
     },
-    durations: [4, 5, 6, 8, 10, 12, 15],
+    durations: [3, 4, 5, 6, 8, 10, 12, 15],
+    durationRules: {
+      modelDefaults: {
+        '3.0': [3, 4, 5, 6, 8, 10],
+        '3.0fast': [3, 4, 5, 6, 8, 10],
+        '3.0pro': [3, 4, 5, 6, 8, 10],
+        '3.5pro': [4, 5, 6, 8, 10, 12],
+      },
+    },
     sampleCounts: [1],
     features: {
       generateAudio: false,
@@ -98,6 +114,78 @@ const BASE_PROVIDERS = {
       referenceImage: true,
       referenceVideo: true,
       referenceAudio: true,
+      transitionStoryboard: true,
+    },
+    generationModes: [
+      { value: 'generate', label: '视频生成' },
+      { value: 'fusion', label: '融合参考' },
+      { value: 'multiframe', label: '动作模仿' },
+    ],
+    modeModels: {
+      t2v: ['seedance2.0_vip', 'seedance2.0fast_vip'],
+      i2v: ['3.0', '3.0fast', '3.0pro', '3.5pro', 'seedance2.0_vip', 'seedance2.0fast_vip'],
+      flf: ['3.0', '3.5pro', 'seedance2.0_vip', 'seedance2.0fast_vip'],
+      fusion: ['seedance2.0_vip', 'seedance2.0fast_vip'],
+    },
+    referenceInputMode: 'local',
+    maxReferenceImages: {
+      generate: 2,
+      fusion: 9,
+      multiframe: 20,
+    },
+    maxReferenceVideos: {
+      fusion: 3,
+    },
+    maxReferenceAudios: {
+      fusion: 3,
+    },
+    defaults: {
+      model: 'seedance2.0fast_vip',
+      aspectRatio: '9:16',
+      resolution: '720p',
+      duration: 5,
+      sampleCount: 1,
+      generateAudio: false,
+      singleTransitionDuration: '3',
+      transitionPrompts: [],
+      transitionDurations: [],
+    },
+    imageMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+    imageMimeTypeLabel: 'JPG/JPEG、PNG、WebP',
+    imageMaxSizeMb: 20,
+    videoMimeTypes: ['video/mp4', 'video/quicktime'],
+    videoMimeTypeLabel: 'MP4、MOV',
+    videoMaxSizeMb: 200,
+    audioMaxSizeMb: 20,
+    promptOptionalModes: ['multiframe'],
+    referenceHelpText: '视频生成支持 0-2 张图片：0 张走文生视频，1 张走图生视频，2 张走首尾帧；融合参考支持最多 9 张图片、3 段视频、3 段音频；动作模仿对应 Dreamina CLI 的 multiframe2video。',
+    backendKind: 'dreamina',
+  },
+  seedance3: {
+    id: 'seedance3',
+    typeId: 'seedance',
+    typeLabel: 'Seedance',
+    selectorLabel: 'seedance3',
+    name: 'Seedance 3',
+    vendor: 'Volcengine Ark',
+    color: '#dc2626',
+    models: [
+      { value: 'doubao-seedance-2-0-fast-260128', label: 'Seedance 2.0 Fast', tag: 'Ark' },
+      { value: 'doubao-seedance-2-0-260128', label: 'Seedance 2.0', tag: 'Ark' },
+    ],
+    aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
+    resolutions: {
+      default: ['480p', '720p', '1080p'],
+    },
+    durations: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    sampleCounts: [1],
+    features: {
+      generateAudio: true,
+      negativePrompt: false,
+      referenceImage: true,
+      referenceVideo: true,
+      referenceAudio: true,
+      watermark: true,
     },
     generationModes: [
       { value: 't2v', label: '文生视频' },
@@ -105,7 +193,7 @@ const BASE_PROVIDERS = {
       { value: 'flf', label: '首尾帧' },
       { value: 'fusion', label: '融合参考' },
     ],
-    referenceInputMode: 'local',
+    referenceInputMode: 'url',
     maxReferenceImages: {
       t2v: 0,
       i2v: 1,
@@ -119,12 +207,13 @@ const BASE_PROVIDERS = {
       fusion: 3,
     },
     defaults: {
-      model: 'seedance2.0_vip',
-      aspectRatio: '9:16',
+      model: 'doubao-seedance-2-0-fast-260128',
+      aspectRatio: '16:9',
       resolution: '720p',
       duration: 5,
       sampleCount: 1,
-      generateAudio: false,
+      generateAudio: true,
+      watermark: false,
     },
     imageMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
     imageMimeTypeLabel: 'JPG/JPEG、PNG、WebP',
@@ -133,8 +222,8 @@ const BASE_PROVIDERS = {
     videoMimeTypeLabel: 'MP4、MOV',
     videoMaxSizeMb: 200,
     audioMaxSizeMb: 20,
-    referenceHelpText: 'Dreamina CLI 会直接读取后端临时目录中的本地文件。融合参考模式支持最多 9 张图片、3 段视频、3 段音频；图生视频使用 1 张图，首尾帧使用 2 张图。',
-    backendKind: 'dreamina',
+    referenceHelpText: 'Ark Seedance 2.0 支持文生视频、首帧、首尾帧和多模态融合参考。融合参考最多 9 张图片、3 段视频、3 段音频；音频不能单独使用，至少还要搭配 1 张图片或 1 段视频。',
+    backendKind: 'ark',
   },
   ve31p: {
     id: 've31p',
@@ -484,7 +573,17 @@ export const PROVIDERS = {
   ...YUNWU_PROVIDERS,
 }
 
-const BASE_PROVIDER_ORDER = ['veo', 'seedance2', 've31p', 'veo31fast', 'kling', 'wan1', 'gemini-image', 'gemini-image-aggregation']
+const BASE_PROVIDER_ORDER = [
+  'veo',
+  'seedance3',
+  'seedance2',
+  've31p',
+  'veo31fast',
+  'kling',
+  'wan1',
+  'gemini-image',
+  'gemini-image-aggregation',
+]
 
 export const PROVIDER_ORDER = [...BASE_PROVIDER_ORDER, ...YUNWU_PROVIDER_ORDER]
 

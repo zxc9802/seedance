@@ -37,6 +37,7 @@ const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL 
 const imageApiBaseUrl = normalizeGeminiImageBaseUrl(process.env.IMAGE_API_BASE_URL || 'https://www.shanbaob.com')
 const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGATION_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const yunwuApiBaseUrl = stripTrailingSlash(process.env.YUNWU_API_BASE_URL || 'https://yunwu.ai')
+const arkApiBaseUrl = stripTrailingSlash(process.env.ARK_API_BASE_URL || 'https://ark.cn-beijing.volces.com')
 const dashScopeBaseUrl = stripTrailingSlash(process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com')
 const materialThirdChannel = Number(process.env.MATERIAL_THIRD_CHANNEL || 1)
 const materialPollIntervalMs = Math.max(1000, Number(process.env.MATERIAL_POLL_INTERVAL_MS || 3000))
@@ -69,10 +70,40 @@ const USAGE_STATUS_SYNC_LOOKBACK_HOURS = Math.max(1, Number(process.env.USAGE_ST
 const USAGE_STATUS_SYNC_MIN_AGE_MINUTES = Math.max(1, Number(process.env.USAGE_STATUS_SYNC_MIN_AGE_MINUTES || 3))
 const UNTRACKED_USAGE_REVIEW_DELAY_MINUTES = Math.max(3, Number(process.env.UNTRACKED_USAGE_REVIEW_DELAY_MINUTES || 10))
 const UNTRACKED_USAGE_STATUS_MESSAGE = '上游响应未返回 task_id，无法自动查询状态，请结合供应商后台核对。'
+const ARK_ALLOWED_PROVIDER_IDS = new Set(['seedance3'])
+const ARK_PROVIDER_MODES = Object.freeze({
+  seedance3: ['t2v', 'i2v', 'flf', 'fusion'],
+})
+const ARK_VIDEO_RATIOS = new Set(['1:1', '3:4', '16:9', '4:3', '9:16', '21:9'])
+const ARK_VIDEO_RESOLUTIONS = new Set(['480p', '720p', '1080p'])
 const DREAMINA_ALLOWED_PROVIDER_IDS = new Set(['seedance2'])
-const DREAMINA_ALLOWED_MODELS = new Set(['seedance2.0_vip', 'seedance2.0fast_vip'])
-const DREAMINA_ALLOWED_RATIOS = new Set(['1:1', '3:4', '16:9', '4:3', '9:16', '21:9'])
-const DREAMINA_ALLOWED_RESOLUTIONS = new Set(['720p'])
+const DREAMINA_PROVIDER_MODES = Object.freeze({
+  seedance2: ['generate', 'fusion', 'multiframe', 't2v', 'i2v', 'flf'],
+})
+const DREAMINA_VIDEO_FAMILY_MODELS = ['seedance2.0', 'seedance2.0fast', 'seedance2.0_vip', 'seedance2.0fast_vip']
+const DREAMINA_TEXT2VIDEO_MODELS = new Set(DREAMINA_VIDEO_FAMILY_MODELS)
+const DREAMINA_MULTIMODAL_MODELS = new Set(DREAMINA_VIDEO_FAMILY_MODELS)
+const DREAMINA_IMAGE2VIDEO_MODELS = new Set([
+  ...DREAMINA_VIDEO_FAMILY_MODELS,
+  '3.0',
+  '3.0fast',
+  '3.0pro',
+  '3.0_fast',
+  '3.0_pro',
+  '3.5pro',
+  '3.5_pro',
+])
+const DREAMINA_FRAMES2VIDEO_MODELS = new Set([
+  ...DREAMINA_VIDEO_FAMILY_MODELS,
+  '3.0',
+  '3.5pro',
+])
+const DREAMINA_VIDEO_RATIOS = new Set(['1:1', '3:4', '16:9', '4:3', '9:16', '21:9'])
+const DREAMINA_VIDEO_RESOLUTIONS = new Set(['720p', '1080p'])
+const DREAMINA_TEXT2IMAGE_MODELS = new Set(['3.0', '3.1', '4.0', '4.1', '4.5', '4.6', '5.0', 'lab'])
+const DREAMINA_IMAGE2IMAGE_MODELS = new Set(['4.0', '4.1', '4.5', '4.6', '5.0', 'lab'])
+const DREAMINA_IMAGE_RATIOS = new Set(['21:9', '16:9', '3:2', '4:3', '1:1', '3:4', '2:3', '9:16'])
+const DREAMINA_IMAGE_RESOLUTION_TYPES = new Set(['1k', '2k', '4k', '8k'])
 const DREAMINA_CLI_TIMEOUT_MS = Math.max(30000, Number(process.env.DREAMINA_CLI_TIMEOUT_MS || 600000))
 const uploadedReferenceMetadata = new Map()
 let usageStatusSyncTimer = null
@@ -92,7 +123,7 @@ const upload = multer({
   storage,
   limits: {
     fileSize: 64 * 1024 * 1024,
-    files: 16,
+    files: 32,
   },
 })
 
@@ -256,7 +287,7 @@ app.use(async (req, res, next) => {
   }
 })
 
-app.post('/api/upload', upload.array('files', 16), async (req, res) => {
+app.post('/api/upload', upload.array('files', 32), async (req, res) => {
   const files = Array.isArray(req.files) ? req.files : []
   if (files.length === 0) {
     res.status(400).json({ success: false, message: 'No files uploaded' })
@@ -764,6 +795,112 @@ app.post('/api/yunwu/query', async (req, res) => {
   }
 })
 
+app.post('/api/ark/generate', async (req, res) => {
+  const missing = getMissingArkConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  try {
+    const body = req.body || {}
+    const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
+    const requestedParams = extractRequestedVideoParams(body)
+    const requestSpec = buildArkGenerateRequest(body)
+    const upstream = await requestArk(requestSpec)
+    const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
+    const normalized = normalizeYunwuGenerateResponse(upstream.payload, requestSpec, traceMetadata)
+
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'ark',
+      providerId: body.providerId || null,
+      model: requestedParams.model || requestSpec.body?.model || null,
+      generationMode: body.mode || 't2v',
+      prompt: body.prompt || null,
+      aspectRatio: requestedParams.aspectRatio || null,
+      resolution: requestedParams.resolution || null,
+      duration: requestedParams.duration ?? null,
+      requestParams: attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
+      engineTaskId: normalized.taskId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: `${arkApiBaseUrl}${requestSpec.path}`,
+      status: normalized.taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
+      errorMessage: normalized.taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
+    }).catch(() => {})
+
+    applyUpstreamTraceHeaders(res, traceMetadata)
+    res.json({
+      success: true,
+      data: normalized,
+      ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+      ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Ark generate failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
+app.post('/api/ark/query', async (req, res) => {
+  const missing = getMissingArkConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  try {
+    const requestSpec = buildArkQueryRequest(req.body || {})
+    const upstream = await requestArk(requestSpec)
+    const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
+    const normalized = normalizeYunwuQueryResponse(upstream.payload, requestSpec, traceMetadata)
+
+    if (normalized.status === 'succeeded' || normalized.status === 'failed') {
+      const taskId = normalized.taskId || req.body?.taskId
+      if (taskId) {
+        updateUsageLogByTaskId(taskId, {
+          status: normalized.status,
+          videoUrl: normalized.status === 'succeeded' ? (normalized.videoUrl || null) : null,
+          errorMessage: normalized.status === 'failed' ? (normalized.message || null) : null,
+          completedAt: new Date().toISOString(),
+          upstreamRequestId: traceMetadata?.requestId || null,
+          upstreamTraceId: traceMetadata?.traceId || null,
+        }).catch(() => {})
+      }
+    }
+
+    applyUpstreamTraceHeaders(res, traceMetadata)
+    res.json({
+      success: true,
+      data: normalized,
+      ...(traceMetadata.requestId ? { requestId: traceMetadata.requestId } : {}),
+      ...(traceMetadata.traceId ? { traceId: traceMetadata.traceId } : {}),
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Ark query failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
 app.post('/api/wan/generate', async (req, res) => {
   const missing = getMissingDashScopeConfig()
   if (missing.length > 0) {
@@ -900,7 +1037,7 @@ app.post('/api/dreamina/generate', async (req, res) => {
         : normalized.taskId
         ? null
         : UNTRACKED_USAGE_STATUS_MESSAGE,
-      videoUrl: terminalStatus === 'succeeded' ? (normalized.videoUrl || null) : null,
+      videoUrl: terminalStatus === 'succeeded' ? (normalized.videoUrl || normalized.imageUrl || null) : null,
       completedAt: terminalStatus ? new Date().toISOString() : null,
     }).catch(() => {})
 
@@ -927,7 +1064,7 @@ app.post('/api/dreamina/query', async (req, res) => {
     if (terminalStatus) {
       updateUsageLogByTaskId(requestSpec.taskId, {
         status: terminalStatus,
-        videoUrl: terminalStatus === 'succeeded' ? (normalized.videoUrl || null) : null,
+        videoUrl: terminalStatus === 'succeeded' ? (normalized.videoUrl || normalized.imageUrl || null) : null,
         errorMessage: terminalStatus === 'failed' || terminalStatus === 'cancelled'
           ? (normalized.message || null)
           : null,
@@ -956,16 +1093,17 @@ app.get('/api/dreamina/media/:taskId', async (req, res) => {
     })
     const cliResult = await executeDreaminaCli(requestSpec.args)
     const normalized = normalizeDreaminaQueryResponse(cliResult.payload, requestSpec)
+    const mediaUrl = normalized.videoUrl || normalized.imageUrl || null
 
     if (normalized.status !== 'succeeded' && normalized.status !== 'completed') {
-      throw createHttpError(409, 'Dreamina task is not ready for playback yet.')
+      throw createHttpError(409, 'Dreamina task is not ready for preview yet.')
     }
 
-    if (!normalized.videoUrl) {
-      throw createHttpError(404, 'Dreamina task succeeded, but no playable video URL was returned.')
+    if (!mediaUrl) {
+      throw createHttpError(404, 'Dreamina task succeeded, but no media URL was returned.')
     }
 
-    const upstream = await fetch(normalized.videoUrl, {
+    const upstream = await fetch(mediaUrl, {
       headers: buildDreaminaMediaProxyHeaders(req),
       redirect: 'follow',
     })
@@ -2418,6 +2556,7 @@ if (!isProduction) {
   const vite = await createViteServer({
     root: __dirname,
     server: {
+      allowedHosts: true,
       middlewareMode: true,
       hmr: {
         server: httpServer,
@@ -2509,6 +2648,12 @@ const YUNWU_VIDEO_PROVIDERS = {
 function getMissingYunwuConfig() {
   return [
     !process.env.YUNWU_API_KEY && 'YUNWU_API_KEY',
+  ].filter(Boolean)
+}
+
+function getMissingArkConfig() {
+  return [
+    !process.env.ARK_API_KEY && 'ARK_API_KEY',
   ].filter(Boolean)
 }
 
@@ -2801,105 +2946,209 @@ function normalizeDashScopeWanSeed(value) {
   return seed
 }
 
-async function buildDreaminaGenerateRequest(input) {
-  const providerId = normalizeDreaminaProviderId(input.providerId)
+function buildArkGenerateRequest(input) {
+  const providerId = normalizeArkProviderId(input.providerId)
   const prompt = String(input.prompt || '').trim()
   if (!prompt) {
     throw createHttpError(400, 'Prompt is required.')
   }
 
-  const mode = normalizeDreaminaMode(input.mode)
+  const mode = normalizeArkMode(input.mode, providerId)
   const params = input.params && typeof input.params === 'object' ? input.params : {}
-  const references = await resolveDreaminaLocalReferences(input.references)
-  const model = normalizeDreaminaModelVersion(params.model)
-  const duration = normalizeDreaminaDuration(params.duration)
-  const resolution = normalizeDreaminaResolution(params.resolution)
-  const aspectRatio = normalizeDreaminaRatio(params.aspectRatio)
-  const args = []
-  let command = ''
+  const references = normalizeYunwuReferences(input.references)
+  return buildArkSeedanceRequest(providerId, mode, prompt, params, references)
+}
 
+function buildArkQueryRequest(input) {
+  const providerId = normalizeArkProviderId(input.providerId)
+  const taskId = normalizeTaskIdValue(input.taskId)
+  if (!taskId) {
+    throw createHttpError(400, 'taskId is required.')
+  }
+
+  return {
+    providerId,
+    taskId,
+    method: 'GET',
+    path: `/api/v3/contents/generations/tasks/${encodeURIComponent(taskId)}`,
+  }
+}
+
+function normalizeArkProviderId(value) {
+  const providerId = String(value || 'seedance3').trim()
+  if (!ARK_ALLOWED_PROVIDER_IDS.has(providerId)) {
+    throw createHttpError(400, `Unsupported Ark provider: ${providerId || 'unknown'}`)
+  }
+  return providerId
+}
+
+function normalizeArkMode(value, providerId = 'seedance3') {
+  const mode = String(value || 't2v').trim().toLowerCase()
+  const allowedModes = ARK_PROVIDER_MODES[providerId] || ARK_PROVIDER_MODES.seedance3
+  if (!allowedModes.includes(mode)) {
+    throw createHttpError(400, `Unsupported Ark mode: ${mode || 'unknown'}`)
+  }
+  return mode
+}
+
+function normalizeArkModel(value, fallbackModel = 'doubao-seedance-2-0-fast-260128') {
+  const model = String(value || fallbackModel).trim()
+  if (!model) {
+    throw createHttpError(400, 'Ark model is required.')
+  }
+  return model
+}
+
+function normalizeArkDuration(value, fallbackValue = 5) {
+  const duration = Math.trunc(coercePositiveNumber(value, fallbackValue))
+  if (!Number.isFinite(duration) || duration < 4 || duration > 15) {
+    throw createHttpError(400, 'Ark Seedance duration must be an integer between 4 and 15 seconds.')
+  }
+  return duration
+}
+
+function normalizeArkVideoRatio(value, fallbackValue = '16:9') {
+  const ratio = String(value || fallbackValue).trim()
+  if (!ARK_VIDEO_RATIOS.has(ratio)) {
+    throw createHttpError(400, `Unsupported Ark ratio: ${ratio || 'unknown'}`)
+  }
+  return ratio
+}
+
+function normalizeArkVideoResolution(value, fallbackValue = '720p') {
+  const resolution = String(value || fallbackValue).trim().toLowerCase()
+  if (!ARK_VIDEO_RESOLUTIONS.has(resolution)) {
+    throw createHttpError(400, `Unsupported Ark resolution: ${resolution || 'unknown'}`)
+  }
+  return resolution
+}
+
+function buildArkSeedanceRequest(providerId, mode, prompt, params, references) {
   switch (mode) {
     case 't2v':
-      ensureDreaminaReferenceCount(references.images.length === 0 && references.videos.length === 0 && references.audios.length === 0, '文生视频不支持参考素材，请先清空已上传的图片、视频和音频。')
-      command = 'text2video'
-      args.push(
-        command,
-        '--prompt', prompt,
-        '--duration', String(duration),
-        '--ratio', aspectRatio,
-        '--video_resolution', resolution,
-        '--model_version', model,
-        '--poll', '0',
-      )
+      if (references.images.length > 0 || references.videos.length > 0 || references.audios.length > 0) {
+        throw createHttpError(400, 'Ark 文生视频模式不支持参考图片、视频或音频。')
+      }
       break
     case 'i2v':
-      ensureDreaminaReferenceCount(references.images.length === 1, '图生视频需要且仅支持 1 张参考图片。')
-      ensureDreaminaReferenceCount(references.videos.length === 0 && references.audios.length === 0, '图生视频不支持额外的参考视频或音频。')
-      command = 'image2video'
-      args.push(
-        command,
-        '--image', references.images[0],
-        '--prompt', prompt,
-        '--duration', String(duration),
-        '--video_resolution', resolution,
-        '--model_version', model,
-        '--poll', '0',
-      )
+      if (references.images.length !== 1) {
+        throw createHttpError(400, 'Ark 图生视频模式需要且仅支持 1 张参考图片。')
+      }
+      if (references.videos.length > 0 || references.audios.length > 0) {
+        throw createHttpError(400, 'Ark 图生视频模式不支持额外的参考视频或音频。')
+      }
       break
     case 'flf':
-      ensureDreaminaReferenceCount(references.images.length === 2, '首尾帧模式需要按顺序上传 2 张参考图片。')
-      ensureDreaminaReferenceCount(references.videos.length === 0 && references.audios.length === 0, '首尾帧模式不支持额外的参考视频或音频。')
-      command = 'frames2video'
-      args.push(
-        command,
-        '--first', references.images[0],
-        '--last', references.images[1],
-        '--prompt', prompt,
-        '--duration', String(duration),
-        '--video_resolution', resolution,
-        '--model_version', model,
-        '--poll', '0',
-      )
+      if (references.images.length !== 2) {
+        throw createHttpError(400, 'Ark 首尾帧模式需要按顺序上传 2 张参考图片。')
+      }
+      if (references.videos.length > 0 || references.audios.length > 0) {
+        throw createHttpError(400, 'Ark 首尾帧模式不支持额外的参考视频或音频。')
+      }
       break
     case 'fusion':
-      ensureDreaminaReferenceCount(references.images.length <= 9, '融合参考模式最多支持 9 张参考图片。')
-      ensureDreaminaReferenceCount(references.videos.length <= 3, '融合参考模式最多支持 3 段参考视频。')
-      ensureDreaminaReferenceCount(references.audios.length <= 3, '融合参考模式最多支持 3 段参考音频。')
-      ensureDreaminaReferenceCount(references.images.length + references.videos.length > 0, '融合参考模式至少需要 1 张参考图片或 1 段参考视频。')
-      command = 'multimodal2video'
-      args.push(
-        command,
-        '--prompt', prompt,
-        '--duration', String(duration),
-        '--ratio', aspectRatio,
-        '--video_resolution', resolution,
-        '--model_version', model,
-        '--poll', '0',
-      )
-      for (const imagePath of references.images) {
-        args.push('--image', imagePath)
+      if (references.images.length > 9) {
+        throw createHttpError(400, 'Ark 融合参考模式最多支持 9 张参考图片。')
       }
-      for (const videoPath of references.videos) {
-        args.push('--video', videoPath)
+      if (references.videos.length > 3) {
+        throw createHttpError(400, 'Ark 融合参考模式最多支持 3 段参考视频。')
       }
-      for (const audioPath of references.audios) {
-        args.push('--audio', audioPath)
+      if (references.audios.length > 3) {
+        throw createHttpError(400, 'Ark 融合参考模式最多支持 3 段参考音频。')
+      }
+      if (references.images.length + references.videos.length + references.audios.length === 0) {
+        throw createHttpError(400, 'Ark 融合参考模式至少需要 1 个参考素材。')
+      }
+      if (references.images.length + references.videos.length === 0) {
+        throw createHttpError(400, 'Ark 融合参考模式下音频不能单独使用，至少还需要 1 张图片或 1 段视频。')
       }
       break
     default:
-      throw createHttpError(400, `Unsupported Dreamina mode: ${mode}`)
+      throw createHttpError(400, `Unsupported Ark mode: ${mode || 'unknown'}`)
   }
 
   return {
     providerId,
     mode,
-    command,
-    args,
-    model,
-    duration,
-    resolution,
-    aspectRatio: mode === 't2v' || mode === 'fusion' ? aspectRatio : null,
+    method: 'POST',
+    path: '/api/v3/contents/generations/tasks',
+    body: {
+      model: normalizeArkModel(params.model),
+      content: buildArkSeedanceContent(prompt, mode, references),
+      ratio: normalizeArkVideoRatio(params.aspectRatio),
+      resolution: normalizeArkVideoResolution(params.resolution),
+      duration: normalizeArkDuration(params.duration),
+      generate_audio: Boolean(params.generateAudio),
+      watermark: Boolean(params.watermark),
+    },
   }
+}
+
+function buildArkSeedanceContent(prompt, mode, references) {
+  const content = [{
+    type: 'text',
+    text: prompt,
+  }]
+
+  if (mode === 'i2v' && references.images[0]) {
+    content.push({
+      type: 'image_url',
+      image_url: { url: references.images[0] },
+      role: 'first_frame',
+    })
+  }
+
+  if (mode === 'flf') {
+    if (references.images[0]) {
+      content.push({
+        type: 'image_url',
+        image_url: { url: references.images[0] },
+        role: 'first_frame',
+      })
+    }
+    if (references.images[1]) {
+      content.push({
+        type: 'image_url',
+        image_url: { url: references.images[1] },
+        role: 'last_frame',
+      })
+    }
+  }
+
+  if (mode === 'fusion') {
+    for (const imageUrl of references.images) {
+      content.push({
+        type: 'image_url',
+        image_url: { url: imageUrl },
+        role: 'reference_image',
+      })
+    }
+    for (const videoUrl of references.videos) {
+      content.push({
+        type: 'video_url',
+        video_url: { url: videoUrl },
+        role: 'reference_video',
+      })
+    }
+    for (const audioUrl of references.audios) {
+      content.push({
+        type: 'audio_url',
+        audio_url: { url: audioUrl },
+        role: 'reference_audio',
+      })
+    }
+  }
+
+  return content
+}
+
+async function buildDreaminaGenerateRequest(input) {
+  const providerId = normalizeDreaminaProviderId(input.providerId)
+  const prompt = String(input.prompt || '').trim()
+  const mode = normalizeDreaminaMode(input.mode, providerId)
+  const params = input.params && typeof input.params === 'object' ? input.params : {}
+  const references = await resolveDreaminaLocalReferences(input.references)
+  return buildDreaminaSeedanceRequest(providerId, mode, prompt, params, references)
 }
 
 function buildDreaminaQueryRequest(input) {
@@ -2927,44 +3176,442 @@ function normalizeDreaminaProviderId(value) {
   return providerId
 }
 
-function normalizeDreaminaMode(value) {
-  const mode = String(value || 't2v').trim().toLowerCase()
-  if (!['t2v', 'i2v', 'flf', 'fusion'].includes(mode)) {
+function normalizeDreaminaMode(value, providerId = 'seedance2') {
+  const mode = String(value || 'generate').trim().toLowerCase()
+  const allowedModes = DREAMINA_PROVIDER_MODES[providerId] || DREAMINA_PROVIDER_MODES.seedance2
+  if (!allowedModes.includes(mode)) {
     throw createHttpError(400, `Unsupported Dreamina mode: ${mode || 'unknown'}`)
   }
   return mode
 }
 
-function normalizeDreaminaModelVersion(value) {
-  const model = String(value || 'seedance2.0_vip').trim()
-  if (!DREAMINA_ALLOWED_MODELS.has(model)) {
+function resolveDreaminaSeedanceMode(mode, references) {
+  if (mode !== 'generate') {
+    return mode
+  }
+
+  const imageCount = Array.isArray(references?.images) ? references.images.length : 0
+  if (imageCount >= 2) return 'flf'
+  if (imageCount === 1) return 'i2v'
+  return 't2v'
+}
+
+function normalizeDreaminaModelVersion(value, allowedModels, fallbackModel) {
+  const model = String(value || fallbackModel || '').trim()
+  if (!allowedModels.has(model)) {
     throw createHttpError(400, `Unsupported Dreamina model_version: ${model || 'unknown'}`)
   }
   return model
 }
 
-function normalizeDreaminaDuration(value) {
-  const duration = Math.trunc(coercePositiveNumber(value, 5))
-  if (!Number.isFinite(duration) || duration < 4 || duration > 15) {
-    throw createHttpError(400, 'Dreamina duration must be an integer between 4 and 15 seconds.')
+function normalizeDreaminaIntegerDuration(value, minimum, maximum, fallbackValue, label = 'Dreamina duration') {
+  const duration = Math.trunc(coercePositiveNumber(value, fallbackValue))
+  if (!Number.isFinite(duration) || duration < minimum || duration > maximum) {
+    throw createHttpError(400, `${label} must be an integer between ${minimum} and ${maximum}.`)
   }
   return duration
 }
 
-function normalizeDreaminaResolution(value) {
-  const resolution = String(value || '720p').trim().toLowerCase()
-  if (!DREAMINA_ALLOWED_RESOLUTIONS.has(resolution)) {
+function normalizeDreaminaFloatDuration(value, minimum, maximum, fallbackValue, label) {
+  const duration = Number.parseFloat(String(value ?? fallbackValue).trim())
+  if (!Number.isFinite(duration) || duration < minimum || duration > maximum) {
+    throw createHttpError(400, `${label} must be between ${minimum} and ${maximum} seconds.`)
+  }
+  return duration
+}
+
+function normalizeDreaminaVideoResolution(value, allowedResolutions, fallbackResolution = '720p') {
+  const resolution = String(value || fallbackResolution).trim().toLowerCase()
+  if (!allowedResolutions.has(resolution) || !DREAMINA_VIDEO_RESOLUTIONS.has(resolution)) {
     throw createHttpError(400, `Unsupported Dreamina video_resolution: ${resolution || 'unknown'}`)
   }
   return resolution
 }
 
-function normalizeDreaminaRatio(value) {
+function normalizeDreaminaVideoRatio(value) {
   const ratio = String(value || '9:16').trim()
-  if (!DREAMINA_ALLOWED_RATIOS.has(ratio)) {
+  if (!DREAMINA_VIDEO_RATIOS.has(ratio)) {
     throw createHttpError(400, `Unsupported Dreamina ratio: ${ratio || 'unknown'}`)
   }
   return ratio
+}
+
+function normalizeDreaminaImageRatio(value) {
+  const ratio = String(value || '1:1').trim()
+  if (!DREAMINA_IMAGE_RATIOS.has(ratio)) {
+    throw createHttpError(400, `Unsupported Dreamina ratio: ${ratio || 'unknown'}`)
+  }
+  return ratio
+}
+
+function normalizeDreaminaResolutionType(value, allowedResolutionTypes, fallbackResolutionType) {
+  const resolutionType = String(value || fallbackResolutionType).trim().toLowerCase()
+  if (!allowedResolutionTypes.has(resolutionType) || !DREAMINA_IMAGE_RESOLUTION_TYPES.has(resolutionType)) {
+    throw createHttpError(400, `Unsupported Dreamina resolution_type: ${resolutionType || 'unknown'}`)
+  }
+  return resolutionType
+}
+
+function buildDreaminaSeedanceRequest(providerId, mode, prompt, params, references) {
+  const operationalMode = resolveDreaminaSeedanceMode(mode, references)
+
+  if (mode === 'generate') {
+    ensureDreaminaReferenceCount(references.images.length <= 2, '视频生成模式最多支持 2 张参考图片。')
+    ensureDreaminaReferenceCount(
+      references.videos.length === 0 && references.audios.length === 0,
+      '视频生成模式仅支持 0-2 张图片，不支持参考视频或音频。',
+    )
+  }
+
+  if (operationalMode === 'multiframe') {
+    return buildDreaminaStoryRequest(providerId, operationalMode, prompt, params, references)
+  }
+
+  const args = []
+  let command = ''
+  let model = null
+  let duration = null
+  let resolution = null
+  let aspectRatio = null
+
+  switch (operationalMode) {
+    case 't2v':
+      ensureDreaminaPrompt(prompt, '文生视频')
+      ensureDreaminaReferenceCount(references.images.length === 0 && references.videos.length === 0 && references.audios.length === 0, '文生视频不支持参考素材，请先清空已上传的图片、视频和音频。')
+      command = 'text2video'
+      model = normalizeDreaminaModelVersion(params.model, DREAMINA_TEXT2VIDEO_MODELS, 'seedance2.0fast')
+      duration = normalizeDreaminaIntegerDuration(params.duration, 4, 15, 5, 'Dreamina text2video duration')
+      resolution = normalizeDreaminaVideoResolution(params.resolution, new Set(['720p']), '720p')
+      aspectRatio = normalizeDreaminaVideoRatio(params.aspectRatio)
+      args.push(
+        command,
+        '--prompt', prompt,
+        '--duration', String(duration),
+        '--ratio', aspectRatio,
+        '--video_resolution', resolution,
+        '--model_version', model,
+        '--poll', '0',
+      )
+      break
+    case 'i2v':
+      ensureDreaminaPrompt(prompt, '图生视频')
+      ensureDreaminaReferenceCount(references.images.length === 1, '图生视频需要且仅支持 1 张参考图片。')
+      ensureDreaminaReferenceCount(references.videos.length === 0 && references.audios.length === 0, '图生视频不支持额外的参考视频或音频。')
+      command = 'image2video'
+      model = normalizeDreaminaModelVersion(params.model, DREAMINA_IMAGE2VIDEO_MODELS, 'seedance2.0fast')
+      duration = normalizeDreaminaImage2VideoDuration(params.duration, model)
+      resolution = normalizeDreaminaImage2VideoResolution(params.resolution, model)
+      args.push(
+        command,
+        '--image', references.images[0],
+        '--prompt', prompt,
+        '--duration', String(duration),
+        '--video_resolution', resolution,
+        '--model_version', model,
+        '--poll', '0',
+      )
+      break
+    case 'flf':
+      ensureDreaminaPrompt(prompt, '首尾帧')
+      ensureDreaminaReferenceCount(references.images.length === 2, '首尾帧模式需要按顺序上传 2 张参考图片。')
+      ensureDreaminaReferenceCount(references.videos.length === 0 && references.audios.length === 0, '首尾帧模式不支持额外的参考视频或音频。')
+      command = 'frames2video'
+      model = normalizeDreaminaModelVersion(params.model, DREAMINA_FRAMES2VIDEO_MODELS, 'seedance2.0fast')
+      duration = normalizeDreaminaFramesDuration(params.duration, model)
+      resolution = normalizeDreaminaFramesResolution(params.resolution, model)
+      args.push(
+        command,
+        '--first', references.images[0],
+        '--last', references.images[1],
+        '--prompt', prompt,
+        '--duration', String(duration),
+        '--video_resolution', resolution,
+        '--model_version', model,
+        '--poll', '0',
+      )
+      break
+    case 'fusion':
+      ensureDreaminaReferenceCount(references.images.length <= 9, '融合参考模式最多支持 9 张参考图片。')
+      ensureDreaminaReferenceCount(references.videos.length <= 3, '融合参考模式最多支持 3 段参考视频。')
+      ensureDreaminaReferenceCount(references.audios.length <= 3, '融合参考模式最多支持 3 段参考音频。')
+      ensureDreaminaReferenceCount(references.images.length + references.videos.length > 0, '融合参考模式至少需要 1 张参考图片或 1 段参考视频。')
+      command = 'multimodal2video'
+      model = normalizeDreaminaModelVersion(params.model, DREAMINA_MULTIMODAL_MODELS, 'seedance2.0fast')
+      duration = normalizeDreaminaIntegerDuration(params.duration, 4, 15, 5, 'Dreamina multimodal2video duration')
+      resolution = normalizeDreaminaVideoResolution(params.resolution, new Set(['720p']), '720p')
+      aspectRatio = normalizeDreaminaVideoRatio(params.aspectRatio)
+      args.push(
+        command,
+        '--prompt', prompt,
+        '--duration', String(duration),
+        '--ratio', aspectRatio,
+        '--video_resolution', resolution,
+        '--model_version', model,
+        '--poll', '0',
+      )
+      for (const imagePath of references.images) {
+        args.push('--image', imagePath)
+      }
+      for (const videoPath of references.videos) {
+        args.push('--video', videoPath)
+      }
+      for (const audioPath of references.audios) {
+        args.push('--audio', audioPath)
+      }
+      break
+    default:
+      throw createHttpError(400, `Unsupported Dreamina mode: ${operationalMode}`)
+  }
+
+  return {
+    providerId,
+    mode,
+    command,
+    args,
+    model,
+    duration,
+    resolution,
+    aspectRatio,
+  }
+}
+
+function buildDreaminaStoryRequest(providerId, mode, prompt, params, references) {
+  ensureDreaminaReferenceCount(mode === 'multiframe', `Unsupported Dreamina multiframe mode: ${mode}`)
+  ensureDreaminaReferenceCount(references.images.length >= 2, '动作模仿模式至少需要 2 张参考图片。')
+  ensureDreaminaReferenceCount(references.images.length <= 20, '动作模仿模式最多支持 20 张参考图片。')
+  ensureDreaminaReferenceCount(references.videos.length === 0 && references.audios.length === 0, '动作模仿模式仅支持上传图片。')
+
+  const args = [
+    'multiframe2video',
+    '--images', references.images.join(','),
+    '--poll', '0',
+  ]
+  const transitionCount = references.images.length - 1
+
+  if (references.images.length === 2) {
+    ensureDreaminaPrompt(prompt, '动作模仿（两张图）')
+    const duration = normalizeDreaminaFloatDuration(
+      params.singleTransitionDuration,
+      2,
+      8,
+      3,
+      'Dreamina multiframe2video duration',
+    )
+    args.push('--prompt', prompt, '--duration', formatDreaminaFloat(duration))
+
+    return {
+      providerId,
+      mode,
+      command: 'multiframe2video',
+      args,
+      duration,
+      aspectRatio: null,
+      resolution: null,
+      model: null,
+    }
+  }
+
+  const transitionPrompts = normalizeDreaminaPromptList(params.transitionPrompts, transitionCount, '动作模仿过渡提示词')
+  const transitionDurations = normalizeDreaminaTransitionDurationList(params.transitionDurations, transitionCount)
+  const totalDuration = transitionDurations.reduce((sum, item) => sum + item, 0)
+  if (totalDuration < 2) {
+    throw createHttpError(400, '动作模仿总时长至少需要 2 秒。')
+  }
+
+  for (let index = 0; index < transitionCount; index += 1) {
+    args.push('--transition-prompt', transitionPrompts[index])
+    args.push('--transition-duration', formatDreaminaFloat(transitionDurations[index]))
+  }
+
+  return {
+    providerId,
+    mode,
+    command: 'multiframe2video',
+    args,
+    duration: totalDuration,
+    aspectRatio: null,
+    resolution: null,
+    model: null,
+  }
+}
+
+function buildDreaminaImageRequest(providerId, mode, prompt, params, references) {
+  ensureDreaminaPrompt(prompt, mode === 't2v' ? '文生图' : '图生图')
+
+  const aspectRatio = normalizeDreaminaImageRatio(params.aspectRatio)
+  let command = ''
+  let model = null
+  let resolution = null
+  const args = []
+
+  switch (mode) {
+    case 't2v':
+      ensureDreaminaReferenceCount(references.images.length === 0 && references.videos.length === 0 && references.audios.length === 0, 'Dreamina 文生图不支持参考素材。')
+      command = 'text2image'
+      model = normalizeDreaminaModelVersion(params.model, DREAMINA_TEXT2IMAGE_MODELS, '5.0')
+      resolution = normalizeDreaminaText2ImageResolution(params.resolution, model)
+      args.push(
+        command,
+        '--prompt', prompt,
+        '--ratio', aspectRatio,
+        '--resolution_type', resolution,
+        '--model_version', model,
+        '--poll', '0',
+      )
+      break
+    case 'i2v':
+      ensureDreaminaReferenceCount(references.images.length > 0, 'Dreamina 图生图至少需要 1 张参考图片。')
+      ensureDreaminaReferenceCount(references.videos.length === 0 && references.audios.length === 0, 'Dreamina 图生图仅支持上传图片。')
+      command = 'image2image'
+      model = normalizeDreaminaModelVersion(params.model, DREAMINA_IMAGE2IMAGE_MODELS, '5.0')
+      resolution = normalizeDreaminaImage2ImageResolution(params.resolution, model)
+      args.push(
+        command,
+        '--images', references.images.join(','),
+        '--prompt', prompt,
+        '--ratio', aspectRatio,
+        '--resolution_type', resolution,
+        '--model_version', model,
+        '--poll', '0',
+      )
+      break
+    default:
+      throw createHttpError(400, `Unsupported Dreamina image mode: ${mode}`)
+  }
+
+  return {
+    providerId,
+    mode,
+    command,
+    args,
+    model,
+    resolution,
+    aspectRatio,
+    duration: null,
+  }
+}
+
+function buildDreaminaUpscaleRequest(providerId, mode, params, references) {
+  ensureDreaminaReferenceCount(mode === 'upscale', `Unsupported Dreamina upscale mode: ${mode}`)
+  ensureDreaminaReferenceCount(references.images.length === 1, 'Dreamina 超清放大需要且仅支持 1 张参考图片。')
+  ensureDreaminaReferenceCount(references.videos.length === 0 && references.audios.length === 0, 'Dreamina 超清放大仅支持上传图片。')
+
+  const resolution = normalizeDreaminaResolutionType(params.resolution, new Set(['2k', '4k', '8k']), '2k')
+  return {
+    providerId,
+    mode,
+    command: 'image_upscale',
+    args: [
+      'image_upscale',
+      '--image', references.images[0],
+      '--resolution_type', resolution,
+      '--poll', '0',
+    ],
+    model: null,
+    resolution,
+    aspectRatio: null,
+    duration: null,
+  }
+}
+
+function ensureDreaminaPrompt(prompt, label) {
+  if (!prompt) {
+    throw createHttpError(400, `${label}提示词不能为空。`)
+  }
+}
+
+function normalizeDreaminaImage2VideoDuration(value, model) {
+  if (isDreaminaModelInSet(model, ['3.0', '3.0fast', '3.0pro', '3.0_fast', '3.0_pro'])) {
+    return normalizeDreaminaIntegerDuration(value, 3, 10, 5, 'Dreamina image2video duration')
+  }
+
+  if (isDreaminaModelInSet(model, ['3.5pro', '3.5_pro'])) {
+    return normalizeDreaminaIntegerDuration(value, 4, 12, 5, 'Dreamina image2video duration')
+  }
+
+  return normalizeDreaminaIntegerDuration(value, 4, 15, 5, 'Dreamina image2video duration')
+}
+
+function normalizeDreaminaImage2VideoResolution(value, model) {
+  if (isDreaminaModelInSet(model, ['3.0pro', '3.0_pro'])) {
+    return normalizeDreaminaVideoResolution(value, new Set(['1080p']), '1080p')
+  }
+
+  if (isDreaminaModelInSet(model, ['3.0', '3.0fast', '3.5pro', '3.0_fast', '3.5_pro'])) {
+    return normalizeDreaminaVideoResolution(value, new Set(['720p', '1080p']), '720p')
+  }
+
+  return normalizeDreaminaVideoResolution(value, new Set(['720p']), '720p')
+}
+
+function normalizeDreaminaFramesDuration(value, model) {
+  if (model === '3.0') {
+    return normalizeDreaminaIntegerDuration(value, 3, 10, 5, 'Dreamina frames2video duration')
+  }
+
+  if (model === '3.5pro') {
+    return normalizeDreaminaIntegerDuration(value, 4, 12, 5, 'Dreamina frames2video duration')
+  }
+
+  return normalizeDreaminaIntegerDuration(value, 4, 15, 5, 'Dreamina frames2video duration')
+}
+
+function normalizeDreaminaFramesResolution(value, model) {
+  if (model === '3.0' || model === '3.5pro') {
+    return normalizeDreaminaVideoResolution(value, new Set(['720p', '1080p']), '720p')
+  }
+
+  return normalizeDreaminaVideoResolution(value, new Set(['720p']), '720p')
+}
+
+function normalizeDreaminaText2ImageResolution(value, model) {
+  if (model === '3.0' || model === '3.1') {
+    return normalizeDreaminaResolutionType(value, new Set(['1k', '2k']), '2k')
+  }
+
+  return normalizeDreaminaResolutionType(value, new Set(['2k', '4k']), '2k')
+}
+
+function normalizeDreaminaImage2ImageResolution(value, model) {
+  if (model === '3.0' || model === '3.1') {
+    throw createHttpError(400, `Unsupported Dreamina model_version: ${model}`)
+  }
+
+  return normalizeDreaminaResolutionType(value, new Set(['2k', '4k']), '2k')
+}
+
+function normalizeDreaminaPromptList(value, expectedCount, label) {
+  const promptList = Array.isArray(value)
+    ? value.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+
+  if (promptList.length !== expectedCount) {
+    throw createHttpError(400, `${label}数量必须与过渡段数一致。`)
+  }
+
+  return promptList
+}
+
+function normalizeDreaminaTransitionDurationList(value, expectedCount) {
+  if (!Array.isArray(value) || value.length !== expectedCount) {
+    throw createHttpError(400, 'Dreamina 多帧叙事每一段都需要填写时长。')
+  }
+
+  return value.map((item) => normalizeDreaminaFloatDuration(
+    item,
+    0.5,
+    8,
+    3,
+    'Dreamina multiframe2video transition duration',
+  ))
+}
+
+function formatDreaminaFloat(value) {
+  return Number.isInteger(value) ? String(value) : String(value)
+}
+
+function isDreaminaModelInSet(model, candidates) {
+  return candidates.includes(model)
 }
 
 function ensureDreaminaReferenceCount(condition, message) {
@@ -3264,6 +3911,7 @@ function normalizeDreaminaGenerateResponse(payload, requestSpec) {
     ),
     message: extractDreaminaMessage(payload?.data, payload?.rawText),
     videoUrl: extractDreaminaVideoUrl(payload?.data, payload?.rawText),
+    imageUrl: extractDreaminaImageUrl(payload?.data, payload?.rawText),
   }
 }
 
@@ -3276,6 +3924,7 @@ function normalizeDreaminaQueryResponse(payload, requestSpec) {
     ),
     message: extractDreaminaMessage(payload?.data, payload?.rawText),
     videoUrl: extractDreaminaVideoUrl(payload?.data, payload?.rawText),
+    imageUrl: extractDreaminaImageUrl(payload?.data, payload?.rawText),
   }
 }
 
@@ -3397,6 +4046,20 @@ function extractDreaminaVideoUrl(payload, rawText = '') {
 
   const matched = rawText.match(/https?:\/\/\S+/i)
   if (matched && isLikelyRemoteVideoUrl(matched[0])) {
+    return matched[0]
+  }
+
+  return null
+}
+
+function extractDreaminaImageUrl(payload, rawText = '') {
+  const payloadUrl = extractAggregationImageUrl(payload)
+  if (payloadUrl) {
+    return payloadUrl
+  }
+
+  const matched = rawText.match(/https?:\/\/\S+/i)
+  if (matched && isLikelyRemoteImageUrl(matched[0])) {
     return matched[0]
   }
 
@@ -3731,6 +4394,59 @@ async function requestYunwu(spec) {
   return { response, payload }
 }
 
+async function requestArk(spec) {
+  const url = appendQueryParams(`${arkApiBaseUrl}${spec.path}`, spec.query)
+  const headers = {
+    Accept: 'application/json',
+    Authorization: `Bearer ${process.env.ARK_API_KEY}`,
+    ...(spec.headers || {}),
+  }
+
+  if (spec.body !== undefined) {
+    headers['Content-Type'] = 'application/json'
+  }
+
+  const options = {
+    method: spec.method || 'POST',
+    headers,
+    body: spec.body !== undefined ? JSON.stringify(spec.body) : undefined,
+  }
+
+  let response
+  let lastError = null
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await fetch(url, options)
+      break
+    } catch (error) {
+      lastError = error
+      if (attempt === 2) {
+        throw createHttpError(502, error?.message || 'Ark upstream fetch failed.')
+      }
+      await sleep(800 * (attempt + 1))
+    }
+  }
+
+  if (!response) {
+    throw createHttpError(502, lastError?.message || 'Ark upstream fetch failed.')
+  }
+
+  const contentType = response.headers.get('content-type') || ''
+  const payload = isJsonContentType(contentType)
+    ? await response.json()
+    : await response.text()
+  const traceMetadata = extractUpstreamTraceMetadata(response, payload)
+
+  if (!response.ok) {
+    const message = typeof payload === 'string'
+      ? payload
+      : payload?.message || payload?.msg || payload?.error?.message || JSON.stringify(payload)
+    throw createHttpError(response.status, message || 'Ark upstream request failed.', traceMetadata)
+  }
+
+  return { response, payload }
+}
+
 async function requestDashScope(spec) {
   const url = appendQueryParams(`${dashScopeBaseUrl}${spec.path}`, spec.query)
   const headers = {
@@ -3806,7 +4522,7 @@ function normalizeYunwuGenerateResponse(payload, requestSpec, traceMetadata) {
 
 function normalizeYunwuQueryResponse(payload, requestSpec, traceMetadata) {
   return {
-    taskId: extractYunwuTaskId(payload) || readFirstString(requestSpec.query?.id, requestSpec.query?.task_id),
+    taskId: extractYunwuTaskId(payload) || readFirstString(requestSpec.taskId, requestSpec.query?.id, requestSpec.query?.task_id),
     status: normalizeYunwuStatus(extractYunwuStatus(payload)),
     message: extractYunwuMessage(payload),
     videoUrl: extractYunwuVideoUrl(payload),
@@ -4088,6 +4804,9 @@ function extractYunwuVideoUrl(payload) {
       'video_url',
       'url',
       'content',
+      'content.video_url',
+      'content.videoUrl',
+      'content.url',
       'data.videoUrl',
       'data.video_url',
       'data.url',
@@ -5421,7 +6140,7 @@ async function markUntrackedUsageLogsForReview() {
     [
       USAGE_STATUS_NEEDS_REVIEW,
       UNTRACKED_USAGE_STATUS_MESSAGE,
-      ['aggregation', 'veo_fast', 'yunwu', 'wan'],
+      ['aggregation', 'veo_fast', 'yunwu', 'ark', 'wan'],
       UNTRACKED_USAGE_REVIEW_DELAY_MINUTES,
     ],
   )

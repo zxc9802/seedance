@@ -34,8 +34,35 @@ function isDreaminaProvider(id) {
   return PROVIDERS[id]?.backendKind === 'dreamina'
 }
 
+function resolveSeedance2OperationalMode(mode, references = createEmptyVideoReferences()) {
+  if (mode !== 'generate') {
+    return mode
+  }
+
+  const imageCount = Array.isArray(references?.images) ? references.images.length : 0
+  if (imageCount >= 2) return 'flf'
+  if (imageCount === 1) return 'i2v'
+  return 't2v'
+}
+
+function resolveOperationalMode(provider, mode, references = createEmptyVideoReferences()) {
+  if (provider === 'seedance2') {
+    return resolveSeedance2OperationalMode(mode, references)
+  }
+
+  return mode
+}
+
+function usesLocalReferenceAssetsConfig(config) {
+  return config?.referenceInputMode === 'local'
+}
+
 function isYunwuProvider(id) {
   return PROVIDERS[id]?.backendKind === 'yunwu'
+}
+
+function isArkProvider(id) {
+  return PROVIDERS[id]?.backendKind === 'ark'
 }
 
 function isAggregationImageProvider(id) {
@@ -275,14 +302,16 @@ function App() {
     const finalPrompt = selectedTemplate
       ? (prompt.trim() ? `${selectedTemplate.prompt}. Additional requirements: ${prompt.trim()}` : selectedTemplate.prompt)
       : prompt.trim()
-    const usageMediaSummary = isVideoProvider(provider)
+    const usesLocalReferenceAssets = usesLocalReferenceAssetsConfig(config)
+    const usageMediaSummary = (isVideoProvider(provider) || usesLocalReferenceAssets)
       ? buildUsageMediaSummaryFromVideoReferences(videoReferences)
       : buildUsageMediaSummaryFromImageMedia(referenceMedia)
+    const promptRequired = isPromptRequiredForGeneration(config, generationMode, videoReferences)
 
-    if (!finalPrompt) return
+    if (!finalPrompt && promptRequired) return
 
     if (isVideoProvider(provider)) {
-        const validationError = validateVideoReferenceInput(provider, params, generationMode, videoReferences)
+      const validationError = validateVideoReferenceInput(provider, params, generationMode, videoReferences, finalPrompt)
       if (validationError) {
         updateProviderState(provider, { error: validationError })
         return
@@ -512,9 +541,13 @@ function App() {
             throw new Error(task.message || '视频生成失败')
           }
         }
-      } else if (isDreaminaProvider(provider)) {
+      } else if (isArkProvider(provider)) {
         const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
-        const requestInfo = buildDreaminaVideoRequest(provider, params, finalPrompt, generationMode, uploadedReferences)
+        if (uploadedReferences.requiresPublicBaseUrl) {
+          throw new Error('参考素材已经上传到本地后端，但当前后端地址不是公网可访问地址。请部署后端到公网，或设置 PUBLIC_BASE_URL 指向公网域名/隧道。')
+        }
+
+        const requestInfo = buildArkVideoRequest(provider, params, finalPrompt, generationMode, uploadedReferences)
         updateProviderState(provider, { progress: 18 })
 
         const response = await fetch(requestInfo.url, {
@@ -529,11 +562,76 @@ function App() {
 
         const data = await response.json()
         if (!data?.success) {
-          throw new Error(data?.message || '视频生成请求失败')
+          throw new Error(data?.message || 'Ark 视频生成请求失败')
         }
 
         const initialTask = normalizeYunwuTask(data?.data)
         if (initialTask.videoUrl) {
+          window.clearInterval(progressTimer)
+          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl, provider)
+          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          return
+        }
+
+        if (!initialTask.taskId) {
+          throw new Error('接口已响应，但没有返回 taskId')
+        }
+
+        let finished = false
+        while (!finished) {
+          await sleep(5000)
+          const pollRequest = buildArkQueryRequest(provider, initialTask.taskId)
+          const pollResponse = await fetch(pollRequest.url, {
+            method: 'POST',
+            headers: pollRequest.headers,
+            body: JSON.stringify(pollRequest.body),
+          })
+
+          if (!pollResponse.ok) {
+            throw new Error(await formatHttpError(pollResponse))
+          }
+
+          const pollData = await pollResponse.json()
+          if (!pollData?.success) {
+            throw new Error(pollData?.message || '查询任务状态失败')
+          }
+
+          const task = normalizeYunwuTask(pollData.data)
+          const state = normalizeTaskState(task.status)
+          if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
+            finished = true
+            window.clearInterval(progressTimer)
+            const previewUrl = await resolvePreviewUrl(task.videoUrl, provider)
+            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            return
+          }
+
+          if (state === 'failed') {
+            throw new Error(task.message || 'Ark 视频生成失败')
+          }
+        }
+      } else if (isDreaminaProvider(provider)) {
+        const uploadedReferences = await uploadVideoReferences(provider, params, videoReferences)
+        const requestInfo = buildDreaminaRequest(provider, params, finalPrompt, generationMode, uploadedReferences)
+        updateProviderState(provider, { progress: 18 })
+
+        const response = await fetch(requestInfo.url, {
+          method: 'POST',
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
+          body: JSON.stringify(requestInfo.body),
+        })
+
+        if (!response.ok) {
+          throw new Error(await formatHttpError(response))
+        }
+
+        const data = await response.json()
+        if (!data?.success) {
+          throw new Error(data?.message || 'Dreamina 请求失败')
+        }
+
+        const initialTask = normalizeDreaminaTask(data?.data)
+        if (initialTask.videoUrl || initialTask.imageUrl) {
           window.clearInterval(progressTimer)
           const previewUrl = await resolveDreaminaPlaybackUrl(initialTask, provider)
           updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
@@ -563,9 +661,9 @@ function App() {
             throw new Error(pollData?.message || '查询任务状态失败')
           }
 
-          const task = normalizeYunwuTask(pollData.data)
+          const task = normalizeDreaminaTask(pollData.data)
           const state = normalizeTaskState(task.status)
-          if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
+          if ((state === 'succeeded' || state === 'completed') && (task.videoUrl || task.imageUrl)) {
             finished = true
             window.clearInterval(progressTimer)
             const previewUrl = await resolveDreaminaPlaybackUrl(task, provider)
@@ -574,7 +672,7 @@ function App() {
           }
 
           if (state === 'failed' || state === 'cancelled') {
-            throw new Error(task.message || '视频生成失败')
+            throw new Error(task.message || 'Dreamina 生成失败')
           }
         }
       } else if (isVideoProvider(provider)) {
@@ -810,6 +908,8 @@ function App() {
             onPromptChange={setPrompt}
             mode={generationMode}
             onModeChange={handleModeChange}
+            params={params}
+            onParamUpdate={updateParam}
             mediaList={referenceMedia}
             onMediaListChange={setReferenceMedia}
             videoReferences={videoReferences}
@@ -1078,39 +1178,68 @@ function normalizeParamsForProvider(provider, params, mode = 't2v', references =
   const sourceParams = params && typeof params === 'object' ? params : {}
   let nextParams = sourceParams
   let changed = nextParams !== params
-  const availableModels = resolveAvailableModels(config, mode)
+  const operationalMode = resolveOperationalMode(provider, mode, references)
+  const isSeedanceStoryboardMode = provider === 'seedance2' && operationalMode === 'multiframe'
 
-  if (availableModels.length > 0 && !availableModels.includes(nextParams.model)) {
-    nextParams = {
-      ...nextParams,
-      model: availableModels[0],
+  if (!isSeedanceStoryboardMode) {
+    const availableModels = resolveAvailableModels(config, operationalMode)
+
+    if (availableModels.length > 0 && !availableModels.includes(nextParams.model)) {
+      const fallbackModel = availableModels.includes(config.defaults?.model)
+        ? config.defaults.model
+        : availableModels[0]
+      nextParams = {
+        ...nextParams,
+        model: fallbackModel,
+      }
+      changed = true
     }
-    changed = true
+
+    const resolutionOptions = config.resolutions?.[nextParams.model] || config.resolutions?.default || []
+
+    if (resolutionOptions.length > 0 && !resolutionOptions.includes(nextParams.resolution)) {
+      nextParams = {
+        ...nextParams,
+        resolution: resolutionOptions[0],
+      }
+      changed = true
+    }
+
+    const durationOptions = resolveDurationOptions(config, nextParams, operationalMode, references)
+    const normalizedDuration = resolveSupportedDurationValue(
+      nextParams.duration,
+      durationOptions,
+      config.defaults?.duration,
+    )
+
+    if (durationOptions.length > 0 && nextParams.duration !== normalizedDuration) {
+      nextParams = {
+        ...nextParams,
+        duration: normalizedDuration,
+      }
+      changed = true
+    }
   }
 
-  const resolutionOptions = config.resolutions?.[nextParams.model] || config.resolutions?.default || []
+  if (provider === 'seedance2' && operationalMode === 'multiframe') {
+    const segmentCount = Math.max(0, (references?.images?.length || 0) - 1)
+    const transitionPrompts = normalizeStoryFieldArray(nextParams.transitionPrompts, segmentCount, '')
+    const transitionDurations = normalizeStoryFieldArray(nextParams.transitionDurations, segmentCount, '3')
+    const singleTransitionDuration = normalizeStoryDurationValue(nextParams.singleTransitionDuration, '3')
 
-  if (resolutionOptions.length > 0 && !resolutionOptions.includes(nextParams.resolution)) {
-    nextParams = {
-      ...nextParams,
-      resolution: resolutionOptions[0],
+    if (
+      !areStringArraysEqual(nextParams.transitionPrompts, transitionPrompts)
+      || !areStringArraysEqual(nextParams.transitionDurations, transitionDurations)
+      || nextParams.singleTransitionDuration !== singleTransitionDuration
+    ) {
+      nextParams = {
+        ...nextParams,
+        transitionPrompts,
+        transitionDurations,
+        singleTransitionDuration,
+      }
+      changed = true
     }
-    changed = true
-  }
-
-  const durationOptions = resolveDurationOptions(config, nextParams, mode, references)
-  const normalizedDuration = resolveSupportedDurationValue(
-    nextParams.duration,
-    durationOptions,
-    config.defaults?.duration,
-  )
-
-  if (durationOptions.length > 0 && nextParams.duration !== normalizedDuration) {
-    nextParams = {
-      ...nextParams,
-      duration: normalizedDuration,
-    }
-    changed = true
   }
 
   return changed ? nextParams : sourceParams
@@ -1119,25 +1248,42 @@ function normalizeParamsForProvider(provider, params, mode = 't2v', references =
 function getConfigForGenerationMode(config, mode, params, references = createEmptyVideoReferences()) {
   if (!config) return config
 
-  const availableModels = resolveAvailableModels(config, mode)
-  const durationOptions = resolveDurationOptions(config, params, mode, references)
-  const modelsUnchanged = availableModels.length === config.models.length
-  const durationsUnchanged = durationOptions.length === config.durations.length
-    && durationOptions.every((duration, index) => duration === config.durations[index])
+  const operationalMode = resolveOperationalMode(config.id, mode, references)
+  const availableModels = resolveAvailableModels(config, operationalMode)
+  const durationOptions = resolveDurationOptions(config, params, operationalMode, references)
+  const allowedSet = new Set(availableModels)
+  const filteredModels = config.models.filter((model) => allowedSet.has(model.value))
+  const hidesAspectRatio = config.id === 'seedance2' && (operationalMode === 'i2v' || operationalMode === 'flf' || operationalMode === 'multiframe')
+  const hidesResolution = config.id === 'seedance2' && operationalMode === 'multiframe'
+  const hidesDuration = config.id === 'seedance2' && operationalMode === 'multiframe'
+  const hidesModel = config.id === 'seedance2' && operationalMode === 'multiframe'
+  const nextModels = hidesModel ? [] : filteredModels
+  const nextAspectRatios = hidesAspectRatio ? [] : config.aspectRatios
+  const nextResolutions = hidesResolution ? { default: [] } : config.resolutions
+  const nextDurations = hidesDuration ? [] : durationOptions
+  const modelsUnchanged = nextModels.length === config.models.length
+    && nextModels.every((model, index) => model.value === config.models[index]?.value)
+  const aspectRatiosUnchanged = nextAspectRatios.length === config.aspectRatios.length
+    && nextAspectRatios.every((ratio, index) => ratio === config.aspectRatios[index])
+  const durationsUnchanged = nextDurations.length === config.durations.length
+    && nextDurations.every((duration, index) => duration === config.durations[index])
+  const resolutionsUnchanged = nextResolutions === config.resolutions
 
-  if (modelsUnchanged && durationsUnchanged) {
+  if (modelsUnchanged && aspectRatiosUnchanged && durationsUnchanged && resolutionsUnchanged) {
     return config
   }
 
-  const allowedSet = new Set(availableModels)
   return {
     ...config,
-    models: config.models.filter((model) => allowedSet.has(model.value)),
-    durations: durationOptions,
+    models: nextModels,
+    aspectRatios: nextAspectRatios,
+    resolutions: nextResolutions,
+    durations: nextDurations,
   }
 }
 
 function resolveDurationOptions(config, params, mode, references = createEmptyVideoReferences()) {
+  const operationalMode = resolveOperationalMode(config?.id, mode, references)
   const baseOptions = Array.isArray(config?.durations)
     ? config.durations.filter((duration) => Number.isFinite(Number(duration)))
     : []
@@ -1153,11 +1299,11 @@ function resolveDurationOptions(config, params, mode, references = createEmptyVi
   let nextOptions = [...baseOptions]
 
   nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modelDefaults?.[model])
-  nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modes?.[mode])
-  nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modelModes?.[model]?.[mode])
+  nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modes?.[operationalMode])
+  nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modelModes?.[model]?.[operationalMode])
 
   if (hasVideoReference) {
-    nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modesWithVideoReference?.[mode])
+    nextOptions = applyDurationRuleOptions(nextOptions, durationRules.modesWithVideoReference?.[operationalMode])
   }
 
   return nextOptions
@@ -1214,6 +1360,40 @@ function pickClosestDurationOption(durationOptions, targetDuration) {
   }
 
   return closest
+}
+
+function normalizeStoryFieldArray(value, targetLength, fallbackValue) {
+  const source = Array.isArray(value) ? value : []
+  const result = []
+
+  for (let index = 0; index < targetLength; index += 1) {
+    const item = source[index]
+    result.push(typeof item === 'string' && item.trim() ? item : fallbackValue)
+  }
+
+  return result
+}
+
+function areStringArraysEqual(left, right) {
+  const leftArray = Array.isArray(left) ? left : []
+  const rightArray = Array.isArray(right) ? right : []
+  if (leftArray.length !== rightArray.length) {
+    return false
+  }
+
+  return leftArray.every((value, index) => value === rightArray[index])
+}
+
+function normalizeStoryDurationValue(value, fallbackValue = '3') {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value)
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim()
+  }
+
+  return fallbackValue
 }
 
 function resolveAvailableModels(config, mode) {
@@ -1389,7 +1569,27 @@ function buildYunwuVideoRequest(provider, params, prompt, mode, references) {
   }
 }
 
-function buildDreaminaVideoRequest(provider, params, prompt, mode, references) {
+function buildArkVideoRequest(provider, params, prompt, mode, references) {
+  return {
+    url: '/api/ark/generate',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      prompt,
+      mode,
+      params: {
+        ...params,
+        generateAudio: Boolean(params.generateAudio),
+        watermark: Boolean(params.watermark),
+      },
+      references,
+    },
+  }
+}
+
+function buildDreaminaRequest(provider, params, prompt, mode, references) {
   return {
     url: '/api/dreamina/generate',
     headers: {
@@ -1454,6 +1654,19 @@ function buildYunwuQueryRequest(provider, taskId, queryContext) {
   }
 }
 
+function buildArkQueryRequest(provider, taskId) {
+  return {
+    url: '/api/ark/query',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      taskId,
+    },
+  }
+}
+
 function buildWanQueryRequest(provider, taskId) {
   return {
     url: '/api/wan/query',
@@ -1474,6 +1687,16 @@ function normalizeYunwuTask(data) {
     message: data?.message || null,
     videoUrl: data?.videoUrl || null,
     queryContext: data?.queryContext || null,
+  }
+}
+
+function normalizeDreaminaTask(data) {
+  return {
+    taskId: extractTaskId(data),
+    status: data?.status || null,
+    message: data?.message || null,
+    videoUrl: data?.videoUrl || null,
+    imageUrl: data?.imageUrl || null,
   }
 }
 
@@ -2147,36 +2370,63 @@ function resolveVideoLimit(config, mode, references) {
   return baseLimit
 }
 
-function validateVideoReferenceInput(provider, params, mode, references) {
+function isPromptRequiredForGeneration(config, mode, references = createEmptyVideoReferences()) {
+  if (!config) {
+    return true
+  }
+
+  if (config.id === 'seedance2' && mode === 'multiframe') {
+    return (references?.images?.length || 0) <= 2
+  }
+
+  return !Array.isArray(config.promptOptionalModes) || !config.promptOptionalModes.includes(mode)
+}
+
+function validateVideoReferenceInput(provider, params, mode, references, prompt = '') {
+  const operationalMode = resolveOperationalMode(provider, mode, references)
   const wanValidationError = validateWanReferenceInput(provider, mode, references)
   const klingValidationError = validateKlingReferenceInput(provider, params, mode, references)
+  const dreaminaStoryValidationError = validateDreaminaStoryInput(provider, params, mode, references, prompt)
   const durationValidationError = validateRequestedDuration(provider, params, mode, references)
-  if (mode !== 't2v') {
-  if (mode === 'i2v' && references.images.length !== 1) return '图生视频模式需要 1 张参考图片'
-  if (mode === 'flf' && references.images.length !== 2) return '首尾帧模式需要 2 张图片，第一张是首帧，第二张是尾帧'
+  if (provider === 'seedance2' && mode === 'generate') {
+    if (references.images.length > 2) {
+      return '视频生成模式最多支持 2 张参考图片'
+    }
 
-  if (mode === 'ref') {
-    if (references.images.length === 0) return '参考图片模式至少需要 1 张参考图片'
-  }
-
-  if (mode === 'omni') {
-    if (references.images.length + references.videos.length === 0) {
-      return 'Omni 模式至少需要 1 张参考图片或 1 段参考视频'
+    if (references.videos.length > 0 || references.audios.length > 0) {
+      return '视频生成模式仅支持 0-2 张图片，不支持参考视频或音频'
     }
   }
 
-  if (mode === 'fusion') {
-    const imageCount = references.images.length
-    const videoCount = references.videos.length
-    const audioCount = references.audios.length
-    if (imageCount + videoCount + audioCount === 0) {
-      return '融合参考模式至少需要 1 个参考素材'
+  if (operationalMode !== 't2v') {
+    if (operationalMode === 'i2v' && references.images.length !== 1) return '图生视频模式需要 1 张参考图片'
+    if (operationalMode === 'flf' && references.images.length !== 2) return '首尾帧模式需要 2 张图片，第一张是首帧，第二张是尾帧'
+
+    if (operationalMode === 'ref') {
+      if (references.images.length === 0) return '参考图片模式至少需要 1 张参考图片'
     }
-    if (imageCount + videoCount === 0) {
-      return '音频不能单独作为参考，至少还需要 1 张图片或 1 段视频'
+
+    if (operationalMode === 'omni') {
+      if (references.images.length + references.videos.length === 0) {
+        return 'Omni 模式至少需要 1 张参考图片或 1 段参考视频'
+      }
+    }
+
+    if (operationalMode === 'fusion') {
+      const imageCount = references.images.length
+      const videoCount = references.videos.length
+      const audioCount = references.audios.length
+      if (imageCount + videoCount + audioCount === 0) {
+        return '融合参考模式至少需要 1 个参考素材'
+      }
+      if (imageCount + videoCount === 0) {
+        return '音频不能单独作为参考，至少还需要 1 张图片或 1 段视频'
+      }
     }
   }
 
+  if (dreaminaStoryValidationError) {
+    return dreaminaStoryValidationError
   }
 
   if (wanValidationError) {
@@ -2190,13 +2440,101 @@ function validateVideoReferenceInput(provider, params, mode, references) {
   return durationValidationError
 }
 
+function validateDreaminaStoryInput(provider, params, mode, references, prompt) {
+  if (provider !== 'seedance2' || mode !== 'multiframe') {
+    return null
+  }
+
+  const imageCount = references.images.length
+  if (imageCount < 2) {
+    return '动作模仿模式至少需要 2 张参考图片'
+  }
+  if (imageCount > 20) {
+    return '动作模仿模式最多支持 20 张参考图片'
+  }
+  if (references.videos.length > 0 || references.audios.length > 0) {
+    return '动作模仿模式仅支持上传图片，不支持视频或音频'
+  }
+
+  if (imageCount === 2) {
+    if (!String(prompt || '').trim()) {
+      return '两张图的动作模仿模式需要填写主提示词'
+    }
+
+    return validateDreaminaSingleTransitionDuration(params?.singleTransitionDuration)
+  }
+
+  return validateDreaminaTransitionSegments(imageCount, params?.transitionPrompts, params?.transitionDurations)
+}
+function validateDreaminaSingleTransitionDuration(value) {
+  const duration = parseDreaminaDurationFloat(value)
+  if (duration === null) {
+    return '请填写两张图模式的过渡时长'
+  }
+  if (duration < 2 || duration > 8) {
+    return '两张图模式的过渡时长需介于 2 到 8 秒之间'
+  }
+  return null
+}
+
+function validateDreaminaTransitionSegments(imageCount, prompts, durations) {
+  const segmentCount = imageCount - 1
+  const promptList = Array.isArray(prompts) ? prompts.slice(0, segmentCount) : []
+  const durationList = Array.isArray(durations) ? durations.slice(0, segmentCount) : []
+
+  if (promptList.length !== segmentCount || promptList.some((item) => typeof item !== 'string' || !item.trim())) {
+    return `请为 ${segmentCount} 段过渡分别填写提示词`
+  }
+
+  if (durationList.length !== segmentCount) {
+    return `请为 ${segmentCount} 段过渡分别填写时长`
+  }
+
+  let totalDuration = 0
+  for (let index = 0; index < segmentCount; index += 1) {
+    const duration = parseDreaminaDurationFloat(durationList[index])
+    if (duration === null) {
+      return `第 ${index + 1} 段过渡时长格式不正确`
+    }
+    if (duration < 0.5 || duration > 8) {
+      return `第 ${index + 1} 段过渡时长需介于 0.5 到 8 秒之间`
+    }
+    totalDuration += duration
+  }
+
+  if (totalDuration < 2) {
+    return '多帧叙事总时长至少需要 2 秒'
+  }
+
+  return null
+}
+
+function parseDreaminaDurationFloat(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value
+  }
+
+  if (typeof value !== 'string') {
+    return null
+  }
+
+  const normalized = value.trim()
+  if (!normalized) {
+    return null
+  }
+
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 function validateRequestedDuration(provider, params, mode, references) {
   const config = PROVIDERS[provider]
   if (!config || !isVideoProvider(provider)) {
     return null
   }
 
-  const durationOptions = resolveDurationOptions(config, params, mode, references)
+  const operationalMode = resolveOperationalMode(provider, mode, references)
+  const durationOptions = resolveDurationOptions(config, params, operationalMode, references)
   if (durationOptions.length === 0) {
     return null
   }
@@ -2206,7 +2544,7 @@ function validateRequestedDuration(provider, params, mode, references) {
     return null
   }
 
-  if (provider === 'kling' && mode === 'fusion' && references.videos.length > 0) {
+  if (provider === 'kling' && operationalMode === 'fusion' && references.videos.length > 0) {
     return `Kling with a reference video only supports ${durationOptions.join('/')} second durations`
   }
 
