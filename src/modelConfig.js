@@ -222,7 +222,7 @@ const BASE_PROVIDERS = {
     videoMimeTypeLabel: 'MP4、MOV',
     videoMaxSizeMb: 200,
     audioMaxSizeMb: 20,
-    referenceHelpText: 'Ark Seedance 2.0 支持文生视频、首帧、首尾帧和多模态融合参考。注意：官方当前不支持直接上传含真人人脸的参考图/视频；如果要用人物素材，需要使用火山方舟虚拟人像库中复制出的官方 asset:// URI。融合参考最多 9 张图片、3 段视频、3 段音频；音频不能单独使用，至少还要搭配 1 张图片或 1 段视频。',
+    referenceHelpText: 'Ark Seedance 2.0 支持文生视频、首帧、首尾帧和多模态融合参考。融合参考最多 9 张图片、3 段视频、3 段音频；音频不能单独使用，至少还要搭配 1 张图片或 1 段视频。',
     backendKind: 'ark',
   },
   ve31p: {
