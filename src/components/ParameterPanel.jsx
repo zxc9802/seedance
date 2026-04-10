@@ -9,6 +9,7 @@ import './ParameterPanel.css'
 
 export default function ParameterPanel({ provider, config, params, onUpdate }) {
   const [advOpen, setAdvOpen] = useState(false)
+  const resolutionOptions = config.resolutions[params.model] || config.resolutions.default
 
   return (
     <div className="param-panel">
@@ -30,26 +31,28 @@ export default function ParameterPanel({ provider, config, params, onUpdate }) {
         </Section>
       )}
 
-      <Section icon={<Maximize size={13} />} title="宽高比">
-        <div className="chip-row">
-          {config.aspectRatios.map((ratio) => (
-            <Chip
-              key={ratio}
-              active={params.aspectRatio === ratio}
-              onClick={() => onUpdate('aspectRatio', ratio)}
-              color={config.color}
-            >
-              <AspectIcon ratio={ratio} />
-              {ratio}
-            </Chip>
-          ))}
-        </div>
-      </Section>
+      {config.aspectRatios.length > 0 && (
+        <Section icon={<Maximize size={13} />} title="宽高比">
+          <div className="chip-row">
+            {config.aspectRatios.map((ratio) => (
+              <Chip
+                key={ratio}
+                active={params.aspectRatio === ratio}
+                onClick={() => onUpdate('aspectRatio', ratio)}
+                color={config.color}
+              >
+                <AspectIcon ratio={ratio} />
+                {ratio}
+              </Chip>
+            ))}
+          </div>
+        </Section>
+      )}
 
-      {config.resolutions.default.length > 0 && (
+      {!config.hideResolutionSelector && resolutionOptions.length > 0 && (
         <Section icon={<Monitor size={13} />} title="分辨率">
           <div className="chip-row">
-            {(config.resolutions[params.model] || config.resolutions.default).map((resolution) => (
+            {resolutionOptions.map((resolution) => (
               <Chip
                 key={resolution}
                 active={params.resolution === resolution}

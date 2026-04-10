@@ -80,6 +80,7 @@ const OPENAI_IMAGE_DIMENSIONS = Object.freeze({
   '3:4': { width: 768, height: 1024 },
   '4:3': { width: 1024, height: 768 },
 })
+const TASK_POLL_INTERVAL_MS = 2000
 
 function App() {
   const [provider, setProvider] = useState('veo')
@@ -356,7 +357,7 @@ function App() {
 
         let finished = false
         while (!finished) {
-          await sleep(5000)
+          await sleep(TASK_POLL_INTERVAL_MS)
           const pollResponse = await fetch(`/api/veo-fast/status/${encodeURIComponent(taskId)}`)
 
           if (!pollResponse.ok) {
@@ -435,7 +436,7 @@ function App() {
 
         let finished = false
         while (!finished) {
-          await sleep(5000)
+          await sleep(TASK_POLL_INTERVAL_MS)
           const pollRequest = buildWanQueryRequest(provider, initialTask.taskId)
           const pollResponse = await fetch(pollRequest.url, {
             method: 'POST',
@@ -510,7 +511,7 @@ function App() {
 
         let finished = false
         while (!finished) {
-          await sleep(5000)
+          await sleep(TASK_POLL_INTERVAL_MS)
           const pollRequest = buildYunwuQueryRequest(provider, initialTask.taskId, initialTask.queryContext)
           const pollResponse = await fetch(pollRequest.url, {
             method: 'POST',
@@ -579,7 +580,7 @@ function App() {
 
         let finished = false
         while (!finished) {
-          await sleep(5000)
+          await sleep(TASK_POLL_INTERVAL_MS)
           const pollRequest = buildArkQueryRequest(provider, initialTask.taskId)
           const pollResponse = await fetch(pollRequest.url, {
             method: 'POST',
@@ -644,7 +645,7 @@ function App() {
 
         let finished = false
         while (!finished) {
-          await sleep(5000)
+          await sleep(TASK_POLL_INTERVAL_MS)
           const pollRequest = buildDreaminaQueryRequest(provider, initialTask.taskId)
           const pollResponse = await fetch(pollRequest.url, {
             method: 'POST',
@@ -723,7 +724,7 @@ function App() {
 
         let finished = false
         while (!finished) {
-          await sleep(5000)
+          await sleep(TASK_POLL_INTERVAL_MS)
           const pollResponse = await fetch('/api/veo/queryResult', {
             method: 'POST',
             headers: requestInfo.headers,
@@ -805,7 +806,7 @@ function App() {
           const pollDeadline = Date.now() + pollTimeoutMs
           let lastTask = initialTask
           while (Date.now() < pollDeadline) {
-            await sleep(5000)
+            await sleep(TASK_POLL_INTERVAL_MS)
             const pollRequest = buildAggregationImageQueryRequest(initialTask.taskId)
             const pollResponse = await fetch(pollRequest.url, {
               method: 'POST',
@@ -2755,10 +2756,11 @@ async function resolveArkPlaybackUrl(task, providerId) {
   return resolvePreviewUrl(task?.videoUrl || null, providerId)
 }
 
-async function resolvePreviewUrl(url, providerId = null) {
+async function resolvePreviewUrl(url, providerId = null, options = {}) {
+  const { eagerFetch = false } = options
   if (!url || url.startsWith('blob:') || url.startsWith('data:')) return url
 
-  if (isDreaminaProvider(providerId)) {
+  if (isDreaminaProvider(providerId) || !eagerFetch) {
     return url
   }
 
@@ -3031,7 +3033,7 @@ async function resolveVeoFastPreviewUrl(taskId, attempts = 6) {
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      return await resolvePreviewUrl(contentUrl)
+      return await resolvePreviewUrl(contentUrl, null, { eagerFetch: true })
     } catch (error) {
       lastError = error
       const message = error?.message || ''
@@ -3045,7 +3047,7 @@ async function resolveVeoFastPreviewUrl(taskId, attempts = 6) {
         throw error
       }
 
-      await sleep(5000)
+      await sleep(TASK_POLL_INTERVAL_MS)
     }
   }
 
