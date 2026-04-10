@@ -921,6 +921,7 @@ app.get('/api/ark/media/:taskId', async (req, res) => {
     }
 
     const mediaResponse = await fetch(mediaUrl, {
+      headers: buildMediaProxyHeaders(req),
       redirect: 'follow',
     })
 
@@ -1151,7 +1152,7 @@ app.get('/api/dreamina/media/:taskId', async (req, res) => {
     }
 
     const upstream = await fetch(mediaUrl, {
-      headers: buildDreaminaMediaProxyHeaders(req),
+      headers: buildMediaProxyHeaders(req),
       redirect: 'follow',
     })
 
@@ -3982,7 +3983,7 @@ function normalizeDreaminaTerminalUsageStatus(status) {
   return null
 }
 
-function buildDreaminaMediaProxyHeaders(req) {
+function buildMediaProxyHeaders(req) {
   const headers = {}
   const range = req.get('range')
   if (range) {
