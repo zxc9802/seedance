@@ -186,6 +186,7 @@ const BASE_PROVIDERS = {
       referenceVideo: true,
       referenceAudio: true,
       watermark: true,
+      materialLibrary: true,
     },
     generationModes: [
       { value: 't2v', label: '文生视频' },
@@ -214,7 +215,14 @@ const BASE_PROVIDERS = {
       sampleCount: 1,
       generateAudio: true,
       watermark: false,
+      imageMaterialType: 'role',
     },
+    materialTypes: [
+      { value: 'role', label: '人物审核' },
+      { value: 'object', label: '物品审核' },
+      { value: 'scene', label: '场景审核' },
+      { value: 'direct', label: '直接原图' },
+    ],
     imageMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
     imageMimeTypeLabel: 'JPG/JPEG、PNG、WebP',
     imageMaxSizeMb: 20,
@@ -222,7 +230,7 @@ const BASE_PROVIDERS = {
     videoMimeTypeLabel: 'MP4、MOV',
     videoMaxSizeMb: 200,
     audioMaxSizeMb: 20,
-    referenceHelpText: 'Ark Seedance 2.0 支持文生视频、首帧、首尾帧和多模态融合参考。融合参考最多 9 张图片、3 段视频、3 段音频；音频不能单独使用，至少还要搭配 1 张图片或 1 段视频。',
+    referenceHelpText: 'Ark Seedance 2.0 支持文生视频、首帧、首尾帧和多模态融合参考。人物参考图建议切到“人物审核”，前端会先走素材审核并把返回的 asset:// 资产标识提交给模型；融合参考最多 9 张图片、3 段视频、3 段音频；音频不能单独使用，至少还要搭配 1 张图片或 1 段视频。',
     backendKind: 'ark',
   },
   ve31p: {
