@@ -868,8 +868,9 @@ function renderCostImportResult(result, mode) {
   const summaryItems = [
     ['总行数', summary.totalRows ?? 0],
     ['有效行数', summary.effectiveRows ?? 0],
-    ['有效金额', summary.validRows ?? 0],
+    ['有效金额', formatMoney(summary.validAmount ?? 0)],
     ['可写入', summary.writableRows ?? 0],
+    ['可写入金额', formatMoney(summary.writableAmount ?? 0)],
     ['未匹配', summary.unmatchedRows ?? 0],
     ['冲突', summary.conflictRows ?? 0],
     ['无效', summary.invalidRows ?? 0],

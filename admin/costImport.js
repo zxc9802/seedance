@@ -148,6 +148,14 @@ function buildDetailRow(base, overrides = {}) {
   }
 }
 
+function sumRowAmounts(rows) {
+  return Number(
+    rows
+      .reduce((total, row) => total + (Number(row?.amount) || 0), 0)
+      .toFixed(4)
+  )
+}
+
 export function parseCostImportFile(file) {
   if (!file?.buffer?.length) {
     throw new Error('未读取到上传文件内容')
@@ -323,6 +331,8 @@ export async function buildCostImportPreview({ db, channel, parsedFile }) {
   const unmatchedRows = allDetailRows.filter((row) => row.status === 'unmatched')
   const conflictRows = allDetailRows.filter((row) => row.status === 'conflict')
   const writableRows = allDetailRows.filter((row) => row.status === 'writable')
+  const validAmount = sumRowAmounts(validCandidateRows)
+  const writableAmount = sumRowAmounts(writableRows)
 
   return {
     fileName: parsedFile.fileName,
@@ -335,10 +345,12 @@ export async function buildCostImportPreview({ db, channel, parsedFile }) {
       totalRows: parsedFile.dataRows.length,
       effectiveRows: effectiveRows.length,
       validRows: validCandidateRows.length,
+      validAmount,
       invalidRows: invalidRows.length,
       unmatchedRows: unmatchedRows.length,
       conflictRows: conflictRows.length,
       writableRows: writableRows.length,
+      writableAmount,
       overwriteRows: writableRows.filter((row) => row.existingCost !== null).length,
       duplicateRowCount: duplicateRows.length,
       duplicateTaskIdCount: duplicateInfo.duplicateTaskIds.length,
