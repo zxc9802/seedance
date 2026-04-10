@@ -499,7 +499,7 @@ function App() {
         const initialTask = normalizeYunwuTask(data?.data)
         if (initialTask.videoUrl) {
           window.clearInterval(progressTimer)
-          const previewUrl = await resolvePreviewUrl(initialTask.videoUrl, provider)
+          const previewUrl = await resolveArkPlaybackUrl(initialTask, provider)
           updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
           return
         }
@@ -532,7 +532,7 @@ function App() {
           if ((state === 'succeeded' || state === 'completed') && task.videoUrl) {
             finished = true
             window.clearInterval(progressTimer)
-            const previewUrl = await resolvePreviewUrl(task.videoUrl, provider)
+            const previewUrl = await resolveArkPlaybackUrl(task, provider)
             updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
             return
           }
