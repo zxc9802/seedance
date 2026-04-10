@@ -2685,7 +2685,7 @@ async function uploadReferenceBatch(assets, options = {}) {
 }
 
 function resolveImageMaterialType(provider, params) {
-  if (provider !== 'veo' && provider !== 'seedance3') return 'direct'
+  if (provider !== 'veo') return 'direct'
   return params.imageMaterialType || 'role'
 }
 
