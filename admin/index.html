@@ -135,6 +135,14 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .cell-wrap {
+    display: block;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    line-height: 1.35;
+  }
 </style>
 </head>
 <body>
@@ -1195,7 +1203,7 @@ async function loadTasks(page) {
         <td>${fmtTime(task.created_at)}</td>
         <td>${renderClipCell(task.user_nickname || task.user_email || task.user_id || '-', 140)}</td>
         <td>${renderClipCell(formatChannel(task.channel), 96)}</td>
-        <td>${renderClipCell(task.model || '-', 220)}</td>
+        <td>${renderWrapCell(task.model || '-', 320)}</td>
         <td>${renderClipCell(task.generation_mode || '-', 96)}</td>
         <td>${esc(formatDurationLabel(task.duration))}</td>
         <td>${renderClipCell(task.promptText || '-', 360)}</td>
@@ -1359,7 +1367,7 @@ async function showUserDetail(userId, userName) {
       <tr>
         <td>${fmtTime(task.created_at)}</td>
         <td>${renderClipCell(formatChannel(task.channel), 96)}</td>
-        <td>${renderClipCell(task.model || '-', 220)}</td>
+        <td>${renderWrapCell(task.model || '-', 320)}</td>
         <td>${renderClipCell(task.generation_mode || '-', 96)}</td>
         <td>${esc(formatDurationLabel(task.duration))}</td>
         <td>${renderClipCell(task.promptText || '-', 360)}</td>
@@ -1457,6 +1465,12 @@ function renderClipCell(value, maxWidth = 240, fallback = '-') {
   const text = String(value ?? '').trim()
   if (!text) return esc(fallback)
   return `<span class="cell-clip" style="max-width:${maxWidth}px" title="${escAttr(text)}">${esc(text)}</span>`
+}
+
+function renderWrapCell(value, maxWidth = 320, fallback = '-') {
+  const text = String(value ?? '').trim()
+  if (!text) return esc(fallback)
+  return `<span class="cell-wrap" style="max-width:${maxWidth}px" title="${escAttr(text)}">${esc(text)}</span>`
 }
 
 if (TOKEN) {
