@@ -709,7 +709,7 @@ function App() {
 
         if (initialTask.status === 2 && initialTask.message) {
           window.clearInterval(progressTimer)
-          const previewUrl = await resolvePreviewUrl(initialTask.message)
+          const previewUrl = await resolveAggregationPlaybackUrl(initialTask, provider)
           updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
           return
         }
@@ -747,7 +747,7 @@ function App() {
           if (task.status === 2) {
             finished = true
             window.clearInterval(progressTimer)
-            const previewUrl = await resolvePreviewUrl(task.message)
+            const previewUrl = await resolveAggregationPlaybackUrl(task, provider)
             updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
             return
           }
@@ -2741,6 +2741,19 @@ async function resolveDreaminaPlaybackUrl(task, providerId) {
   }
 
   return resolvePreviewUrl(task?.videoUrl || null, providerId)
+}
+
+async function resolveAggregationPlaybackUrl(task, providerId) {
+  if (providerId !== 'veo') {
+    return resolvePreviewUrl(task?.videoUrl || task?.message || null, providerId)
+  }
+
+  const taskId = typeof task?.taskId === 'string' ? task.taskId.trim() : ''
+  if (taskId) {
+    return `/api/veo/media/${encodeURIComponent(taskId)}`
+  }
+
+  return resolvePreviewUrl(task?.videoUrl || task?.message || null, providerId)
 }
 
 async function resolveArkPlaybackUrl(task, providerId) {

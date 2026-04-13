@@ -495,6 +495,89 @@ app.post('/api/veo/queryResult', async (req, res) => {
   })
 })
 
+app.get('/api/veo/media/:taskId', async (req, res) => {
+  const missing = getMissingVideoConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  try {
+    const taskId = normalizeTaskIdValue(req.params.taskId)
+    if (!taskId) {
+      throw createHttpError(400, 'taskId is required.')
+    }
+
+    const payload = await requestJson(
+      videoApiBaseUrl,
+      '/openApi/queryResult',
+      {
+        projectCode: process.env.VIDEO_PROJECT_CODE,
+        'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
+        'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
+      },
+      {
+        taskId,
+        abilityType: 'VIDEO',
+      },
+    )
+
+    const traceMetadata = extractTraceMetadataFromPayload(payload)
+    if (payload?.success === false) {
+      throw createHttpError(502, extractAggregationTerminalMessage(payload) || '查询任务状态失败', traceMetadata)
+    }
+
+    const finalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
+    if (finalStatus !== 'succeeded') {
+      const message = extractAggregationTerminalMessage(payload)
+      if (finalStatus === 'failed' || finalStatus === 'cancelled') {
+        throw createHttpError(409, message || '视频生成失败', traceMetadata)
+      }
+
+      throw createHttpError(409, message || 'Veo task is not ready for preview yet.', traceMetadata)
+    }
+
+    const mediaUrl = extractAggregationVideoUrl(payload)
+    if (!mediaUrl) {
+      throw createHttpError(404, 'Veo task succeeded, but no media URL was returned.', traceMetadata)
+    }
+
+    const mediaResponse = await fetch(mediaUrl, {
+      headers: buildMediaProxyHeaders(req),
+      redirect: 'follow',
+    })
+
+    if (!mediaResponse.ok) {
+      const message = await readDreaminaUpstreamError(mediaResponse)
+      throw createHttpError(mediaResponse.status, message || 'Veo media fetch failed.')
+    }
+
+    res.status(mediaResponse.status)
+    copyUpstreamResponseHeaders(res, mediaResponse.headers)
+    applyUpstreamTraceHeaders(res, traceMetadata)
+    res.setHeader('Cache-Control', 'private, max-age=300')
+
+    if (req.method === 'HEAD' || !mediaResponse.body) {
+      res.end()
+      return
+    }
+
+    Readable.fromWeb(mediaResponse.body).pipe(res)
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Veo media proxy failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
 app.post('/api/image/chat/completions', handleGeminiImageGenerateRequest)
 app.post('/api/image/generate-content', handleGeminiImageGenerateRequest)
 
