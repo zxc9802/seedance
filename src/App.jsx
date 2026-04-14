@@ -138,7 +138,13 @@ function App() {
   const params = normalizeParamsForProvider(provider, allParams[provider], generationMode, videoReferences)
   const config = PROVIDERS[provider]
   const panelConfig = getConfigForGenerationMode(config, generationMode, params, videoReferences)
-  const currentState = providerState[provider] || { generating: false, progress: 0, videoUrl: null, error: null }
+  const currentState = providerState[provider] || {
+    generating: false,
+    progress: 0,
+    videoUrl: null,
+    downloadUrl: null,
+    error: null,
+  }
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
   const maxImages = resolveImageLimit(config, generationMode, videoReferences)
   const maxVideos = resolveVideoLimit(config, generationMode, videoReferences)
@@ -322,7 +328,7 @@ function App() {
       return
     }
 
-    updateProviderState(provider, { generating: true, progress: 0, error: null, videoUrl: null })
+    updateProviderState(provider, { generating: true, progress: 0, error: null, videoUrl: null, downloadUrl: null })
 
     let progress = 0
     const progressTimer = window.setInterval(() => {
@@ -709,8 +715,9 @@ function App() {
 
         if (initialTask.status === 2 && initialTask.message) {
           window.clearInterval(progressTimer)
-          const previewUrl = await resolveAggregationPlaybackUrl(initialTask, provider)
-          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          const previewUrl = await resolvePreviewUrl(initialTask.message, provider)
+          const downloadUrl = await resolveAggregationDownloadUrl(initialTask, provider)
+          updateProviderState(provider, { progress: 100, videoUrl: previewUrl, downloadUrl })
           return
         }
 
@@ -747,8 +754,9 @@ function App() {
           if (task.status === 2) {
             finished = true
             window.clearInterval(progressTimer)
-            const previewUrl = await resolveAggregationPlaybackUrl(task, provider)
-            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            const previewUrl = await resolvePreviewUrl(task.message, provider)
+            const downloadUrl = await resolveAggregationDownloadUrl(task, provider)
+            updateProviderState(provider, { progress: 100, videoUrl: previewUrl, downloadUrl })
             return
           }
 
@@ -937,6 +945,7 @@ function App() {
         <div className="right-panel">
           <VideoPreview
             videoUrl={currentState.videoUrl}
+            downloadUrl={currentState.downloadUrl}
             generating={currentState.generating}
             progress={currentState.progress}
             error={formatRuntimeErrorMessage(provider, currentState.error)}
@@ -956,7 +965,7 @@ function createInitialParams() {
 }
 
 function createProviderRuntimeState() {
-  return { generating: false, progress: 0, videoUrl: null, error: null }
+  return { generating: false, progress: 0, videoUrl: null, downloadUrl: null, error: null }
 }
 
 function createInitialProviderState() {
@@ -2743,7 +2752,7 @@ async function resolveDreaminaPlaybackUrl(task, providerId) {
   return resolvePreviewUrl(task?.videoUrl || null, providerId)
 }
 
-async function resolveAggregationPlaybackUrl(task, providerId) {
+async function resolveAggregationDownloadUrl(task, providerId) {
   if (providerId !== 'veo') {
     return resolvePreviewUrl(task?.videoUrl || task?.message || null, providerId)
   }

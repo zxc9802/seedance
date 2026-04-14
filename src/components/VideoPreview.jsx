@@ -4,7 +4,7 @@ import { Copy, Download, Loader2, Maximize2, MonitorPlay, X } from 'lucide-react
 import { PROVIDERS } from '../modelConfig'
 import './VideoPreview.css'
 
-export default function VideoPreview({ videoUrl, generating, progress, error, params, provider }) {
+export default function VideoPreview({ videoUrl, downloadUrl, generating, progress, error, params, provider }) {
   const cfg = PROVIDERS[provider]
   const isImageOutput = cfg.outputType === 'image'
   const displayModelName = cfg.selectorLabel || cfg.name
@@ -21,6 +21,7 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
     () => buildRetryablePlaybackUrl(videoUrl, playbackRetryCount),
     [videoUrl, playbackRetryCount],
   )
+  const effectiveDownloadUrl = downloadUrl || videoUrl
 
   const frameClass = (() => {
     switch (params.aspectRatio) {
@@ -33,10 +34,10 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
   })()
 
   const handleDownload = () => {
-    if (!videoUrl) return
+    if (!effectiveDownloadUrl) return
     const link = document.createElement('a')
-    link.href = videoUrl
-    link.download = `${isImageOutput ? 'image' : 'video'}-${Date.now()}.${inferExtension(videoUrl, isImageOutput)}`
+    link.href = effectiveDownloadUrl
+    link.download = `${isImageOutput ? 'image' : 'video'}-${Date.now()}.${inferExtension(effectiveDownloadUrl, isImageOutput)}`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -78,7 +79,7 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
             <button className="pa-btn" onClick={handleDownload}>
               <Download size={13} /> 下载
             </button>
-            <button className="pa-btn" onClick={() => navigator.clipboard.writeText(videoUrl)}>
+            <button className="pa-btn" onClick={() => navigator.clipboard.writeText(effectiveDownloadUrl)}>
               <Copy size={13} /> 复制链接
             </button>
           </div>
@@ -156,7 +157,7 @@ export default function VideoPreview({ videoUrl, generating, progress, error, pa
 
         <div className="preview-meta">
           <MetaTag label="模型" value={displayModelName} color={cfg.color} />
-          <MetaTag label="比例" value={params.aspectRatio} />
+          {params.aspectRatio && <MetaTag label="比例" value={params.aspectRatio} />}
           {params.duration != null && <MetaTag label="时长" value={`${params.duration}秒`} />}
           {params.resolution && <MetaTag label="分辨率" value={params.resolution} />}
         </div>
