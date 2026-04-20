@@ -34,22 +34,7 @@ function isDreaminaProvider(id) {
   return PROVIDERS[id]?.backendKind === 'dreamina'
 }
 
-function resolveSeedance2OperationalMode(mode, references = createEmptyVideoReferences()) {
-  if (mode !== 'generate') {
-    return mode
-  }
-
-  const imageCount = Array.isArray(references?.images) ? references.images.length : 0
-  if (imageCount >= 2) return 'flf'
-  if (imageCount === 1) return 'i2v'
-  return 't2v'
-}
-
 function resolveOperationalMode(provider, mode, references = createEmptyVideoReferences()) {
-  if (provider === 'seedance2') {
-    return resolveSeedance2OperationalMode(mode, references)
-  }
-
   return mode
 }
 
@@ -1189,67 +1174,42 @@ function normalizeParamsForProvider(provider, params, mode = 't2v', references =
   let nextParams = sourceParams
   let changed = nextParams !== params
   const operationalMode = resolveOperationalMode(provider, mode, references)
-  const isSeedanceStoryboardMode = provider === 'seedance2' && operationalMode === 'multiframe'
+  const availableModels = resolveAvailableModels(config, operationalMode)
 
-  if (!isSeedanceStoryboardMode) {
-    const availableModels = resolveAvailableModels(config, operationalMode)
-
-    if (availableModels.length > 0 && !availableModels.includes(nextParams.model)) {
-      const fallbackModel = availableModels.includes(config.defaults?.model)
-        ? config.defaults.model
-        : availableModels[0]
-      nextParams = {
-        ...nextParams,
-        model: fallbackModel,
-      }
-      changed = true
+  if (availableModels.length > 0 && !availableModels.includes(nextParams.model)) {
+    const fallbackModel = availableModels.includes(config.defaults?.model)
+      ? config.defaults.model
+      : availableModels[0]
+    nextParams = {
+      ...nextParams,
+      model: fallbackModel,
     }
-
-    const resolutionOptions = config.resolutions?.[nextParams.model] || config.resolutions?.default || []
-
-    if (resolutionOptions.length > 0 && !resolutionOptions.includes(nextParams.resolution)) {
-      nextParams = {
-        ...nextParams,
-        resolution: resolutionOptions[0],
-      }
-      changed = true
-    }
-
-    const durationOptions = resolveDurationOptions(config, nextParams, operationalMode, references)
-    const normalizedDuration = resolveSupportedDurationValue(
-      nextParams.duration,
-      durationOptions,
-      config.defaults?.duration,
-    )
-
-    if (durationOptions.length > 0 && nextParams.duration !== normalizedDuration) {
-      nextParams = {
-        ...nextParams,
-        duration: normalizedDuration,
-      }
-      changed = true
-    }
+    changed = true
   }
 
-  if (provider === 'seedance2' && operationalMode === 'multiframe') {
-    const segmentCount = Math.max(0, (references?.images?.length || 0) - 1)
-    const transitionPrompts = normalizeStoryFieldArray(nextParams.transitionPrompts, segmentCount, '')
-    const transitionDurations = normalizeStoryFieldArray(nextParams.transitionDurations, segmentCount, '3')
-    const singleTransitionDuration = normalizeStoryDurationValue(nextParams.singleTransitionDuration, '3')
+  const resolutionOptions = config.resolutions?.[nextParams.model] || config.resolutions?.default || []
 
-    if (
-      !areStringArraysEqual(nextParams.transitionPrompts, transitionPrompts)
-      || !areStringArraysEqual(nextParams.transitionDurations, transitionDurations)
-      || nextParams.singleTransitionDuration !== singleTransitionDuration
-    ) {
-      nextParams = {
-        ...nextParams,
-        transitionPrompts,
-        transitionDurations,
-        singleTransitionDuration,
-      }
-      changed = true
+  if (resolutionOptions.length > 0 && !resolutionOptions.includes(nextParams.resolution)) {
+    nextParams = {
+      ...nextParams,
+      resolution: resolutionOptions[0],
     }
+    changed = true
+  }
+
+  const durationOptions = resolveDurationOptions(config, nextParams, operationalMode, references)
+  const normalizedDuration = resolveSupportedDurationValue(
+    nextParams.duration,
+    durationOptions,
+    config.defaults?.duration,
+  )
+
+  if (durationOptions.length > 0 && nextParams.duration !== normalizedDuration) {
+    nextParams = {
+      ...nextParams,
+      duration: normalizedDuration,
+    }
+    changed = true
   }
 
   return changed ? nextParams : sourceParams
@@ -1263,14 +1223,10 @@ function getConfigForGenerationMode(config, mode, params, references = createEmp
   const durationOptions = resolveDurationOptions(config, params, operationalMode, references)
   const allowedSet = new Set(availableModels)
   const filteredModels = config.models.filter((model) => allowedSet.has(model.value))
-  const hidesAspectRatio = config.id === 'seedance2' && (operationalMode === 'i2v' || operationalMode === 'flf' || operationalMode === 'multiframe')
-  const hidesResolution = config.id === 'seedance2' && operationalMode === 'multiframe'
-  const hidesDuration = config.id === 'seedance2' && operationalMode === 'multiframe'
-  const hidesModel = config.id === 'seedance2' && operationalMode === 'multiframe'
-  const nextModels = hidesModel ? [] : filteredModels
-  const nextAspectRatios = hidesAspectRatio ? [] : config.aspectRatios
-  const nextResolutions = hidesResolution ? { default: [] } : config.resolutions
-  const nextDurations = hidesDuration ? [] : durationOptions
+  const nextModels = filteredModels
+  const nextAspectRatios = config.aspectRatios
+  const nextResolutions = config.resolutions
+  const nextDurations = durationOptions
   const modelsUnchanged = nextModels.length === config.models.length
     && nextModels.every((model, index) => model.value === config.models[index]?.value)
   const aspectRatiosUnchanged = nextAspectRatios.length === config.aspectRatios.length
@@ -2385,10 +2341,6 @@ function isPromptRequiredForGeneration(config, mode, references = createEmptyVid
     return true
   }
 
-  if (config.id === 'seedance2' && mode === 'multiframe') {
-    return (references?.images?.length || 0) <= 2
-  }
-
   return !Array.isArray(config.promptOptionalModes) || !config.promptOptionalModes.includes(mode)
 }
 
@@ -2396,17 +2348,7 @@ function validateVideoReferenceInput(provider, params, mode, references, prompt 
   const operationalMode = resolveOperationalMode(provider, mode, references)
   const wanValidationError = validateWanReferenceInput(provider, mode, references)
   const klingValidationError = validateKlingReferenceInput(provider, params, mode, references)
-  const dreaminaStoryValidationError = validateDreaminaStoryInput(provider, params, mode, references, prompt)
   const durationValidationError = validateRequestedDuration(provider, params, mode, references)
-  if (provider === 'seedance2' && mode === 'generate') {
-    if (references.images.length > 2) {
-      return '视频生成模式最多支持 2 张参考图片'
-    }
-
-    if (references.videos.length > 0 || references.audios.length > 0) {
-      return '视频生成模式仅支持 0-2 张图片，不支持参考视频或音频'
-    }
-  }
 
   if (operationalMode !== 't2v') {
     if (operationalMode === 'i2v' && references.images.length !== 1) return '图生视频模式需要 1 张参考图片'
@@ -2435,10 +2377,6 @@ function validateVideoReferenceInput(provider, params, mode, references, prompt 
     }
   }
 
-  if (dreaminaStoryValidationError) {
-    return dreaminaStoryValidationError
-  }
-
   if (wanValidationError) {
     return wanValidationError
   }
@@ -2448,93 +2386,6 @@ function validateVideoReferenceInput(provider, params, mode, references, prompt 
   }
 
   return durationValidationError
-}
-
-function validateDreaminaStoryInput(provider, params, mode, references, prompt) {
-  if (provider !== 'seedance2' || mode !== 'multiframe') {
-    return null
-  }
-
-  const imageCount = references.images.length
-  if (imageCount < 2) {
-    return '动作模仿模式至少需要 2 张参考图片'
-  }
-  if (imageCount > 20) {
-    return '动作模仿模式最多支持 20 张参考图片'
-  }
-  if (references.videos.length > 0 || references.audios.length > 0) {
-    return '动作模仿模式仅支持上传图片，不支持视频或音频'
-  }
-
-  if (imageCount === 2) {
-    if (!String(prompt || '').trim()) {
-      return '两张图的动作模仿模式需要填写主提示词'
-    }
-
-    return validateDreaminaSingleTransitionDuration(params?.singleTransitionDuration)
-  }
-
-  return validateDreaminaTransitionSegments(imageCount, params?.transitionPrompts, params?.transitionDurations)
-}
-function validateDreaminaSingleTransitionDuration(value) {
-  const duration = parseDreaminaDurationFloat(value)
-  if (duration === null) {
-    return '请填写两张图模式的过渡时长'
-  }
-  if (duration < 2 || duration > 8) {
-    return '两张图模式的过渡时长需介于 2 到 8 秒之间'
-  }
-  return null
-}
-
-function validateDreaminaTransitionSegments(imageCount, prompts, durations) {
-  const segmentCount = imageCount - 1
-  const promptList = Array.isArray(prompts) ? prompts.slice(0, segmentCount) : []
-  const durationList = Array.isArray(durations) ? durations.slice(0, segmentCount) : []
-
-  if (promptList.length !== segmentCount || promptList.some((item) => typeof item !== 'string' || !item.trim())) {
-    return `请为 ${segmentCount} 段过渡分别填写提示词`
-  }
-
-  if (durationList.length !== segmentCount) {
-    return `请为 ${segmentCount} 段过渡分别填写时长`
-  }
-
-  let totalDuration = 0
-  for (let index = 0; index < segmentCount; index += 1) {
-    const duration = parseDreaminaDurationFloat(durationList[index])
-    if (duration === null) {
-      return `第 ${index + 1} 段过渡时长格式不正确`
-    }
-    if (duration < 0.5 || duration > 8) {
-      return `第 ${index + 1} 段过渡时长需介于 0.5 到 8 秒之间`
-    }
-    totalDuration += duration
-  }
-
-  if (totalDuration < 2) {
-    return '多帧叙事总时长至少需要 2 秒'
-  }
-
-  return null
-}
-
-function parseDreaminaDurationFloat(value) {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value
-  }
-
-  if (typeof value !== 'string') {
-    return null
-  }
-
-  const normalized = value.trim()
-  if (!normalized) {
-    return null
-  }
-
-  const parsed = Number(normalized)
-  return Number.isFinite(parsed) ? parsed : null
 }
 
 function validateRequestedDuration(provider, params, mode, references) {
