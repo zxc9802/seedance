@@ -10,7 +10,8 @@
     "db:backup": "node scripts/db-backup.mjs",
     "db:restore": "node scripts/db-restore.mjs",
     "db:restore:append": "node scripts/db-restore.mjs --append-only",
-    "lark:backfill-usage": "node scripts/lark-backfill-usage.mjs"
+    "lark:backfill-usage": "node scripts/lark-backfill-usage.mjs",
+    "lark:restore-usage": "node scripts/lark-restore-usage.mjs"
   },
   "dependencies": {
     "@larksuite/cli": "^1.0.0",

@@ -35,6 +35,8 @@ export default function PromptInput({
   providerColor,
   mode,
   onModeChange,
+  params,
+  onParamUpdate,
   mediaList,
   onMediaListChange,
   videoReferences,
@@ -52,17 +54,28 @@ export default function PromptInput({
   const fileInputRef = useRef(null)
 
   const isImageOutput = providerConfig.outputType === 'image'
+  const usesLocalReferenceAssets = providerConfig.referenceInputMode === 'local'
   const isVideoProvider = providerConfig.outputType !== 'image' && providerConfig.id !== 'gemini-image'
+  const usesAssetBuckets = isVideoProvider || usesLocalReferenceAssets
   const templates = providerConfig.promptTemplates || []
   const modeOptions = providerConfig.generationModes || buildDefaultModes(providerConfig, isImageOutput)
   const imageAccept = getImageAccept(providerConfig)
   const videoAccept = getVideoAccept(providerConfig)
+  const multiframeSegmentCount = Math.max(0, videoReferences.images.length - 1)
+  const isSeedanceMultiframe = providerConfig.id === 'seedance2' && mode === 'multiframe'
+  const shouldShowReferenceSection = usesAssetBuckets
+    ? maxImages > 0 || maxVideos > 0 || maxAudios > 0
+    : mode !== 't2v'
 
-  const generationDisabled = generating
-    || (!prompt.trim() && !selectedTemplate)
-    || (isVideoProvider
-      ? !hasRequiredVideoAssets(mode, videoReferences)
-      : (mode !== 't2v' && mediaList.length === 0))
+  const generationDisabled = generating || !hasAllRequiredInputs({
+    providerConfig,
+    mode,
+    prompt,
+    hasTemplate: Boolean(selectedTemplate),
+    mediaList,
+    videoReferences,
+    params,
+  })
 
   const processImageFiles = async (files) => {
     setMediaError(null)
@@ -168,9 +181,43 @@ export default function PromptInput({
     setMediaError(null)
   }
 
+  const updateTransitionPrompt = (index, value) => {
+    const nextPrompts = Array.isArray(params?.transitionPrompts)
+      ? [...params.transitionPrompts]
+      : Array.from({ length: multiframeSegmentCount }, () => '')
+    nextPrompts[index] = value
+    onParamUpdate('transitionPrompts', nextPrompts)
+  }
+
+  const updateTransitionDuration = (index, value) => {
+    const nextDurations = Array.isArray(params?.transitionDurations)
+      ? [...params.transitionDurations]
+      : Array.from({ length: multiframeSegmentCount }, () => '3')
+    nextDurations[index] = value
+    onParamUpdate('transitionDurations', nextDurations)
+  }
+
   const promptPlaceholder = (() => {
     if (selectedTemplate) {
       return `已选择“${selectedTemplate.title}”模板，可直接生成或补充额外要求...`
+    }
+
+    if (providerConfig.id === 'seedance2' && mode === 'generate') {
+      if (videoReferences.images.length === 0) {
+        return '描述你想生成的视频，也可以上传 1 张图做图生视频，或上传 2 张图生成首尾帧过渡...'
+      }
+
+      if (videoReferences.images.length === 1) {
+        return '描述这张图将如何动起来、镜头如何推进或场景如何变化...'
+      }
+
+      return '描述首帧到尾帧之间的动作、运镜和场景变化...'
+    }
+
+    if (isSeedanceMultiframe) {
+      return videoReferences.images.length <= 2
+        ? '上传 2 张图后，描述它们之间的动作、运镜或状态变化...'
+        : '可选：补充整体风格说明；真正生效的是下方每一段过渡提示词...'
     }
 
     if (mode === 't2v') {
@@ -291,7 +338,7 @@ export default function PromptInput({
       </div>
 
       <AnimatePresence>
-        {mode !== 't2v' && (
+        {shouldShowReferenceSection && (
           <motion.div
             className="ref-images-section"
             initial={{ opacity: 0, height: 0 }}
@@ -304,11 +351,11 @@ export default function PromptInput({
               <span>{isVideoProvider ? '参考素材' : '参考图片'}</span>
             </div>
 
-            {isVideoProvider ? (
+            {usesAssetBuckets ? (
               <div className="ref-upload-grid">
                 {maxImages > 0 && (
                   <AssetUploadBucket
-                    title={mode === 'flf' ? '首尾帧图片' : '参考图片'}
+                    title={getImageBucketTitle(providerConfig, mode)}
                     subtitle={getImageBucketSubtitle(providerConfig, mode, maxImages)}
                     icon={<ImageIcon size={14} />}
                     accept={imageAccept}
@@ -391,7 +438,71 @@ export default function PromptInput({
               </div>
             )}
 
-            {isVideoProvider && (
+            {providerConfig.features.transitionStoryboard && isSeedanceMultiframe && (
+              <div className="storyboard-editor">
+                <div className="storyboard-head">
+                  <div className="storyboard-title">
+                    <Layers3 size={14} />
+                    <span>过渡编排</span>
+                  </div>
+                  <span className="storyboard-count">{multiframeSegmentCount} 段</span>
+                </div>
+
+                {videoReferences.images.length < 2 ? (
+                  <div className="storyboard-empty">
+                    先上传至少 2 张图片，再填写动作过渡描述。
+                  </div>
+                ) : videoReferences.images.length === 2 ? (
+                  <div className="storyboard-single">
+                    <div className="storyboard-tip">
+                      请直接在上方主提示词里描述从第 1 张到第 2 张的动作/镜头变化；这里单独控制这 1 段的时长。
+                    </div>
+                    <label className="storyboard-duration">
+                      <span>单段时长（秒）</span>
+                      <input
+                        type="number"
+                        min="2"
+                        max="8"
+                        step="0.5"
+                        value={params?.singleTransitionDuration || '3'}
+                        onChange={(event) => onParamUpdate('singleTransitionDuration', event.target.value)}
+                      />
+                    </label>
+                  </div>
+                ) : (
+                  <div className="storyboard-list">
+                    {Array.from({ length: multiframeSegmentCount }).map((_, index) => (
+                      <div key={`transition-${index}`} className="storyboard-card">
+                        <div className="storyboard-card-head">
+                          <span>{`过渡 ${index + 1}`}</span>
+                          <span>{`${index + 1} -> ${index + 2}`}</span>
+                        </div>
+                        <textarea
+                          className="storyboard-prompt"
+                          placeholder={`描述第 ${index + 1} 张图如何过渡到第 ${index + 2} 张图...`}
+                          value={params?.transitionPrompts?.[index] || ''}
+                          onChange={(event) => updateTransitionPrompt(index, event.target.value)}
+                          rows={2}
+                        />
+                        <label className="storyboard-duration">
+                          <span>时长（秒）</span>
+                          <input
+                            type="number"
+                            min="0.5"
+                            max="8"
+                            step="0.5"
+                            value={params?.transitionDurations?.[index] || '3'}
+                            onChange={(event) => updateTransitionDuration(index, event.target.value)}
+                          />
+                        </label>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {usesAssetBuckets && (
               <div className="ref-url-note">
                 {providerConfig.backendKind === 'dreamina'
                   ? (
@@ -528,7 +639,11 @@ function renderModeIcon(mode, isImageOutput) {
       return <ImageIcon size={13} />
     case 'flf':
       return <Layers3 size={13} />
+    case 'multiframe':
+      return <Video size={13} />
     case 'fusion':
+      return <Video size={13} />
+    case 'generate':
       return <Video size={13} />
     case 'ref':
       return <ImageIcon size={13} />
@@ -538,7 +653,27 @@ function renderModeIcon(mode, isImageOutput) {
   }
 }
 
+function getImageBucketTitle(providerConfig, mode) {
+  if (providerConfig.id === 'seedance2' && mode === 'multiframe') {
+    return '动作参考图'
+  }
+
+  if (mode === 'flf') {
+    return '首尾帧图片'
+  }
+
+  return '参考图片'
+}
+
 function getImageBucketSubtitle(providerConfig, mode, maxImages) {
+  if (providerConfig.id === 'seedance2' && mode === 'generate') {
+    return '可不传图；1 张图走图生视频；2 张图按顺序作为首尾帧'
+  }
+
+  if (providerConfig.id === 'seedance2' && mode === 'multiframe') {
+    return '按顺序上传 2-20 张图片，系统会根据相邻图片生成动作过渡'
+  }
+
   if (mode === 'flf') {
     return '顺序上传：先首帧，再尾帧'
   }
@@ -568,8 +703,10 @@ function getVideoBucketSubtitle(providerConfig, maxVideos) {
 
 function hasRequiredVideoAssets(mode, references) {
   if (mode === 't2v') return true
+  if (mode === 'generate') return true
   if (mode === 'i2v') return references.images.length === 1
   if (mode === 'flf') return references.images.length === 2
+  if (mode === 'multiframe') return references.images.length >= 2
   if (mode === 'fusion') {
     const imageCount = references.images.length
     const videoCount = references.videos.length
@@ -580,6 +717,52 @@ function hasRequiredVideoAssets(mode, references) {
     return references.images.length > 0
   }
   return false
+}
+
+function hasAllRequiredInputs({ providerConfig, mode, prompt, hasTemplate, mediaList, videoReferences, params }) {
+  const localAssetProvider = providerConfig.referenceInputMode === 'local'
+  const promptRequired = isPromptRequiredForMode(providerConfig, mode, videoReferences)
+
+  if (promptRequired && !prompt.trim() && !hasTemplate) {
+    return false
+  }
+
+  if (providerConfig.id === 'seedance2' && mode === 'multiframe') {
+    const imageCount = videoReferences.images.length
+    if (imageCount < 2) {
+      return false
+    }
+
+    if (imageCount === 2) {
+      return Boolean(params?.singleTransitionDuration)
+    }
+
+    const segmentCount = imageCount - 1
+    const prompts = Array.isArray(params?.transitionPrompts) ? params.transitionPrompts : []
+    const durations = Array.isArray(params?.transitionDurations) ? params.transitionDurations : []
+    return prompts.length >= segmentCount
+      && durations.length >= segmentCount
+      && prompts.slice(0, segmentCount).every((item) => typeof item === 'string' && item.trim())
+      && durations.slice(0, segmentCount).every((item) => typeof item === 'string' && item.trim())
+  }
+
+  if (!localAssetProvider) {
+    return mode === 't2v' ? true : mediaList.length > 0
+  }
+
+  if (providerConfig.outputType === 'image') {
+    return mode === 't2v' ? true : videoReferences.images.length > 0
+  }
+
+  return hasRequiredVideoAssets(mode, videoReferences)
+}
+
+function isPromptRequiredForMode(providerConfig, mode, references) {
+  if (providerConfig.id === 'seedance2' && mode === 'multiframe') {
+    return (references?.images?.length || 0) <= 2
+  }
+
+  return !Array.isArray(providerConfig.promptOptionalModes) || !providerConfig.promptOptionalModes.includes(mode)
 }
 
 function createLocalAsset(file) {
