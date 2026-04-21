@@ -22,6 +22,7 @@ const BASE_PROVIDERS = {
     name: 'Seedance 1',
     vendor: '聚合 API',
     color: '#2563eb',
+    frontendMock: true,
     models: [
       { value: 'doubao-seedance-2-0-260128', label: 'Seedance 1', tag: '已接入' },
     ],
@@ -45,7 +46,7 @@ const BASE_PROVIDERS = {
       { value: 'flf', label: '首尾帧' },
       { value: 'fusion', label: '融合参考' },
     ],
-    referenceInputMode: 'url',
+    referenceInputMode: 'local',
     maxReferenceImages: {
       t2v: 0,
       i2v: 1,

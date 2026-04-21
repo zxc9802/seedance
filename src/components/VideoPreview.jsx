@@ -4,9 +4,10 @@ import { Copy, Download, Loader2, Maximize2, MonitorPlay, X } from 'lucide-react
 import { PROVIDERS } from '../modelConfig'
 import './VideoPreview.css'
 
-export default function VideoPreview({ videoUrl, downloadUrl, generating, progress, error, params, provider }) {
+export default function VideoPreview({ videoUrl, downloadUrl, previewKind, generating, progress, error, params, provider }) {
   const cfg = PROVIDERS[provider]
-  const isImageOutput = cfg.outputType === 'image'
+  const effectivePreviewKind = previewKind || (cfg.outputType === 'image' ? 'image' : 'video')
+  const isImageOutput = effectivePreviewKind === 'image'
   const displayModelName = cfg.selectorLabel || cfg.name
   const [showFullscreen, setShowFullscreen] = useState(false)
   const [playbackError, setPlaybackError] = useState(null)
@@ -37,7 +38,7 @@ export default function VideoPreview({ videoUrl, downloadUrl, generating, progre
     if (!effectiveDownloadUrl) return
     const link = document.createElement('a')
     link.href = effectiveDownloadUrl
-    link.download = `${isImageOutput ? 'image' : 'video'}-${Date.now()}.${inferExtension(effectiveDownloadUrl, isImageOutput)}`
+    link.download = `${isImageOutput ? 'image' : 'video'}-${Date.now()}.${inferExtension(effectiveDownloadUrl, effectivePreviewKind)}`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -232,8 +233,9 @@ function MetaTag({ label, value, color }) {
   )
 }
 
-function inferExtension(url, isImageOutput) {
-  if (isImageOutput) {
+function inferExtension(url, previewKind) {
+  if (previewKind === 'image') {
+    if (url.startsWith('data:image/svg+xml')) return 'svg'
     if (url.startsWith('data:image/png')) return 'png'
     if (url.startsWith('data:image/webp')) return 'webp'
     if (url.startsWith('data:image/gif')) return 'gif'

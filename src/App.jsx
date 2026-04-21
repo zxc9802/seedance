@@ -10,6 +10,7 @@ import ModelSelector from './components/ModelSelector'
 import PromptInput from './components/PromptInput'
 import ParameterPanel from './components/ParameterPanel'
 import VideoPreview from './components/VideoPreview'
+import { buildMockVideoPlan } from './mockVideoGeneration'
 import './App.css'
 
 const VIDEO_PROVIDERS = new Set(
@@ -20,6 +21,10 @@ function isVideoProvider(id) {
 }
 function isVeoFastProvider(id) {
   return id === 'veo31fast'
+}
+
+function isFrontendMockVideoProvider(id) {
+  return PROVIDERS[id]?.frontendMock === true
 }
 
 function isKlingProvider(id) {
@@ -128,6 +133,7 @@ function App() {
     progress: 0,
     videoUrl: null,
     downloadUrl: null,
+    previewKind: null,
     error: null,
   }
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
@@ -313,7 +319,14 @@ function App() {
       return
     }
 
-    updateProviderState(provider, { generating: true, progress: 0, error: null, videoUrl: null, downloadUrl: null })
+    updateProviderState(provider, {
+      generating: true,
+      progress: 0,
+      error: null,
+      videoUrl: null,
+      downloadUrl: null,
+      previewKind: null,
+    })
 
     let progress = 0
     const progressTimer = window.setInterval(() => {
@@ -323,6 +336,24 @@ function App() {
     }, 900)
 
     try {
+      if (isFrontendMockVideoProvider(provider)) {
+        const mockPlan = buildMockVideoPlan({
+          providerId: provider,
+        })
+
+        updateProviderState(provider, { progress: 18 })
+        await sleep(mockPlan.delayMs)
+        window.clearInterval(progressTimer)
+        updateProviderState(provider, {
+          progress: 100,
+          error: mockPlan.errorMessage || 'Failed to fetch',
+          videoUrl: null,
+          downloadUrl: null,
+          previewKind: null,
+        })
+        return
+      }
+
       if (isVeoFastProvider(provider)) {
         const base64Images = await readVideoReferencesAsBase64(videoReferences)
         const requestBody = buildVeoFastRequest(params, finalPrompt, generationMode, base64Images)
@@ -931,6 +962,7 @@ function App() {
           <VideoPreview
             videoUrl={currentState.videoUrl}
             downloadUrl={currentState.downloadUrl}
+            previewKind={currentState.previewKind}
             generating={currentState.generating}
             progress={currentState.progress}
             error={formatRuntimeErrorMessage(provider, currentState.error)}
@@ -950,7 +982,7 @@ function createInitialParams() {
 }
 
 function createProviderRuntimeState() {
-  return { generating: false, progress: 0, videoUrl: null, downloadUrl: null, error: null }
+  return { generating: false, progress: 0, videoUrl: null, downloadUrl: null, previewKind: null, error: null }
 }
 
 function createInitialProviderState() {
@@ -1111,6 +1143,7 @@ async function serializeProviderState(state) {
       generating: false,
       progress: 0,
       error: null,
+      previewKind: current.previewKind || inferPreviewKind(key, previewUrl, current.previewKind),
       previewAsset: await serializePreviewAsset(previewUrl),
     }
   }
@@ -1123,12 +1156,16 @@ function hydrateSnapshotProviderState(snapshotState) {
   for (const key of PROVIDER_ORDER) {
     const current = snapshotState?.[key]
     if (!current) continue
+    const hydratedPreviewUrl = hydratePreviewAsset(current.previewAsset) || current.videoUrl || null
 
     initial[key] = {
       ...initial[key],
-      videoUrl: resolvePersistableSnapshotPreviewUrl(
+      videoUrl: resolvePersistableSnapshotPreviewUrl(key, hydratedPreviewUrl),
+      previewKind: inferPreviewKind(
         key,
-        hydratePreviewAsset(current.previewAsset) || current.videoUrl || null,
+        hydratedPreviewUrl,
+        current.previewKind,
+        current.previewAsset?.mimeType,
       ),
     }
   }
@@ -1390,6 +1427,29 @@ function getSafeGenerationMode(provider, mode) {
 function canPreviewAsset(mimeType) {
   return typeof mimeType === 'string'
     && (mimeType.startsWith('image/') || mimeType.startsWith('video/'))
+}
+
+function inferPreviewKind(providerId, url, explicitPreviewKind = null, mimeType = '') {
+  if (explicitPreviewKind === 'image' || explicitPreviewKind === 'video') {
+    return explicitPreviewKind
+  }
+
+  if (typeof mimeType === 'string' && mimeType.startsWith('image/')) {
+    return 'image'
+  }
+
+  if (typeof mimeType === 'string' && mimeType.startsWith('video/')) {
+    return 'video'
+  }
+
+  if (typeof url === 'string') {
+    if (url.startsWith('data:image/')) return 'image'
+    if (url.startsWith('data:video/')) return 'video'
+    if (/\.(png|jpe?g|gif|webp|svg)(\?|#|$)/i.test(url)) return 'image'
+    if (/\.(mp4|mov|webm|m4v)(\?|#|$)/i.test(url)) return 'video'
+  }
+
+  return PROVIDERS[providerId]?.outputType === 'image' ? 'image' : 'video'
 }
 
 async function serializePreviewAsset(url) {
