@@ -3,7 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "packageManager": "npm@11.11.0",
   "scripts": {
+    "start": "node server.js --production",
     "dev": "node server.js",
     "build": "vite build",
     "preview": "node server.js --production",
