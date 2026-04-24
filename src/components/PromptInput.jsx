@@ -721,6 +721,7 @@ function hasRequiredVideoAssets(mode, references) {
 
 function hasAllRequiredInputs({ providerConfig, mode, prompt, hasTemplate, mediaList, videoReferences, params }) {
   const localAssetProvider = providerConfig.referenceInputMode === 'local'
+  const isVideoProvider = providerConfig.outputType !== 'image' && providerConfig.id !== 'gemini-image'
   const promptRequired = isPromptRequiredForMode(providerConfig, mode, videoReferences)
 
   if (promptRequired && !prompt.trim() && !hasTemplate) {
@@ -744,6 +745,10 @@ function hasAllRequiredInputs({ providerConfig, mode, prompt, hasTemplate, media
       && durations.length >= segmentCount
       && prompts.slice(0, segmentCount).every((item) => typeof item === 'string' && item.trim())
       && durations.slice(0, segmentCount).every((item) => typeof item === 'string' && item.trim())
+  }
+
+  if (isVideoProvider) {
+    return hasRequiredVideoAssets(mode, videoReferences)
   }
 
   if (!localAssetProvider) {
