@@ -27,7 +27,7 @@ const BASE_PROVIDERS = {
     ],
     aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {
-      default: ['480p'],
+      default: ['480p', '720p'],
     },
     durations: [4, 5, 6, 8, 10, 12, 15],
     sampleCounts: [1],
@@ -61,7 +61,7 @@ const BASE_PROVIDERS = {
     defaults: {
       model: 'doubao-seedance-2-0-260128',
       aspectRatio: '9:16',
-      resolution: '480p',
+      resolution: '720p',
       duration: 5,
       sampleCount: 1,
       generateAudio: false,
