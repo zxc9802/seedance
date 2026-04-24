@@ -54,6 +54,10 @@ function isAggregationImageProvider(id) {
   return PROVIDERS[id]?.backendKind === 'aggregation-image'
 }
 
+function isGptImage2Provider(id) {
+  return PROVIDERS[id]?.backendKind === 'gpt-image2'
+}
+
 function isOpenAiImageProvider(id) {
   return PROVIDERS[id]?.backendKind === 'openai-image'
 }
@@ -750,6 +754,31 @@ function App() {
           }
         }
       } else if (!isVideoProvider(provider)) {
+        if (isGptImage2Provider(provider)) {
+          const requestInfo = buildGptImage2Request(provider, params, finalPrompt, generationMode, referenceMedia)
+          const response = await fetch(requestInfo.url, {
+            method: 'POST',
+            headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
+            body: JSON.stringify(requestInfo.body),
+          })
+
+          if (!response.ok) {
+            throw new Error(await formatHttpError(response))
+          }
+
+          const data = await response.json()
+          window.clearInterval(progressTimer)
+          updateProviderState(provider, { progress: 100 })
+
+          const imageResult = parseImageChatResponse(data, finalPrompt)
+          if (imageResult) {
+            updateProviderState(provider, { videoUrl: imageResult.url })
+            return
+          }
+
+          throw new Error(buildImageResponseParseError(data))
+        }
+
         if (isAggregationImageProvider(provider)) {
           const uploadedReferences = await uploadImageReferences(referenceMedia)
           if (uploadedReferences.requiresPublicBaseUrl) {
@@ -1718,6 +1747,25 @@ function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
       model: params.model,
       contents: [{ parts }],
       ...(generationConfig ? { generationConfig } : {}),
+    },
+  }
+}
+
+function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
+  return {
+    url: '/api/gpt-image2/generations',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      model: params.model,
+      prompt,
+      size: params.resolution,
+      n: params.sampleCount,
+      quality: params.quality,
+      format: params.format,
+      ...(mode === 'i2v' && mediaList.length > 0 ? { image: mediaList } : {}),
     },
   }
 }

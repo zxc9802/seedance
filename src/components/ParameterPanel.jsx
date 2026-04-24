@@ -13,7 +13,7 @@ export default function ParameterPanel({ provider, config, params, onUpdate }) {
 
   return (
     <div className="param-panel">
-      {config.models.length > 1 && (
+      {(config.showModelSelector || config.models.length > 1) && (
         <Section icon={<Film size={13} />} title="模型">
           <div className="model-grid">
             {config.models.map((model) => (
@@ -154,6 +154,42 @@ export default function ParameterPanel({ provider, config, params, onUpdate }) {
                 compact
               >
                 {mode.label}
+              </Chip>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {Array.isArray(config.qualityOptions) && config.qualityOptions.length > 0 && (
+        <Section icon={<Layers size={13} />} title="质量">
+          <div className="chip-row compact">
+            {config.qualityOptions.map((option) => (
+              <Chip
+                key={option.value}
+                active={params.quality === option.value}
+                onClick={() => onUpdate('quality', option.value)}
+                color={config.color}
+                compact
+              >
+                {option.label}
+              </Chip>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {Array.isArray(config.formatOptions) && config.formatOptions.length > 0 && (
+        <Section icon={<Sliders size={13} />} title="格式">
+          <div className="chip-row compact">
+            {config.formatOptions.map((option) => (
+              <Chip
+                key={option.value}
+                active={params.format === option.value}
+                onClick={() => onUpdate('format', option.value)}
+                color={config.color}
+                compact
+              >
+                {option.label}
               </Chip>
             ))}
           </div>

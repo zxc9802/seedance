@@ -378,6 +378,50 @@ const BASE_PROVIDERS = {
     },
     backendKind: 'openai-image',
   },
+  'gpt-image2': {
+    id: 'gpt-image2',
+    typeId: 'image',
+    typeLabel: 'Image',
+    selectorLabel: 'gpt-image2',
+    name: 'gpt-image2',
+    vendor: 'Yunwu',
+    color: '#0f9f7a',
+    outputType: 'image',
+    showModelSelector: true,
+    models: [
+      { value: 'gpt-image-2-all', label: 'gpt-image-2-all', tag: 'ref' },
+    ],
+    aspectRatios: ['1:1', '16:9', '9:16'],
+    resolutions: { default: ['1024x1024', '1536x1024', '1024x1536'] },
+    durations: [],
+    sampleCounts: [1, 2, 3, 4],
+    features: {
+      generateAudio: false,
+      negativePrompt: false,
+      referenceImage: true,
+    },
+    maxReferenceImages: 5,
+    qualityOptions: [
+      { value: 'low', label: '低' },
+      { value: 'medium', label: '中' },
+      { value: 'high', label: '高' },
+    ],
+    formatOptions: [
+      { value: 'png', label: 'PNG' },
+      { value: 'jpeg', label: 'JPEG' },
+      { value: 'webp', label: 'WebP' },
+    ],
+    defaults: {
+      model: 'gpt-image-2-all',
+      aspectRatio: '1:1',
+      resolution: '1024x1024',
+      sampleCount: 1,
+      quality: 'low',
+      format: 'png',
+    },
+    referenceHelpText: '支持文生图和参考图生图。参考图会按 Yunwu 兼容格式放入 image 数组提交。',
+    backendKind: 'gpt-image2',
+  },
   'gemini-image-aggregation': {
     id: 'gemini-image-aggregation',
     typeId: 'image',
@@ -429,6 +473,7 @@ const BASE_PROVIDER_ORDER = [
   'kling',
   'wan1',
   'gemini-image',
+  'gpt-image2',
   'gemini-image-aggregation',
 ]
 

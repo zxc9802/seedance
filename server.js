@@ -36,6 +36,7 @@ const videoApiBaseUrl = stripTrailingSlash(process.env.VIDEO_API_BASE_URL || 'ht
 const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const imageApiBaseUrl = normalizeGeminiImageBaseUrl(process.env.IMAGE_API_BASE_URL || 'https://www.shanbaob.com')
 const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGATION_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
+const gptImage2ApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_API_BASE_URL || 'https://yunwu.ai')
 const yunwuApiBaseUrl = stripTrailingSlash(process.env.YUNWU_API_BASE_URL || 'https://yunwu.ai')
 const arkApiBaseUrl = stripTrailingSlash(process.env.ARK_API_BASE_URL || 'https://ark.cn-beijing.volces.com')
 const dashScopeBaseUrl = stripTrailingSlash(process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com')
@@ -580,6 +581,85 @@ app.get('/api/veo/media/:taskId', async (req, res) => {
 
 app.post('/api/image/chat/completions', handleGeminiImageGenerateRequest)
 app.post('/api/image/generate-content', handleGeminiImageGenerateRequest)
+app.post('/api/gpt-image2/generations', handleGptImage2GenerateRequest)
+
+async function handleGptImage2GenerateRequest(req, res) {
+  const apiKey = process.env.GPT_IMAGE2_API_KEY?.trim()
+  if (!apiKey) {
+    res.status(500).json({
+      error: {
+        message: 'Missing backend config: GPT_IMAGE2_API_KEY',
+        type: 'config_error',
+      },
+    })
+    return
+  }
+
+  const body = req.body || {}
+  const upstreamBody = normalizeGptImage2GenerateBody(body)
+  if (!upstreamBody.model) {
+    res.status(400).json({
+      error: {
+        message: 'Missing required field: model',
+        type: 'request_error',
+      },
+    })
+    return
+  }
+
+  if (!upstreamBody.prompt) {
+    res.status(400).json({
+      error: {
+        message: 'Missing required field: prompt',
+        type: 'request_error',
+      },
+    })
+    return
+  }
+
+  const mediaSummary = parseUsageMediaSummaryHeader(req)
+  const upstreamUrl = `${gptImage2ApiBaseUrl}/v1/images/generations`
+  await proxyJsonWithBody(
+    req,
+    res,
+    upstreamUrl,
+    upstreamBody,
+    {
+      Accept: 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    ({ payload, traceMetadata, status, url }) => {
+      const imageResult = status < 400 ? extractImageResponseResult(payload, upstreamBody.prompt) : null
+      const errorMessage = status >= 400
+        ? (payload?.error?.message || payload?.message || null)
+        : (imageResult ? null : buildImageResponseParseError(payload))
+
+      insertUsageLog({
+        session: req.videoSiteSession,
+        channel: 'image',
+        providerId: body.providerId || 'gpt-image2',
+        model: upstreamBody.model || null,
+        generationMode: upstreamBody.image?.length ? 'image-to-image' : 'text-to-image',
+        prompt: upstreamBody.prompt || null,
+        resolution: upstreamBody.size || null,
+        sampleCount: upstreamBody.n || null,
+        requestParams: attachUsageMediaSummary({
+          model: upstreamBody.model || null,
+          size: upstreamBody.size || null,
+          n: upstreamBody.n || null,
+          quality: upstreamBody.quality || null,
+          format: upstreamBody.format || null,
+          mediaCounts: { images: upstreamBody.image?.length || 0, videos: 0, audios: 0 },
+        }, mediaSummary),
+        upstreamRequestId: traceMetadata?.requestId || null,
+        upstreamTraceId: traceMetadata?.traceId || null,
+        upstreamUrl: url,
+        status: imageResult ? 'succeeded' : 'failed',
+        errorMessage,
+      }).catch(() => {})
+    },
+  )
+}
 
 async function handleGeminiImageGenerateRequest(req, res) {
   if (!process.env.IMAGE_API_KEY) {
@@ -5318,6 +5398,41 @@ function readFirstString(...values) {
   }
 
   return null
+}
+
+function normalizeStringArray(value) {
+  const list = Array.isArray(value) ? value : [value]
+  return list
+    .filter((item) => typeof item === 'string')
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function normalizeInteger(value, fallback, min, max) {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) {
+    return fallback
+  }
+
+  return Math.max(min, Math.min(max, Math.trunc(numericValue)))
+}
+
+function normalizeGptImage2GenerateBody(body) {
+  const normalized = {
+    model: readFirstString(body.model) || 'gpt-image-2-all',
+    prompt: readFirstString(body.prompt) || '',
+    size: readFirstString(body.size, body.resolution) || '1024x1024',
+    n: normalizeInteger(body.n ?? body.sampleCount, 1, 1, 4),
+    quality: readFirstString(body.quality) || 'low',
+    format: readFirstString(body.format) || 'png',
+    image: normalizeStringArray(body.image),
+  }
+
+  if (normalized.image.length === 0) {
+    delete normalized.image
+  }
+
+  return normalized
 }
 
 function readFirstFiniteNumber(...values) {
