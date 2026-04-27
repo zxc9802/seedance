@@ -142,7 +142,12 @@ function App() {
   const updateParam = useCallback((key, value) => {
     setAllParams((prev) => ({
       ...prev,
-      [provider]: normalizeParamsForProvider(provider, { ...prev[provider], [key]: value }, generationMode, videoReferences),
+      [provider]: normalizeParamsForProvider(
+        provider,
+        applyCoupledParamUpdate(PROVIDERS[provider], prev[provider], key, value),
+        generationMode,
+        videoReferences,
+      ),
     }))
   }, [generationMode, provider, videoReferences])
 
@@ -978,6 +983,20 @@ function createInitialParams() {
   return initial
 }
 
+function applyCoupledParamUpdate(config, params, key, value) {
+  const nextParams = { ...(params || {}), [key]: value }
+
+  if (key === 'aspectRatio' && config?.resolutionByAspectRatio?.[value]) {
+    nextParams.resolution = config.resolutionByAspectRatio[value]
+  }
+
+  if (key === 'resolution' && config?.aspectRatioByResolution?.[value]) {
+    nextParams.aspectRatio = config.aspectRatioByResolution[value]
+  }
+
+  return nextParams
+}
+
 function createProviderRuntimeState() {
   return { generating: false, progress: 0, videoUrl: null, downloadUrl: null, error: null }
 }
@@ -1216,12 +1235,32 @@ function normalizeParamsForProvider(provider, params, mode = 't2v', references =
     changed = true
   }
 
+  const aspectRatioOptions = Array.isArray(config.aspectRatios) ? config.aspectRatios : []
+  if (aspectRatioOptions.length > 0 && !aspectRatioOptions.includes(nextParams.aspectRatio)) {
+    const fallbackAspectRatio = config.aspectRatioByResolution?.[nextParams.resolution]
+      || (aspectRatioOptions.includes(config.defaults?.aspectRatio) ? config.defaults.aspectRatio : aspectRatioOptions[0])
+    nextParams = {
+      ...nextParams,
+      aspectRatio: fallbackAspectRatio,
+    }
+    changed = true
+  }
+
   const resolutionOptions = config.resolutions?.[nextParams.model] || config.resolutions?.default || []
 
   if (resolutionOptions.length > 0 && !resolutionOptions.includes(nextParams.resolution)) {
     nextParams = {
       ...nextParams,
       resolution: resolutionOptions[0],
+    }
+    changed = true
+  }
+
+  const aspectMatchedResolution = config.resolutionByAspectRatio?.[nextParams.aspectRatio]
+  if (aspectMatchedResolution && nextParams.resolution !== aspectMatchedResolution) {
+    nextParams = {
+      ...nextParams,
+      resolution: aspectMatchedResolution,
     }
     changed = true
   }
@@ -1761,13 +1800,18 @@ function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
       providerId: provider,
       model: params.model,
       prompt,
-      size: params.resolution,
+      size: resolveImageSizeForParams(provider, params),
       n: params.sampleCount,
       quality: params.quality,
       format: params.format,
       ...(mode === 'i2v' && mediaList.length > 0 ? { image: mediaList } : {}),
     },
   }
+}
+
+function resolveImageSizeForParams(provider, params) {
+  const config = PROVIDERS[provider]
+  return config?.resolutionByAspectRatio?.[params?.aspectRatio] || params?.resolution
 }
 
 function buildOpenAiImageSystemInstruction(params, explicitDimensions) {

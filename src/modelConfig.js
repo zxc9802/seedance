@@ -393,6 +393,17 @@ const BASE_PROVIDERS = {
     ],
     aspectRatios: ['1:1', '16:9', '9:16'],
     resolutions: { default: ['1024x1024', '1536x1024', '1024x1536'] },
+    hideResolutionSelector: true,
+    resolutionByAspectRatio: {
+      '1:1': '1024x1024',
+      '16:9': '1536x1024',
+      '9:16': '1024x1536',
+    },
+    aspectRatioByResolution: {
+      '1024x1024': '1:1',
+      '1536x1024': '16:9',
+      '1024x1536': '9:16',
+    },
     durations: [],
     sampleCounts: [1, 2, 3, 4],
     features: {

@@ -414,7 +414,8 @@ function Toggle({ label, desc, checked, onChange }) {
 }
 
 function AspectIcon({ ratio }) {
-  const landscape = ratio === '16:9'
+  const [width, height] = String(ratio).split(':').map((item) => Number(item))
+  const landscape = Number.isFinite(width) && Number.isFinite(height) ? width > height : ratio === '16:9'
   const square = ratio === '1:1'
   return (
     <svg width="14" height="12" viewBox="0 0 14 12" fill="none" style={{ flexShrink: 0 }}>

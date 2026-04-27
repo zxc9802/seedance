@@ -23,15 +23,8 @@ export default function VideoPreview({ videoUrl, downloadUrl, generating, progre
   )
   const effectiveDownloadUrl = downloadUrl || videoUrl
 
-  const frameClass = (() => {
-    switch (params.aspectRatio) {
-      case '16:9': return 'landscape'
-      case '1:1': return 'square'
-      case '3:4': return 'ratio-3-4'
-      case '4:3': return 'ratio-4-3'
-      default: return 'portrait'
-    }
-  })()
+  const frameClass = resolveAspectRatioFrameClass(params.aspectRatio)
+  const frameStyle = resolveAspectRatioFrameStyle(params.aspectRatio)
 
   const handleDownload = () => {
     if (!effectiveDownloadUrl) return
@@ -89,6 +82,7 @@ export default function VideoPreview({ videoUrl, downloadUrl, generating, progre
       <div className="preview-area">
         <motion.div
           className={`preview-frame ${frameClass}`}
+          style={frameStyle}
           initial={{ opacity: 0, scale: 0.97 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.3 }}
@@ -159,7 +153,7 @@ export default function VideoPreview({ videoUrl, downloadUrl, generating, progre
           <MetaTag label="模型" value={displayModelName} color={cfg.color} />
           {params.aspectRatio && <MetaTag label="比例" value={params.aspectRatio} />}
           {params.duration != null && <MetaTag label="时长" value={`${params.duration}秒`} />}
-          {params.resolution && <MetaTag label="分辨率" value={params.resolution} />}
+          {!cfg.hideResolutionSelector && params.resolution && <MetaTag label="分辨率" value={params.resolution} />}
         </div>
       </div>
 
@@ -230,6 +224,33 @@ function MetaTag({ label, value, color }) {
       <span className="mt-value">{value}</span>
     </span>
   )
+}
+
+function resolveAspectRatioFrameClass(ratio) {
+  const parsed = parseAspectRatio(ratio)
+  if (!parsed) return 'portrait'
+
+  const { width, height } = parsed
+  if (width === height) return 'square'
+  return width > height ? 'landscape' : 'portrait'
+}
+
+function resolveAspectRatioFrameStyle(ratio) {
+  const parsed = parseAspectRatio(ratio)
+  if (!parsed) return undefined
+
+  return {
+    '--preview-aspect-ratio': `${parsed.width} / ${parsed.height}`,
+  }
+}
+
+function parseAspectRatio(ratio) {
+  const [width, height] = String(ratio || '').split(':').map((item) => Number(item))
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return null
+  }
+
+  return { width, height }
 }
 
 function inferExtension(url, isImageOutput) {

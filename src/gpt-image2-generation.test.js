@@ -8,6 +8,8 @@ test('gpt-image2 frontend sends prompt, exposed params, and image references to 
 
   assert.match(appSource, /function buildGptImage2Request\(provider, params, prompt, mode, mediaList\)/)
   assert.match(appSource, /url: '\/api\/gpt-image2\/generations'/)
+  assert.match(appSource, /size: resolveImageSizeForParams\(provider, params\)/)
+  assert.match(appSource, /function resolveImageSizeForParams\(provider, params\)/)
   assert.match(appSource, /quality: params\.quality/)
   assert.match(appSource, /format: params\.format/)
   assert.match(appSource, /image: mediaList/)
@@ -20,4 +22,20 @@ test('gpt-image2 backend proxies to Yunwu image generations with a private API k
   assert.match(serverSource, /\/v1\/images\/generations/)
   assert.match(serverSource, /process\.env\.GPT_IMAGE2_API_KEY/)
   assert.match(serverSource, /image: normalizeStringArray\(body\.image\)/)
+})
+
+test('image preview derives its frame from the selected aspect ratio geometry', async () => {
+  const previewSource = await fs.readFile(path.resolve('src/components/VideoPreview.jsx'), 'utf8')
+  const previewCss = await fs.readFile(path.resolve('src/components/VideoPreview.css'), 'utf8')
+
+  assert.match(previewSource, /resolveAspectRatioFrameClass\(params\.aspectRatio\)/)
+  assert.match(previewSource, /resolveAspectRatioFrameStyle\(params\.aspectRatio\)/)
+  assert.doesNotMatch(previewSource, /case '16:9': return 'landscape'/)
+  assert.match(previewCss, /aspect-ratio: var\(--preview-aspect-ratio/)
+})
+
+test('image preview hides resolution metadata when the provider hides resolution controls', async () => {
+  const previewSource = await fs.readFile(path.resolve('src/components/VideoPreview.jsx'), 'utf8')
+
+  assert.match(previewSource, /!cfg\.hideResolutionSelector && params\.resolution/)
 })
