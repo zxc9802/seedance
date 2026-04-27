@@ -38,6 +38,13 @@ const imageApiBaseUrl = normalizeGeminiImageBaseUrl(process.env.IMAGE_API_BASE_U
 const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGATION_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const gptImage2ApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_API_BASE_URL || 'https://yunwu.ai')
 const bcaiApiUrl = normalizeChatCompletionsUrl(process.env.BCAI_API_URL || process.env.BCAI_API_BASE_URL || 'https://bcai.online/v1/chat/completions')
+const shanbaoCopywritingApiUrl = normalizeChatCompletionsUrl(
+  process.env.SHANBAO_API_URL
+    || process.env.SHANBAO_API_BASE_URL
+    || process.env.CLAUDE1_API_URL
+    || process.env.CLAUDE1_API_BASE_URL
+    || 'https://ai.shanbaob.net/v1/chat/completions',
+)
 const yunwuApiBaseUrl = stripTrailingSlash(process.env.YUNWU_API_BASE_URL || 'https://yunwu.ai')
 const arkApiBaseUrl = stripTrailingSlash(process.env.ARK_API_BASE_URL || 'https://ark.cn-beijing.volces.com')
 const dashScopeBaseUrl = stripTrailingSlash(process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com')
@@ -70,7 +77,7 @@ const COPYWRITING_RETRY_OPTIONS = Object.freeze({
   statusCodes: new Set([429, 502, 503, 504, 529]),
   delaysMs: [700, 1400, 2600, 4200],
   retryNetworkErrors: true,
-  exhaustedMessage: 'BCAI 文案服务暂时不可用，已自动重试仍未成功。可能已产生计费但未返回内容，请记录 requestId 后稍后重试或到服务商后台核对。',
+  exhaustedMessage: '文案服务暂时不可用，已自动重试仍未成功。可能已产生计费但未返回内容，请记录 requestId 后稍后重试或到服务商后台核对。',
 })
 const USAGE_STATUS_NEEDS_REVIEW = 'needs_review'
 const USAGE_STATUS_SYNC_INTERVAL_MS = Math.max(60000, Number(process.env.USAGE_STATUS_SYNC_INTERVAL_MS || 180000))
@@ -593,18 +600,19 @@ app.post('/api/gpt-image2/generations', handleGptImage2GenerateRequest)
 app.post('/api/copywriting/chat/completions', handleCopywritingChatRequest)
 
 async function handleCopywritingChatRequest(req, res) {
-  const apiKey = resolveBcaiApiKey()
+  const body = req.body || {}
+  const upstream = resolveCopywritingProviderConfig(body.providerId)
+  const apiKey = upstream.apiKey
   if (!apiKey) {
     res.status(500).json({
       error: {
-        message: 'Missing backend config: BCAI_API_KEY',
+        message: `Missing backend config: ${upstream.missingKeyName}`,
         type: 'config_error',
       },
     })
     return
   }
 
-  const body = req.body || {}
   const upstreamBody = normalizeCopywritingChatBody(body)
   if (!upstreamBody.model) {
     res.status(400).json({
@@ -630,7 +638,7 @@ async function handleCopywritingChatRequest(req, res) {
   await proxyJsonWithBody(
     req,
     res,
-    bcaiApiUrl,
+    upstream.apiUrl,
     upstreamBody,
     {
       Accept: 'application/json',
@@ -645,7 +653,7 @@ async function handleCopywritingChatRequest(req, res) {
       insertUsageLog({
         session: req.videoSiteSession,
         channel: 'copywriting',
-        providerId: body.providerId || 'bcai-copywriting',
+        providerId: body.providerId || upstream.providerId,
         model: upstreamBody.model || null,
         generationMode: 'copywriting',
         prompt: extractCopywritingPromptText(upstreamBody.messages) || null,
@@ -5659,6 +5667,35 @@ function normalizeGptImage2GenerateBody(body) {
 
 function resolveBcaiApiKey() {
   return process.env.BCAI_API_KEY?.trim() || process.env.COPYWRITING_API_KEY?.trim() || ''
+}
+
+function resolveShanbaoCopywritingApiKey() {
+  return (
+    process.env.SHANBAO_API_KEY?.trim()
+    || process.env.CLAUDE1_API_KEY?.trim()
+    || process.env.IMAGE_API_KEY?.trim()
+    || ''
+  )
+}
+
+function resolveCopywritingProviderConfig(rawProviderId) {
+  const providerId = readFirstString(rawProviderId) || 'bcai-copywriting'
+
+  if (providerId === 'claude1-copywriting') {
+    return {
+      providerId,
+      apiUrl: shanbaoCopywritingApiUrl,
+      apiKey: resolveShanbaoCopywritingApiKey(),
+      missingKeyName: 'SHANBAO_API_KEY or IMAGE_API_KEY',
+    }
+  }
+
+  return {
+    providerId: 'bcai-copywriting',
+    apiUrl: bcaiApiUrl,
+    apiKey: resolveBcaiApiKey(),
+    missingKeyName: 'BCAI_API_KEY',
+  }
 }
 
 function normalizeCopywritingChatBody(body) {

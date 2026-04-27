@@ -56,6 +56,17 @@ test('copywriting backend proxies to BCAI chat completions with a private API ke
   assert.match(serverSource, /\/v1\/chat\/completions/)
 })
 
+test('copywriting backend routes claude1 to Shanbao chat completions', async () => {
+  const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
+
+  assert.match(serverSource, /const shanbaoCopywritingApiUrl = normalizeChatCompletionsUrl/)
+  assert.match(serverSource, /https:\/\/ai\.shanbaob\.net\/v1\/chat\/completions/)
+  assert.match(serverSource, /process\.env\.SHANBAO_API_KEY/)
+  assert.match(serverSource, /process\.env\.IMAGE_API_KEY/)
+  assert.match(serverSource, /providerId === 'claude1-copywriting'/)
+  assert.match(serverSource, /shanbaoCopywritingApiUrl/)
+})
+
 test('copywriting backend preserves multimodal chat content arrays', async () => {
   const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
 
@@ -81,15 +92,15 @@ test('copywriting backend retries transient upstream overloads before returning 
   assert.match(serverSource, /function shouldRetryProxyResponse\(status, retryOptions, attempt\)/)
   assert.match(serverSource, /function didExhaustProxyRetries\(status, retryOptions, attempt\)/)
   assert.match(serverSource, /X-Proxy-Retry-Attempts/)
-  assert.match(serverSource, /BCAI 文案服务暂时不可用，已自动重试仍未成功。/)
+  assert.match(serverSource, /文案服务暂时不可用，已自动重试仍未成功。/)
 })
 
-test('copywriting frontend maps transient BCAI failures to a billing-safe message', async () => {
+test('copywriting frontend maps transient copywriting failures to a billing-safe message', async () => {
   const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
 
   assert.match(appSource, /function isTransientCopywritingError\(response, message\)/)
   assert.match(appSource, /response\.url\.includes\('\/api\/copywriting\/chat\/completions'\)/)
-  assert.match(appSource, /BCAI 文案服务暂时不可用，已自动重试仍未成功。/)
+  assert.match(appSource, /文案服务暂时不可用，已自动重试仍未成功。/)
 })
 
 test('preview panel renders text output for copywriting models', async () => {

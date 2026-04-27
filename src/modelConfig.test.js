@@ -48,17 +48,26 @@ test('gpt-image2 exposes Yunwu image generation parameters in the frontend confi
   assert.deepEqual(provider.formatOptions.map((item) => item.value), ['png', 'jpeg', 'webp'])
 })
 
-test('BCAI Claude is exposed as a copywriting text model', async () => {
+test('Claude copywriting providers expose claude1 and claude2 options', async () => {
   const providers = await loadProviders()
-  const provider = providers['bcai-copywriting']
+  const claude1 = providers['claude1-copywriting']
+  const claude2 = providers['bcai-copywriting']
 
-  assert.equal(provider.id, 'bcai-copywriting')
-  assert.equal(provider.typeId, 'copywriting')
-  assert.equal(provider.typeLabel, '文案模型')
-  assert.equal(provider.outputType, 'text')
-  assert.equal(provider.backendKind, 'copywriting-chat')
-  assert.equal(provider.defaults.model, 'claude-sonnet-4-6')
-  assert.deepEqual(provider.generationModes, [
+  assert.equal(claude1.id, 'claude1-copywriting')
+  assert.equal(claude1.typeId, 'copywriting')
+  assert.equal(claude1.typeLabel, '文案模型')
+  assert.equal(claude1.selectorLabel, 'claude1')
+  assert.equal(claude1.outputType, 'text')
+  assert.equal(claude1.backendKind, 'copywriting-chat')
+  assert.equal(claude1.defaults.model, 'claude-sonnet-4-6')
+
+  assert.equal(claude2.id, 'bcai-copywriting')
+  assert.equal(claude2.selectorLabel, 'claude2')
+  assert.equal(claude2.outputType, 'text')
+  assert.equal(claude2.backendKind, 'copywriting-chat')
+  assert.equal(claude2.defaults.model, 'claude-sonnet-4-6')
+
+  assert.deepEqual(claude1.generationModes, [
     { value: 'copywriting', label: '文案生成' },
   ])
 })

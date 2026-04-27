@@ -470,11 +470,41 @@ const BASE_PROVIDERS = {
     referenceHelpText: 'Supports text-to-image and multi-image generation. The backend uploads references first and sends their URLs in payload.resources. Up to 14 reference images.',
     backendKind: 'aggregation-image',
   },
+  'claude1-copywriting': {
+    id: 'claude1-copywriting',
+    typeId: 'copywriting',
+    typeLabel: '文案模型',
+    selectorLabel: 'claude1',
+    name: 'Claude Sonnet 4.6',
+    vendor: 'Shanbao',
+    color: '#1f7a8c',
+    outputType: 'text',
+    showModelSelector: true,
+    models: [
+      { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', tag: '文案' },
+    ],
+    aspectRatios: [],
+    resolutions: { default: [] },
+    durations: [],
+    sampleCounts: [1],
+    features: {
+      generateAudio: false,
+      negativePrompt: false,
+      referenceImage: false,
+    },
+    generationModes: [
+      { value: 'copywriting', label: '文案生成' },
+    ],
+    defaults: {
+      model: 'claude-sonnet-4-6',
+    },
+    backendKind: 'copywriting-chat',
+  },
   'bcai-copywriting': {
     id: 'bcai-copywriting',
     typeId: 'copywriting',
     typeLabel: '文案模型',
-    selectorLabel: 'claude-sonnet-4-6',
+    selectorLabel: 'claude2',
     name: 'Claude Sonnet 4.6',
     vendor: 'BCAI',
     color: '#256f5f',
@@ -516,6 +546,7 @@ const BASE_PROVIDER_ORDER = [
   'gemini-image',
   'gpt-image2',
   'gemini-image-aggregation',
+  'claude1-copywriting',
   'bcai-copywriting',
 ]
 
