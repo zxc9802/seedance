@@ -12,6 +12,13 @@ test('copywriting frontend posts a chat completion request and stores text outpu
   assert.match(appSource, /content: buildCopywritingContentParts\(prompt, attachments\)/)
   assert.match(appSource, /function parseCopywritingChatResponse\(data\)/)
   assert.match(appSource, /textOutput: textResult/)
+  assert.match(appSource, /textOutput=\{currentState\.textOutput\}/)
+})
+
+test('copywriting frontend parses Claude-style root content arrays', async () => {
+  const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
+
+  assert.match(appSource, /extractChatTextContent\(data\?\.content\)/)
 })
 
 test('copywriting frontend can send image and document attachments as chat content parts', async () => {
@@ -45,6 +52,12 @@ test('copywriting backend preserves multimodal chat content arrays', async () =>
   assert.match(serverSource, /part\?\.type === 'image_url'/)
   assert.match(serverSource, /part\?\.type === 'file'/)
   assert.match(serverSource, /normalizeCopywritingContentParts\(item\?\.content\)/)
+})
+
+test('copywriting backend treats Claude-style root content as successful text output', async () => {
+  const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
+
+  assert.match(serverSource, /normalizeCopywritingMessageContent\(payload\?\.content\)/)
 })
 
 test('copywriting backend retries transient upstream overloads before returning an error', async () => {

@@ -5786,6 +5786,7 @@ function extractCopywritingResponseText(payload) {
   return normalizeCopywritingMessageContent(content)
     || normalizeCopywritingMessageContent(payload?.output_text)
     || normalizeCopywritingMessageContent(payload?.text)
+    || normalizeCopywritingMessageContent(payload?.content)
     || normalizeCopywritingMessageContent(payload?.message)
 }
 

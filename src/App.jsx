@@ -1004,6 +1004,7 @@ function App() {
           <VideoPreview
             videoUrl={currentState.videoUrl}
             downloadUrl={currentState.downloadUrl}
+            textOutput={currentState.textOutput}
             generating={currentState.generating}
             progress={currentState.progress}
             error={formatRuntimeErrorMessage(provider, currentState.error)}
@@ -3644,6 +3645,7 @@ function parseCopywritingChatResponse(data) {
 
   return extractChatTextContent(data?.output_text)
     || extractChatTextContent(data?.text)
+    || extractChatTextContent(data?.content)
     || extractChatTextContent(data?.message)
     || ''
 }
