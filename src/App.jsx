@@ -3158,6 +3158,13 @@ async function formatHttpError(response) {
     const newApiVersion = response.headers.get('x-new-api-version')
     const requestId = resolveResponseRequestId(response, payload)
 
+    if (isTransientCopywritingError(response, message)) {
+      return appendRequestId(
+        `API 错误 (${response.status}): BCAI 文案服务暂时不可用，可能已产生计费但未返回内容。请不要连续点击生成，记录 requestId 后稍后重试或到服务商后台核对。`,
+        requestId,
+      )
+    }
+
     if (
       newApiVersion
       && payload?.error?.type === 'upstream_error'
@@ -3182,6 +3189,18 @@ async function formatHttpError(response) {
     `API 错误 (${response.status}): ${body}`,
     resolveResponseRequestId(response),
   )
+}
+
+function isTransientCopywritingError(response, message) {
+  return response.url.includes('/api/copywriting/chat/completions')
+    && [429, 502, 503, 504, 529].includes(response.status)
+    && typeof message === 'string'
+    && (
+      message.includes('service temporarily unavailable')
+      || message.includes('service overloaded')
+      || message.includes('temporarily unavailable')
+      || message.includes('overloaded')
+    )
 }
 
 function resolveResponseRequestId(response, payload = null) {

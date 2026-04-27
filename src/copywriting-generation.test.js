@@ -71,16 +71,25 @@ test('copywriting backend treats Claude-style root content as successful text ou
   assert.match(serverSource, /normalizeCopywritingMessageContent\(payload\?\.content\)/)
 })
 
-test('copywriting backend retries transient upstream overloads before returning an error', async () => {
+test('copywriting backend does not retry billable transient failures by default', async () => {
   const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
 
   assert.match(serverSource, /const COPYWRITING_RETRY_OPTIONS = Object\.freeze\(\{/)
+  assert.match(serverSource, /maxAttempts: readPositiveIntegerEnv\(process\.env\.BCAI_COPYWRITING_MAX_ATTEMPTS, 1\)/)
   assert.match(serverSource, /statusCodes: new Set\(\[429, 502, 503, 504, 529\]\)/)
   assert.match(serverSource, /retry: COPYWRITING_RETRY_OPTIONS/)
   assert.match(serverSource, /function shouldRetryProxyResponse\(status, retryOptions, attempt\)/)
   assert.match(serverSource, /function didExhaustProxyRetries\(status, retryOptions, attempt\)/)
   assert.match(serverSource, /X-Proxy-Retry-Attempts/)
-  assert.match(serverSource, /文案服务暂时繁忙，已自动重试仍未成功，请稍后再试。/)
+  assert.match(serverSource, /BCAI 文案服务暂时不可用，可能已产生计费但未返回内容。请不要连续点击生成/)
+})
+
+test('copywriting frontend maps transient BCAI failures to a billing-safe message', async () => {
+  const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
+
+  assert.match(appSource, /function isTransientCopywritingError\(response, message\)/)
+  assert.match(appSource, /response\.url\.includes\('\/api\/copywriting\/chat\/completions'\)/)
+  assert.match(appSource, /BCAI 文案服务暂时不可用，可能已产生计费但未返回内容。请不要连续点击生成/)
 })
 
 test('preview panel renders text output for copywriting models', async () => {
