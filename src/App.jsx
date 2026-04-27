@@ -13,7 +13,7 @@ import VideoPreview from './components/VideoPreview'
 import './App.css'
 
 const VIDEO_PROVIDERS = new Set(
-  PROVIDER_ORDER.filter((key) => PROVIDERS[key].outputType !== 'image')
+  PROVIDER_ORDER.filter((key) => (PROVIDERS[key].outputType || 'video') === 'video')
 )
 function isVideoProvider(id) {
   return VIDEO_PROVIDERS.has(id)
@@ -60,6 +60,10 @@ function isGptImage2Provider(id) {
 
 function isOpenAiImageProvider(id) {
   return PROVIDERS[id]?.backendKind === 'openai-image'
+}
+
+function isCopywritingProvider(id) {
+  return PROVIDERS[id]?.backendKind === 'copywriting-chat'
 }
 
 const OPENAI_IMAGE_DIMENSIONS = Object.freeze({
@@ -317,12 +321,12 @@ function App() {
         updateProviderState(provider, { error: validationError })
         return
       }
-    } else if (generationMode !== 't2v' && referenceMedia.length === 0) {
+    } else if (!isCopywritingProvider(provider) && generationMode !== 't2v' && referenceMedia.length === 0) {
       updateProviderState(provider, { error: '请先添加参考图片' })
       return
     }
 
-    updateProviderState(provider, { generating: true, progress: 0, error: null, videoUrl: null, downloadUrl: null })
+    updateProviderState(provider, { generating: true, progress: 0, error: null, videoUrl: null, downloadUrl: null, textOutput: null })
 
     let progress = 0
     const progressTimer = window.setInterval(() => {
@@ -332,6 +336,29 @@ function App() {
     }, 900)
 
     try {
+      if (isCopywritingProvider(provider)) {
+        const requestInfo = buildCopywritingRequest(provider, params, finalPrompt)
+        const response = await fetch(requestInfo.url, {
+          method: 'POST',
+          headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
+          body: JSON.stringify(requestInfo.body),
+        })
+
+        if (!response.ok) {
+          throw new Error(await formatHttpError(response))
+        }
+
+        const data = await response.json()
+        const textResult = parseCopywritingChatResponse(data)
+        if (!textResult) {
+          throw new Error('文案接口返回成功，但没有找到可展示的文本内容')
+        }
+
+        window.clearInterval(progressTimer)
+        updateProviderState(provider, { progress: 100, textOutput: textResult })
+        return
+      }
+
       if (isVeoFastProvider(provider)) {
         const base64Images = await readVideoReferencesAsBase64(videoReferences)
         const requestBody = buildVeoFastRequest(params, finalPrompt, generationMode, base64Images)
@@ -1809,6 +1836,20 @@ function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
   }
 }
 
+function buildCopywritingRequest(provider, params, prompt) {
+  return {
+    url: '/api/copywriting/chat/completions',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: {
+      providerId: provider,
+      model: params.model,
+      messages: [{ role: 'user', content: prompt }],
+    },
+  }
+}
+
 function resolveImageSizeForParams(provider, params) {
   const config = PROVIDERS[provider]
   return config?.resolutionByAspectRatio?.[params?.aspectRatio] || params?.resolution
@@ -2639,7 +2680,7 @@ async function uploadReferenceBatch(assets, options = {}) {
 
 function resolveImageMaterialType(provider, params) {
   if (provider !== 'veo') return 'direct'
-  return params.imageMaterialType || 'role'
+  return params.imageMaterialType || 'direct'
 }
 
 function resolveReferenceUploadOptions(provider, params) {
@@ -3514,6 +3555,37 @@ function parseImageParts(parts, fallbackPrompt) {
   }
 
   return null
+}
+
+function parseCopywritingChatResponse(data) {
+  const content = data?.choices?.[0]?.message?.content
+  const parsedContent = extractChatTextContent(content)
+  if (parsedContent) return parsedContent
+
+  return extractChatTextContent(data?.output_text)
+    || extractChatTextContent(data?.text)
+    || extractChatTextContent(data?.message)
+    || ''
+}
+
+function extractChatTextContent(content) {
+  if (typeof content === 'string') {
+    return content.trim()
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === 'string') return item
+        if (typeof item?.text === 'string') return item.text
+        if (typeof item?.content === 'string') return item.content
+        return ''
+      })
+      .join('')
+      .trim()
+  }
+
+  return ''
 }
 
 function parseImageRecord(record, fallbackPrompt) {

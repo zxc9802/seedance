@@ -28,4 +28,5 @@ test('App generation flow no longer short-circuits seedance1 to a frontend mock'
   assert.doesNotMatch(appSource, /mockVideoGeneration/)
   assert.doesNotMatch(appSource, /isFrontendMockVideoProvider/)
   assert.doesNotMatch(appSource, /Failed to fetch/)
+  assert.match(appSource, /function resolveImageMaterialType\(provider, params\) \{\s+if \(provider !== 'veo'\) return 'direct'\s+return params\.imageMaterialType \|\| 'direct'/s)
 })

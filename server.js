@@ -37,6 +37,7 @@ const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL 
 const imageApiBaseUrl = normalizeGeminiImageBaseUrl(process.env.IMAGE_API_BASE_URL || 'https://www.shanbaob.com')
 const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGATION_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const gptImage2ApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_API_BASE_URL || 'https://yunwu.ai')
+const bcaiApiUrl = normalizeChatCompletionsUrl(process.env.BCAI_API_URL || process.env.BCAI_API_BASE_URL || 'https://bcai.online/v1/chat/completions')
 const yunwuApiBaseUrl = stripTrailingSlash(process.env.YUNWU_API_BASE_URL || 'https://yunwu.ai')
 const arkApiBaseUrl = stripTrailingSlash(process.env.ARK_API_BASE_URL || 'https://ark.cn-beijing.volces.com')
 const dashScopeBaseUrl = stripTrailingSlash(process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com')
@@ -582,6 +583,79 @@ app.get('/api/veo/media/:taskId', async (req, res) => {
 app.post('/api/image/chat/completions', handleGeminiImageGenerateRequest)
 app.post('/api/image/generate-content', handleGeminiImageGenerateRequest)
 app.post('/api/gpt-image2/generations', handleGptImage2GenerateRequest)
+app.post('/api/copywriting/chat/completions', handleCopywritingChatRequest)
+
+async function handleCopywritingChatRequest(req, res) {
+  const apiKey = resolveBcaiApiKey()
+  if (!apiKey) {
+    res.status(500).json({
+      error: {
+        message: 'Missing backend config: BCAI_API_KEY',
+        type: 'config_error',
+      },
+    })
+    return
+  }
+
+  const body = req.body || {}
+  const upstreamBody = normalizeCopywritingChatBody(body)
+  if (!upstreamBody.model) {
+    res.status(400).json({
+      error: {
+        message: 'Missing required field: model',
+        type: 'request_error',
+      },
+    })
+    return
+  }
+
+  if (!upstreamBody.messages.length) {
+    res.status(400).json({
+      error: {
+        message: 'Missing required field: messages',
+        type: 'request_error',
+      },
+    })
+    return
+  }
+
+  const mediaSummary = parseUsageMediaSummaryHeader(req)
+  await proxyJsonWithBody(
+    req,
+    res,
+    bcaiApiUrl,
+    upstreamBody,
+    {
+      Accept: 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    ({ payload, traceMetadata, status, url }) => {
+      const textResult = status < 400 ? extractCopywritingResponseText(payload) : null
+      const errorMessage = status >= 400
+        ? (payload?.error?.message || payload?.message || null)
+        : (textResult ? null : 'Copywriting response did not contain text content')
+
+      insertUsageLog({
+        session: req.videoSiteSession,
+        channel: 'copywriting',
+        providerId: body.providerId || 'bcai-copywriting',
+        model: upstreamBody.model || null,
+        generationMode: 'copywriting',
+        prompt: extractCopywritingPromptText(upstreamBody.messages) || null,
+        requestParams: attachUsageMediaSummary({
+          model: upstreamBody.model || null,
+          temperature: upstreamBody.temperature ?? null,
+          max_tokens: upstreamBody.max_tokens ?? null,
+        }, mediaSummary),
+        upstreamRequestId: traceMetadata?.requestId || null,
+        upstreamTraceId: traceMetadata?.traceId || null,
+        upstreamUrl: url,
+        status: textResult ? 'succeeded' : 'failed',
+        errorMessage,
+      }).catch(() => {})
+    },
+  )
+}
 
 async function handleGptImage2GenerateRequest(req, res) {
   const apiKey = process.env.GPT_IMAGE2_API_KEY?.trim()
@@ -5435,6 +5509,85 @@ function normalizeGptImage2GenerateBody(body) {
   return normalized
 }
 
+function resolveBcaiApiKey() {
+  return process.env.BCAI_API_KEY?.trim() || process.env.COPYWRITING_API_KEY?.trim() || ''
+}
+
+function normalizeCopywritingChatBody(body) {
+  const messages = normalizeCopywritingMessages(body.messages)
+  const prompt = readFirstString(body.prompt)
+  if (messages.length === 0 && prompt) {
+    messages.push({ role: 'user', content: prompt })
+  }
+
+  return {
+    model: readFirstString(body.model) || 'claude-sonnet-4-6',
+    messages,
+    temperature: normalizeTemperature(body.temperature),
+    max_tokens: normalizeInteger(body.max_tokens ?? body.maxTokens, 2000, 1, 8192),
+  }
+}
+
+function normalizeCopywritingMessages(value) {
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map((item) => {
+      const role = readFirstString(item?.role) || 'user'
+      const content = normalizeCopywritingMessageContent(item?.content)
+      if (!content) return null
+
+      return {
+        role: ['system', 'assistant', 'user'].includes(role) ? role : 'user',
+        content,
+      }
+    })
+    .filter(Boolean)
+}
+
+function normalizeCopywritingMessageContent(content) {
+  if (typeof content === 'string') {
+    return content.trim()
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === 'string') return part
+        if (typeof part?.text === 'string') return part.text
+        if (typeof part?.content === 'string') return part.content
+        return ''
+      })
+      .join('')
+      .trim()
+  }
+
+  return ''
+}
+
+function normalizeTemperature(value) {
+  const numericValue = Number(value)
+  if (!Number.isFinite(numericValue)) {
+    return 0.7
+  }
+
+  return Math.max(0, Math.min(2, numericValue))
+}
+
+function extractCopywritingPromptText(messages) {
+  if (!Array.isArray(messages)) return ''
+  const userMessage = messages.find((message) => message?.role === 'user') || messages[0]
+  return typeof userMessage?.content === 'string' ? userMessage.content.trim() : ''
+}
+
+function extractCopywritingResponseText(payload) {
+  const content = payload?.choices?.[0]?.message?.content
+  return normalizeCopywritingMessageContent(content)
+    || normalizeCopywritingMessageContent(payload?.output_text)
+    || normalizeCopywritingMessageContent(payload?.text)
+    || normalizeCopywritingMessageContent(payload?.message)
+}
+
 function readFirstFiniteNumber(...values) {
   for (const value of values) {
     const numericValue = Number(value)
@@ -5755,6 +5908,28 @@ function normalizeGeminiImageBaseUrl(value) {
   }
 
   return normalized
+}
+
+function normalizeChatCompletionsUrl(value) {
+  const normalized = stripTrailingSlash(String(value || '').trim())
+
+  try {
+    const url = new URL(normalized)
+    const pathname = stripTrailingSlash(url.pathname || '')
+    if (pathname.endsWith('/chat/completions')) {
+      return stripTrailingSlash(url.toString())
+    }
+
+    if (pathname.endsWith('/v1')) {
+      url.pathname = `${pathname}/chat/completions`
+      return url.toString()
+    }
+
+    url.pathname = `${pathname}/v1/chat/completions`
+    return url.toString()
+  } catch {
+    return normalized
+  }
 }
 
 function buildGeminiGenerateContentUrl(baseUrl, model) {

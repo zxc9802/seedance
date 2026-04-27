@@ -19,6 +19,7 @@ test('Seedance 1 exposes 480p and 720p resolution options while defaulting to 72
 
   assert.deepEqual(providers.veo.resolutions.default, ['480p', '720p'])
   assert.equal(providers.veo.defaults.resolution, '720p')
+  assert.equal(providers.veo.defaults.imageMaterialType, 'direct')
 })
 
 test('gpt-image2 exposes Yunwu image generation parameters in the frontend config', async () => {
@@ -45,4 +46,19 @@ test('gpt-image2 exposes Yunwu image generation parameters in the frontend confi
   assert.deepEqual(provider.sampleCounts, [1, 2, 3, 4])
   assert.deepEqual(provider.qualityOptions.map((item) => item.value), ['low', 'medium', 'high'])
   assert.deepEqual(provider.formatOptions.map((item) => item.value), ['png', 'jpeg', 'webp'])
+})
+
+test('BCAI Claude is exposed as a copywriting text model', async () => {
+  const providers = await loadProviders()
+  const provider = providers['bcai-copywriting']
+
+  assert.equal(provider.id, 'bcai-copywriting')
+  assert.equal(provider.typeId, 'copywriting')
+  assert.equal(provider.typeLabel, '文案模型')
+  assert.equal(provider.outputType, 'text')
+  assert.equal(provider.backendKind, 'copywriting-chat')
+  assert.equal(provider.defaults.model, 'claude-sonnet-4-6')
+  assert.deepEqual(provider.generationModes, [
+    { value: 'copywriting', label: '文案生成' },
+  ])
 })

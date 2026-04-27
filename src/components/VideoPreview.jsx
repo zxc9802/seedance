@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Copy, Download, Loader2, Maximize2, MonitorPlay, X } from 'lucide-react'
+import { Copy, Download, FileText, Loader2, Maximize2, MonitorPlay, X } from 'lucide-react'
 import { PROVIDERS } from '../modelConfig'
 import './VideoPreview.css'
 
-export default function VideoPreview({ videoUrl, downloadUrl, generating, progress, error, params, provider }) {
+export default function VideoPreview({ videoUrl, downloadUrl, textOutput, generating, progress, error, params, provider }) {
   const cfg = PROVIDERS[provider]
+  const isTextOutput = cfg.outputType === 'text'
   const isImageOutput = cfg.outputType === 'image'
+  const outputLabel = isTextOutput ? '文案' : (isImageOutput ? '图片' : '视频')
   const displayModelName = cfg.selectorLabel || cfg.name
   const [showFullscreen, setShowFullscreen] = useState(false)
   const [playbackError, setPlaybackError] = useState(null)
@@ -23,10 +25,23 @@ export default function VideoPreview({ videoUrl, downloadUrl, generating, progre
   )
   const effectiveDownloadUrl = downloadUrl || videoUrl
 
-  const frameClass = resolveAspectRatioFrameClass(params.aspectRatio)
-  const frameStyle = resolveAspectRatioFrameStyle(params.aspectRatio)
+  const frameClass = isTextOutput ? 'text' : resolveAspectRatioFrameClass(params.aspectRatio)
+  const frameStyle = isTextOutput ? undefined : resolveAspectRatioFrameStyle(params.aspectRatio)
 
   const handleDownload = () => {
+    if (isTextOutput) {
+      if (!textOutput) return
+      const objectUrl = URL.createObjectURL(new Blob([textOutput], { type: 'text/plain;charset=utf-8' }))
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = `copywriting-${Date.now()}.txt`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+      return
+    }
+
     if (!effectiveDownloadUrl) return
     const link = document.createElement('a')
     link.href = effectiveDownloadUrl
@@ -61,19 +76,21 @@ export default function VideoPreview({ videoUrl, downloadUrl, generating, progre
       <div className="preview-header">
         <div className="preview-title">
           <MonitorPlay size={15} strokeWidth={1.5} />
-          <span>{isImageOutput ? '图片预览' : '视频预览'}</span>
+          <span>{isTextOutput ? '文案预览' : (isImageOutput ? '图片预览' : '视频预览')}</span>
         </div>
 
-        {videoUrl && (
+        {(isTextOutput ? textOutput : videoUrl) && (
           <div className="preview-actions">
-            <button className="pa-btn" onClick={() => setShowFullscreen(true)}>
-              <Maximize2 size={13} /> 放大预览
-            </button>
+            {!isTextOutput && (
+              <button className="pa-btn" onClick={() => setShowFullscreen(true)}>
+                <Maximize2 size={13} /> 放大预览
+              </button>
+            )}
             <button className="pa-btn" onClick={handleDownload}>
               <Download size={13} /> 下载
             </button>
-            <button className="pa-btn" onClick={() => navigator.clipboard.writeText(effectiveDownloadUrl)}>
-              <Copy size={13} /> 复制链接
+            <button className="pa-btn" onClick={() => navigator.clipboard.writeText(isTextOutput ? textOutput : effectiveDownloadUrl)}>
+              <Copy size={13} /> {isTextOutput ? '复制内容' : '复制链接'}
             </button>
           </div>
         )}
@@ -86,9 +103,11 @@ export default function VideoPreview({ videoUrl, downloadUrl, generating, progre
           initial={{ opacity: 0, scale: 0.97 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.3 }}
-          key={params.aspectRatio}
+          key={isTextOutput ? provider : params.aspectRatio}
         >
-          {videoUrl && !playbackError ? (
+          {isTextOutput && textOutput ? (
+            <div className="preview-text-output">{textOutput}</div>
+          ) : videoUrl && !playbackError ? (
             isImageOutput ? (
               <img
                 src={effectiveVideoUrl}
@@ -121,7 +140,7 @@ export default function VideoPreview({ videoUrl, downloadUrl, generating, progre
                 <Loader2 size={28} className="spin" style={{ color: cfg.color }} />
               </div>
               <div className="gen-info">
-                <span className="gen-label">正在使用 {displayModelName} 生成{isImageOutput ? '图片' : '视频'}...</span>
+                <span className="gen-label">正在使用 {displayModelName} 生成{outputLabel}...</span>
                 <div className="gen-progress-bar">
                   <motion.div
                     className="gen-progress-fill"
@@ -141,24 +160,24 @@ export default function VideoPreview({ videoUrl, downloadUrl, generating, progre
           ) : (
             <div className="preview-empty">
               <div className="empty-icon" style={{ '--ec': cfg.color }}>
-                <MonitorPlay size={32} strokeWidth={1} />
+                {isTextOutput ? <FileText size={32} strokeWidth={1} /> : <MonitorPlay size={32} strokeWidth={1} />}
               </div>
               <p className="empty-title">准备就绪</p>
-              <p className="empty-desc">输入提示词并点击生成按钮来创建{isImageOutput ? '图片' : '视频'}</p>
+              <p className="empty-desc">输入提示词并点击生成按钮来创建{outputLabel}</p>
             </div>
           )}
         </motion.div>
 
         <div className="preview-meta">
           <MetaTag label="模型" value={displayModelName} color={cfg.color} />
-          {params.aspectRatio && <MetaTag label="比例" value={params.aspectRatio} />}
-          {params.duration != null && <MetaTag label="时长" value={`${params.duration}秒`} />}
-          {!cfg.hideResolutionSelector && params.resolution && <MetaTag label="分辨率" value={params.resolution} />}
+          {!isTextOutput && params.aspectRatio && <MetaTag label="比例" value={params.aspectRatio} />}
+          {!isTextOutput && params.duration != null && <MetaTag label="时长" value={`${params.duration}秒`} />}
+          {!isTextOutput && !cfg.hideResolutionSelector && params.resolution && <MetaTag label="分辨率" value={params.resolution} />}
         </div>
       </div>
 
       <AnimatePresence>
-        {showFullscreen && videoUrl && !playbackError && (
+        {!isTextOutput && showFullscreen && videoUrl && !playbackError && (
           <motion.div
             className="fullscreen-overlay"
             initial={{ opacity: 0 }}

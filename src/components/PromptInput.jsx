@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   ChevronDown,
   ChevronUp,
+  FileText,
   FileImage,
   Film,
   Image as ImageIcon,
@@ -54,8 +55,9 @@ export default function PromptInput({
   const fileInputRef = useRef(null)
 
   const isImageOutput = providerConfig.outputType === 'image'
+  const isTextOutput = providerConfig.outputType === 'text'
   const usesLocalReferenceAssets = providerConfig.referenceInputMode === 'local'
-  const isVideoProvider = providerConfig.outputType !== 'image' && providerConfig.id !== 'gemini-image'
+  const isVideoProvider = (providerConfig.outputType || 'video') === 'video'
   const usesAssetBuckets = isVideoProvider || usesLocalReferenceAssets
   const templates = providerConfig.promptTemplates || []
   const modeOptions = providerConfig.generationModes || buildDefaultModes(providerConfig, isImageOutput)
@@ -63,7 +65,9 @@ export default function PromptInput({
   const videoAccept = getVideoAccept(providerConfig)
   const multiframeSegmentCount = Math.max(0, videoReferences.images.length - 1)
   const isSeedanceMultiframe = providerConfig.id === 'seedance2' && mode === 'multiframe'
-  const shouldShowReferenceSection = usesAssetBuckets
+  const shouldShowReferenceSection = isTextOutput
+    ? false
+    : usesAssetBuckets
     ? maxImages > 0 || maxVideos > 0 || maxAudios > 0
     : mode !== 't2v'
 
@@ -220,6 +224,10 @@ export default function PromptInput({
         : '可选：补充整体风格说明；真正生效的是下方每一段过渡提示词...'
     }
 
+    if (isTextOutput) {
+      return '输入你要生成的文案需求、产品卖点、发布平台、语气和字数...'
+    }
+
     if (mode === 't2v') {
       return isImageOutput ? '描述你想生成的图片...' : '描述你想生成的视频...'
     }
@@ -240,7 +248,7 @@ export default function PromptInput({
               onClick={() => onModeChange(option.value)}
               style={{ '--tc': providerColor }}
             >
-              {renderModeIcon(option.value, isImageOutput)}
+              {renderModeIcon(option.value, isImageOutput, isTextOutput)}
               <span>{option.label}</span>
             </button>
           ))}
@@ -633,8 +641,10 @@ function buildDefaultModes(providerConfig, isImageOutput) {
   return modes
 }
 
-function renderModeIcon(mode, isImageOutput) {
+function renderModeIcon(mode, isImageOutput, isTextOutput) {
   switch (mode) {
+    case 'copywriting':
+      return <FileText size={13} />
     case 'i2v':
       return <ImageIcon size={13} />
     case 'flf':
@@ -649,6 +659,7 @@ function renderModeIcon(mode, isImageOutput) {
       return <ImageIcon size={13} />
     case 't2v':
     default:
+      if (isTextOutput) return <FileText size={13} />
       return isImageOutput ? <Palette size={13} /> : <FileImage size={13} />
   }
 }
@@ -721,7 +732,7 @@ function hasRequiredVideoAssets(mode, references) {
 
 function hasAllRequiredInputs({ providerConfig, mode, prompt, hasTemplate, mediaList, videoReferences, params }) {
   const localAssetProvider = providerConfig.referenceInputMode === 'local'
-  const isVideoProvider = providerConfig.outputType !== 'image' && providerConfig.id !== 'gemini-image'
+  const isVideoProvider = (providerConfig.outputType || 'video') === 'video'
   const promptRequired = isPromptRequiredForMode(providerConfig, mode, videoReferences)
 
   if (promptRequired && !prompt.trim() && !hasTemplate) {
@@ -745,6 +756,10 @@ function hasAllRequiredInputs({ providerConfig, mode, prompt, hasTemplate, media
       && durations.length >= segmentCount
       && prompts.slice(0, segmentCount).every((item) => typeof item === 'string' && item.trim())
       && durations.slice(0, segmentCount).every((item) => typeof item === 'string' && item.trim())
+  }
+
+  if (providerConfig.outputType === 'text') {
+    return true
   }
 
   if (isVideoProvider) {
