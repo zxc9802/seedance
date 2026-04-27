@@ -53,6 +53,7 @@ export default function PromptInput({
   providerColor,
   mode,
   onModeChange,
+  expanded = false,
   params,
   onParamUpdate,
   mediaList,
@@ -318,7 +319,7 @@ export default function PromptInput({
   })()
 
   return (
-    <div className="prompt-section">
+    <div className={`prompt-section ${expanded ? 'expanded-prompt' : ''}`}>
       <div className="prompt-header">
         <div className="mode-tabs">
           {modeOptions.map((option) => (

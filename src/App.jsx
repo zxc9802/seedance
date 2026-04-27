@@ -146,6 +146,7 @@ function App() {
     textOutput: null,
     error: null,
   }
+  const isTextOutput = config.outputType === 'text'
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
   const maxImages = resolveImageLimit(config, generationMode, videoReferences)
   const maxVideos = resolveVideoLimit(config, generationMode, videoReferences)
@@ -958,6 +959,35 @@ function App() {
     videoReferences,
   ])
 
+  const promptInput = (
+    <PromptInput
+      prompt={prompt}
+      onPromptChange={setPrompt}
+      mode={generationMode}
+      onModeChange={handleModeChange}
+      params={params}
+      onParamUpdate={updateParam}
+      mediaList={referenceMedia}
+      onMediaListChange={setReferenceMedia}
+      copywritingAttachments={copywritingAttachments}
+      onCopywritingAttachmentsChange={setCopywritingAttachments}
+      videoReferences={videoReferences}
+      onVideoReferencesChange={replaceVideoReferences}
+      maxImages={maxImages}
+      maxVideos={maxVideos}
+      maxAudios={maxAudios}
+      providerConfig={config}
+      onGenerate={handleGenerate}
+      generating={currentState.generating}
+      negativePrompt={params.negativePrompt ?? ''}
+      onNegativePromptChange={(value) => updateParam('negativePrompt', value)}
+      providerColor={config.color}
+      selectedTemplate={selectedTemplate}
+      onTemplateSelect={setSelectedTemplate}
+      expanded={isTextOutput}
+    />
+  )
+
   return (
     <div className="app-layout">
       <Header
@@ -974,31 +1004,7 @@ function App() {
       <main className="app-main">
         <div className="left-panel">
           <ModelSelector provider={provider} onChange={handleProviderChange} />
-          <PromptInput
-            prompt={prompt}
-            onPromptChange={setPrompt}
-            mode={generationMode}
-            onModeChange={handleModeChange}
-            params={params}
-            onParamUpdate={updateParam}
-            mediaList={referenceMedia}
-            onMediaListChange={setReferenceMedia}
-            copywritingAttachments={copywritingAttachments}
-            onCopywritingAttachmentsChange={setCopywritingAttachments}
-            videoReferences={videoReferences}
-            onVideoReferencesChange={replaceVideoReferences}
-            maxImages={maxImages}
-            maxVideos={maxVideos}
-            maxAudios={maxAudios}
-            providerConfig={config}
-            onGenerate={handleGenerate}
-            generating={currentState.generating}
-            negativePrompt={params.negativePrompt ?? ''}
-            onNegativePromptChange={(value) => updateParam('negativePrompt', value)}
-            providerColor={config.color}
-            selectedTemplate={selectedTemplate}
-            onTemplateSelect={setSelectedTemplate}
-          />
+          {!isTextOutput && promptInput}
           <ParameterPanel
             provider={provider}
             config={panelConfig}
@@ -1006,17 +1012,21 @@ function App() {
             onUpdate={updateParam}
           />
         </div>
-        <div className="right-panel">
-          <VideoPreview
-            videoUrl={currentState.videoUrl}
-            downloadUrl={currentState.downloadUrl}
-            textOutput={currentState.textOutput}
-            generating={currentState.generating}
-            progress={currentState.progress}
-            error={formatRuntimeErrorMessage(provider, currentState.error)}
-            params={params}
-            provider={provider}
-          />
+        <div className={`right-panel ${isTextOutput ? 'text-workspace-panel' : ''}`}>
+          {isTextOutput ? (
+            promptInput
+          ) : (
+            <VideoPreview
+              videoUrl={currentState.videoUrl}
+              downloadUrl={currentState.downloadUrl}
+              textOutput={currentState.textOutput}
+              generating={currentState.generating}
+              progress={currentState.progress}
+              error={formatRuntimeErrorMessage(provider, currentState.error)}
+              params={params}
+              provider={provider}
+            />
+          )}
         </div>
       </main>
     </div>

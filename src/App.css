@@ -32,6 +32,10 @@
   overflow: hidden;
 }
 
+.right-panel.text-workspace-panel {
+  background: var(--bg-card);
+}
+
 @media (max-width: 960px) {
   .app-main { flex-direction: column; }
   .left-panel {
@@ -39,5 +43,8 @@
     max-height: 55vh;
     border-right: none;
     border-bottom: 1px solid var(--border-light);
+  }
+  .right-panel.text-workspace-panel {
+    min-height: 45vh;
   }
 }
