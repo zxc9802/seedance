@@ -20,6 +20,23 @@ import {
 import './PromptInput.css'
 
 let referenceAssetOrderCounter = 0
+const COPYWRITING_ATTACHMENT_LIMIT = 8
+const COPYWRITING_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
+const COPYWRITING_DOCUMENT_MIME_TYPES = [
+  'application/pdf',
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]
+const COPYWRITING_ATTACHMENT_ACCEPT = [
+  ...COPYWRITING_IMAGE_MIME_TYPES,
+  ...COPYWRITING_DOCUMENT_MIME_TYPES,
+  '.md',
+  '.doc',
+  '.docx',
+].join(',')
 
 function nextReferenceAssetOrder() {
   referenceAssetOrderCounter += 1
@@ -40,6 +57,8 @@ export default function PromptInput({
   onParamUpdate,
   mediaList,
   onMediaListChange,
+  copywritingAttachments = [],
+  onCopywritingAttachmentsChange,
   videoReferences,
   onVideoReferencesChange,
   maxImages,
@@ -52,7 +71,9 @@ export default function PromptInput({
   const [showNeg, setShowNeg] = useState(false)
   const [mediaError, setMediaError] = useState(null)
   const [imageDropActive, setImageDropActive] = useState(false)
+  const [attachmentDropActive, setAttachmentDropActive] = useState(false)
   const fileInputRef = useRef(null)
+  const attachmentInputRef = useRef(null)
 
   const isImageOutput = providerConfig.outputType === 'image'
   const isTextOutput = providerConfig.outputType === 'text'
@@ -119,6 +140,65 @@ export default function PromptInput({
     onFiles: processImageFiles,
     onActiveChange: setImageDropActive,
   })
+
+  const processCopywritingAttachmentFiles = async (files) => {
+    if (!onCopywritingAttachmentsChange) return
+
+    setMediaError(null)
+    const currentAttachments = Array.isArray(copywritingAttachments) ? copywritingAttachments : []
+    const remaining = COPYWRITING_ATTACHMENT_LIMIT - currentAttachments.length
+    if (remaining <= 0) {
+      setMediaError(`最多只能添加 ${COPYWRITING_ATTACHMENT_LIMIT} 个附件`)
+      return
+    }
+
+    const accepted = []
+    for (const file of files.slice(0, remaining)) {
+      const error = validateCopywritingAttachmentFile(file)
+      if (error) {
+        setMediaError(error)
+        continue
+      }
+
+      try {
+        const mimeType = file.type || inferMimeTypeFromFilename(file.name)
+        const dataUrl = await readFileAsDataUrl(file)
+        accepted.push({
+          id: crypto.randomUUID(),
+          name: file.name,
+          size: file.size,
+          mimeType,
+          kind: mimeType.startsWith('image/') ? 'image' : 'document',
+          dataUrl,
+        })
+      } catch {
+        setMediaError('读取附件失败')
+      }
+    }
+
+    if (accepted.length > 0) {
+      onCopywritingAttachmentsChange((prev) => [
+        ...(Array.isArray(prev) ? prev : []),
+        ...accepted,
+      ].slice(0, COPYWRITING_ATTACHMENT_LIMIT))
+    }
+
+    if (files.length > remaining) {
+      setMediaError(`最多只能添加 ${COPYWRITING_ATTACHMENT_LIMIT} 个附件，超出的已忽略`)
+    }
+  }
+
+  const attachmentDropHandlers = createFileDropHandlers({
+    onFiles: processCopywritingAttachmentFiles,
+    onActiveChange: setAttachmentDropActive,
+  })
+
+  const removeCopywritingAttachment = (attachmentId) => {
+    onCopywritingAttachmentsChange?.((prev) => (
+      Array.isArray(prev) ? prev.filter((attachment) => attachment.id !== attachmentId) : []
+    ))
+    setMediaError(null)
+  }
 
   const addVideoAssets = async (kind, files, limit) => {
     if (!files.length) return
@@ -344,6 +424,81 @@ export default function PromptInput({
       <div className="prompt-hint">
         按 <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 生成
       </div>
+
+      {isTextOutput && (
+        <div className="copywriting-attachments">
+          <div className="ref-images-header">
+            <UploadCloud size={13} />
+            <span>Claude 附件</span>
+            <span className="ref-count">{copywritingAttachments.length}/{COPYWRITING_ATTACHMENT_LIMIT}</span>
+          </div>
+
+          <div
+            className={`copywriting-attachment-drop ${attachmentDropActive ? 'drag-active' : ''}`}
+            {...attachmentDropHandlers}
+          >
+            {attachmentDropActive && (
+              <div className="drop-overlay">
+                <UploadCloud size={18} />
+                <span>拖拽到这里上传文档或图片</span>
+              </div>
+            )}
+
+            <div className="copywriting-attachment-grid">
+              {copywritingAttachments.map((attachment) => (
+                <div key={attachment.id} className={`copywriting-attachment-card ${attachment.kind}`}>
+                  <button
+                    className="asset-card-remove"
+                    onClick={() => removeCopywritingAttachment(attachment.id)}
+                    type="button"
+                  >
+                    <X size={10} />
+                  </button>
+                  {attachment.kind === 'image' ? (
+                    <img src={attachment.dataUrl} alt={attachment.name} className="copywriting-attachment-preview" />
+                  ) : (
+                    <div className="copywriting-attachment-fileicon">
+                      <FileText size={18} />
+                    </div>
+                  )}
+                  <div className="asset-card-meta">
+                    <span className="asset-card-name" title={attachment.name}>{attachment.name}</span>
+                    <span className="asset-card-size">{formatFileSize(attachment.size)}</span>
+                  </div>
+                </div>
+              ))}
+
+              {copywritingAttachments.length < COPYWRITING_ATTACHMENT_LIMIT && (
+                <button
+                  className="copywriting-attachment-add"
+                  onClick={() => attachmentInputRef.current?.click()}
+                  type="button"
+                >
+                  <input
+                    ref={attachmentInputRef}
+                    type="file"
+                    className="hidden-input"
+                    accept={COPYWRITING_ATTACHMENT_ACCEPT}
+                    multiple
+                    onChange={(event) => {
+                      if (event.target.files?.length) {
+                        void processCopywritingAttachmentFiles(Array.from(event.target.files))
+                      }
+                      event.target.value = ''
+                    }}
+                  />
+                  <Plus size={18} />
+                  <span>添加附件</span>
+                </button>
+              )}
+            </div>
+            <div className="copywriting-attachment-help">
+              支持 PDF、TXT、Markdown、CSV、Word 文档，以及 JPG、PNG、WebP、GIF 图片。
+            </div>
+          </div>
+          {mediaError && <div className="ref-error">{mediaError}</div>}
+        </div>
+      )}
 
       <AnimatePresence>
         {shouldShowReferenceSection && (
@@ -872,6 +1027,38 @@ async function validateAssetFile(kind, file, providerConfig) {
   }
 
   return null
+}
+
+function validateCopywritingAttachmentFile(file) {
+  const mimeType = file.type || inferMimeTypeFromFilename(file.name)
+  const isImage = COPYWRITING_IMAGE_MIME_TYPES.includes(mimeType)
+  const isDocument = COPYWRITING_DOCUMENT_MIME_TYPES.includes(mimeType)
+
+  if (!isImage && !isDocument) {
+    return 'Claude 附件仅支持图片、PDF、TXT、Markdown、CSV、Word 文档'
+  }
+
+  const maxSizeMb = isImage ? 10 : 15
+  if (file.size > maxSizeMb * 1024 * 1024) {
+    return `${isImage ? '单张图片' : '单个文档'}不能超过 ${maxSizeMb}MB`
+  }
+
+  return null
+}
+
+function inferMimeTypeFromFilename(filename = '') {
+  const lowerName = filename.toLowerCase()
+  if (lowerName.endsWith('.md') || lowerName.endsWith('.markdown')) return 'text/markdown'
+  if (lowerName.endsWith('.txt')) return 'text/plain'
+  if (lowerName.endsWith('.csv')) return 'text/csv'
+  if (lowerName.endsWith('.pdf')) return 'application/pdf'
+  if (lowerName.endsWith('.doc')) return 'application/msword'
+  if (lowerName.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg'
+  if (lowerName.endsWith('.png')) return 'image/png'
+  if (lowerName.endsWith('.webp')) return 'image/webp'
+  if (lowerName.endsWith('.gif')) return 'image/gif'
+  return ''
 }
 
 function getAllowedImageMimeTypes(providerConfig) {

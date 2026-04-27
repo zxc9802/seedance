@@ -5534,7 +5534,7 @@ function normalizeCopywritingMessages(value) {
   return value
     .map((item) => {
       const role = readFirstString(item?.role) || 'user'
-      const content = normalizeCopywritingMessageContent(item?.content)
+      const content = normalizeCopywritingContentParts(item?.content)
       if (!content) return null
 
       return {
@@ -5543,6 +5543,59 @@ function normalizeCopywritingMessages(value) {
       }
     })
     .filter(Boolean)
+}
+
+function normalizeCopywritingContentParts(content) {
+  if (typeof content === 'string') {
+    return content.trim()
+  }
+
+  if (!Array.isArray(content)) {
+    return ''
+  }
+
+  const parts = content
+    .map((part) => normalizeCopywritingContentPart(part))
+    .filter(Boolean)
+
+  return parts.length > 0 ? parts : ''
+}
+
+function normalizeCopywritingContentPart(part) {
+  if (typeof part === 'string') {
+    const text = part.trim()
+    return text ? { type: 'text', text } : null
+  }
+
+  if (!part || typeof part !== 'object') {
+    return null
+  }
+
+  if (part?.type === 'text') {
+    const text = readFirstString(part.text, part.content)
+    return text ? { type: 'text', text } : null
+  }
+
+  if (part?.type === 'image_url') {
+    const url = readFirstString(part.image_url?.url, part.image_url, part.url)
+    return url ? { type: 'image_url', image_url: { url } } : null
+  }
+
+  if (part?.type === 'file') {
+    const filename = readFirstString(part.file?.filename, part.filename) || 'attachment'
+    const fileData = readFirstString(part.file?.file_data, part.file_data, part.data)
+    return fileData
+      ? {
+          type: 'file',
+          file: {
+            filename,
+            file_data: fileData,
+          },
+        }
+      : null
+  }
+
+  return null
 }
 
 function normalizeCopywritingMessageContent(content) {
@@ -5577,7 +5630,7 @@ function normalizeTemperature(value) {
 function extractCopywritingPromptText(messages) {
   if (!Array.isArray(messages)) return ''
   const userMessage = messages.find((message) => message?.role === 'user') || messages[0]
-  return typeof userMessage?.content === 'string' ? userMessage.content.trim() : ''
+  return normalizeCopywritingMessageContent(userMessage?.content)
 }
 
 function extractCopywritingResponseText(payload) {

@@ -81,6 +81,7 @@ function App() {
   const [prompt, setPrompt] = useState('')
   const [generationMode, setGenerationMode] = useState('t2v')
   const [referenceMedia, setReferenceMedia] = useState([])
+  const [copywritingAttachments, setCopywritingAttachments] = useState([])
   const [videoReferences, setVideoReferences] = useState(createEmptyVideoReferences)
   const [selectedTemplate, setSelectedTemplate] = useState(null)
   const [providerState, setProviderState] = useState(createInitialProviderState)
@@ -136,6 +137,7 @@ function App() {
     progress: 0,
     videoUrl: null,
     downloadUrl: null,
+    textOutput: null,
     error: null,
   }
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
@@ -171,6 +173,7 @@ function App() {
 
   const resetReferences = useCallback(() => {
     setReferenceMedia([])
+    setCopywritingAttachments([])
     setVideoReferences((prev) => {
       releaseVideoReferences(prev)
       return createEmptyVideoReferences()
@@ -194,6 +197,7 @@ function App() {
           prompt,
           generationMode,
           referenceMedia,
+          copywritingAttachments: normalizeCopywritingAttachments(copywritingAttachments),
           videoReferences: serializeVideoReferences(videoReferences),
           selectedTemplate,
           providerState: serializedProviderState,
@@ -213,6 +217,7 @@ function App() {
     prompt,
     provider,
     providerState,
+    copywritingAttachments,
     referenceMedia,
     selectedTemplate,
     videoReferences,
@@ -244,6 +249,7 @@ function App() {
       const nextReferenceMedia = Array.isArray(payload.referenceMedia)
         ? payload.referenceMedia.filter((item) => typeof item === 'string')
         : []
+      const nextCopywritingAttachments = normalizeCopywritingAttachments(payload.copywritingAttachments)
       const nextVideoReferences = hydrateVideoReferences(payload.videoReferences)
 
       setProvider(nextProvider)
@@ -251,6 +257,7 @@ function App() {
       setPrompt(typeof payload.prompt === 'string' ? payload.prompt : '')
       setGenerationMode(nextGenerationMode)
       setReferenceMedia(nextReferenceMedia)
+      setCopywritingAttachments(nextCopywritingAttachments)
       setSelectedTemplate(payload.selectedTemplate ?? null)
       setVideoReferences((prev) => {
         releaseVideoReferences(prev)
@@ -308,9 +315,11 @@ function App() {
       ? (prompt.trim() ? `${selectedTemplate.prompt}. Additional requirements: ${prompt.trim()}` : selectedTemplate.prompt)
       : prompt.trim()
     const usesLocalReferenceAssets = usesLocalReferenceAssetsConfig(config)
-    const usageMediaSummary = (isVideoProvider(provider) || usesLocalReferenceAssets)
-      ? buildUsageMediaSummaryFromVideoReferences(videoReferences)
-      : buildUsageMediaSummaryFromImageMedia(referenceMedia)
+    const usageMediaSummary = isCopywritingProvider(provider)
+      ? buildUsageMediaSummaryFromCopywritingAttachments(copywritingAttachments)
+      : (isVideoProvider(provider) || usesLocalReferenceAssets)
+        ? buildUsageMediaSummaryFromVideoReferences(videoReferences)
+        : buildUsageMediaSummaryFromImageMedia(referenceMedia)
     const promptRequired = isPromptRequiredForGeneration(config, generationMode, videoReferences)
 
     if (!finalPrompt && promptRequired) return
@@ -337,7 +346,7 @@ function App() {
 
     try {
       if (isCopywritingProvider(provider)) {
-        const requestInfo = buildCopywritingRequest(provider, params, finalPrompt)
+        const requestInfo = buildCopywritingRequest(provider, params, finalPrompt, copywritingAttachments)
         const response = await fetch(requestInfo.url, {
           method: 'POST',
           headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
@@ -932,6 +941,7 @@ function App() {
       updateProviderState(provider, { generating: false })
     }
   }, [
+    copywritingAttachments,
     generationMode,
     params,
     prompt,
@@ -967,6 +977,8 @@ function App() {
             onParamUpdate={updateParam}
             mediaList={referenceMedia}
             onMediaListChange={setReferenceMedia}
+            copywritingAttachments={copywritingAttachments}
+            onCopywritingAttachmentsChange={setCopywritingAttachments}
             videoReferences={videoReferences}
             onVideoReferencesChange={replaceVideoReferences}
             maxImages={maxImages}
@@ -1025,7 +1037,7 @@ function applyCoupledParamUpdate(config, params, key, value) {
 }
 
 function createProviderRuntimeState() {
-  return { generating: false, progress: 0, videoUrl: null, downloadUrl: null, error: null }
+  return { generating: false, progress: 0, videoUrl: null, downloadUrl: null, textOutput: null, error: null }
 }
 
 function createInitialProviderState() {
@@ -1124,6 +1136,41 @@ function buildUsageMediaSummaryFromImageMedia(mediaList) {
   }
 }
 
+function buildUsageMediaSummaryFromCopywritingAttachments(attachments) {
+  const normalizedAttachments = normalizeCopywritingAttachments(attachments)
+  const imageAttachments = normalizedAttachments.filter((attachment) => attachment.kind === 'image')
+
+  return {
+    ...createEmptyUsageMediaSummary(),
+    images: normalizeUsageMediaMetric(imageAttachments),
+  }
+}
+
+function normalizeCopywritingAttachments(list) {
+  if (!Array.isArray(list)) return []
+
+  return list
+    .map((attachment) => {
+      if (!attachment || typeof attachment !== 'object') return null
+      const dataUrl = typeof attachment.dataUrl === 'string' ? attachment.dataUrl : ''
+      const name = typeof attachment.name === 'string' && attachment.name.trim()
+        ? attachment.name.trim()
+        : 'attachment'
+      const mimeType = typeof attachment.mimeType === 'string' ? attachment.mimeType : ''
+      if (!dataUrl || !mimeType) return null
+
+      return {
+        id: typeof attachment.id === 'string' && attachment.id ? attachment.id : crypto.randomUUID(),
+        name,
+        size: Math.max(0, Number(attachment.size) || estimateBase64Bytes(extractDataUrlBase64Payload(dataUrl))),
+        mimeType,
+        kind: mimeType.startsWith('image/') ? 'image' : 'document',
+        dataUrl,
+      }
+    })
+    .filter(Boolean)
+}
+
 function encodeUsageMediaSummary(summary) {
   try {
     return encodeURIComponent(JSON.stringify(summary))
@@ -1187,6 +1234,7 @@ async function serializeProviderState(state) {
       progress: 0,
       error: null,
       previewAsset: await serializePreviewAsset(previewUrl),
+      textOutput: typeof current.textOutput === 'string' ? current.textOutput : null,
     }
   }
   return serialized
@@ -1205,6 +1253,7 @@ function hydrateSnapshotProviderState(snapshotState) {
         key,
         hydratePreviewAsset(current.previewAsset) || current.videoUrl || null,
       ),
+      textOutput: typeof current.textOutput === 'string' ? current.textOutput : null,
     }
   }
 
@@ -1836,7 +1885,7 @@ function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
   }
 }
 
-function buildCopywritingRequest(provider, params, prompt) {
+function buildCopywritingRequest(provider, params, prompt, attachments) {
   return {
     url: '/api/copywriting/chat/completions',
     headers: {
@@ -1845,9 +1894,33 @@ function buildCopywritingRequest(provider, params, prompt) {
     body: {
       providerId: provider,
       model: params.model,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{ role: 'user', content: buildCopywritingContentParts(prompt, attachments) }],
     },
   }
+}
+
+function buildCopywritingContentParts(prompt, attachments) {
+  const parts = [{ type: 'text', text: prompt }]
+
+  for (const attachment of normalizeCopywritingAttachments(attachments)) {
+    if (attachment.kind === 'image') {
+      parts.push({
+        type: 'image_url',
+        image_url: { url: attachment.dataUrl },
+      })
+      continue
+    }
+
+    parts.push({
+      type: 'file',
+      file: {
+        filename: attachment.name,
+        file_data: attachment.dataUrl,
+      },
+    })
+  }
+
+  return parts
 }
 
 function resolveImageSizeForParams(provider, params) {
@@ -2283,6 +2356,13 @@ function extractImageBase64Payload(media) {
   }
 
   return null
+}
+
+function extractDataUrlBase64Payload(media) {
+  if (typeof media !== 'string') return null
+
+  const dataUrlMatch = media.match(/^data:[^;,]+;base64,([A-Za-z0-9+/=\s]+)$/i)
+  return dataUrlMatch ? dataUrlMatch[1].replace(/\s/g, '') : null
 }
 
 function extractImageDataUrlPayload(media) {
