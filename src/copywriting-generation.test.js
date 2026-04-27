@@ -21,6 +21,17 @@ test('copywriting frontend parses Claude-style root content arrays', async () =>
   assert.match(appSource, /extractChatTextContent\(data\?\.content\)/)
 })
 
+test('copywriting frontend asks for and displays plain readable text instead of markdown', async () => {
+  const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
+
+  assert.match(appSource, /const COPYWRITING_PLAIN_TEXT_INSTRUCTION = /)
+  assert.match(appSource, /role: 'system', content: COPYWRITING_PLAIN_TEXT_INSTRUCTION/)
+  assert.match(appSource, /function normalizeCopywritingDisplayText\(text\)/)
+  assert.match(appSource, /\.replace\(\/\^\\s\*\#\{1,6\}\\s\*\/, ''\)/)
+  assert.ok(appSource.includes(".replace(/\\*\\*([^*\\n]+)\\*\\*/g, '$1')"))
+  assert.match(appSource, /return normalizeCopywritingDisplayText\(parsedContent\)/)
+})
+
 test('copywriting frontend can send image and document attachments as chat content parts', async () => {
   const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
   const promptInputSource = await fs.readFile(path.resolve('src/components/PromptInput.jsx'), 'utf8')

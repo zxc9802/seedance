@@ -73,6 +73,12 @@ const OPENAI_IMAGE_DIMENSIONS = Object.freeze({
   '3:4': { width: 768, height: 1024 },
   '4:3': { width: 1024, height: 768 },
 })
+const COPYWRITING_PLAIN_TEXT_INSTRUCTION = [
+  '你是中文文案整理助手。',
+  '请只输出用户可直接阅读、可复制粘贴的纯文本正文。',
+  '不要使用 Markdown 标记或代码块；不要输出 #、*、---、```、表格分隔线等排版符号。',
+  '标题直接单独成行；人物、场景、正文用自然换行；如需编号请使用“1、”这种中文排版。',
+].join('\n')
 const TASK_POLL_INTERVAL_MS = 2000
 
 function App() {
@@ -1895,7 +1901,10 @@ function buildCopywritingRequest(provider, params, prompt, attachments) {
     body: {
       providerId: provider,
       model: params.model,
-      messages: [{ role: 'user', content: buildCopywritingContentParts(prompt, attachments) }],
+      messages: [
+        { role: 'system', content: COPYWRITING_PLAIN_TEXT_INSTRUCTION },
+        { role: 'user', content: buildCopywritingContentParts(prompt, attachments) },
+      ],
     },
   }
 }
@@ -3641,13 +3650,41 @@ function parseImageParts(parts, fallbackPrompt) {
 function parseCopywritingChatResponse(data) {
   const content = data?.choices?.[0]?.message?.content
   const parsedContent = extractChatTextContent(content)
-  if (parsedContent) return parsedContent
+  if (parsedContent) return normalizeCopywritingDisplayText(parsedContent)
 
-  return extractChatTextContent(data?.output_text)
+  const fallbackContent = extractChatTextContent(data?.output_text)
     || extractChatTextContent(data?.text)
     || extractChatTextContent(data?.content)
     || extractChatTextContent(data?.message)
     || ''
+
+  return normalizeCopywritingDisplayText(fallbackContent)
+}
+
+function normalizeCopywritingDisplayText(text) {
+  if (typeof text !== 'string') return ''
+
+  return text
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line
+      .replace(/^\s*#{1,6}\s*/, '')
+      .replace(/^\s{0,3}([-*_])\s*\1\s*\1\s*$/, '')
+      .replace(/^\s*>\s?/, '')
+      .replace(/^\s*[-*+]\s+(?=\S)/, '')
+      .replace(/^\s*(\d+)[.)]\s+/, '$1、')
+      .replace(/^```[a-zA-Z0-9_-]*\s*$/, '')
+      .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+      .replace(/__([^_\n]+)__/g, '$1')
+      .replace(/\*([^*\n]+)\*/g, '$1')
+      .replace(/_([^_\n]+)_/g, '$1')
+      .replace(/`([^`\n]+)`/g, '$1')
+      .trimEnd())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 function extractChatTextContent(content) {
