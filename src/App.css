@@ -15,6 +15,92 @@
   overflow: hidden;
 }
 
+.app-layout.copywriting-app-layout {
+  background: #fff;
+}
+
+.copywriting-chat-header {
+  height: 64px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 28px;
+  background: #fff;
+}
+
+.copywriting-model-switcher {
+  position: relative;
+  min-width: 190px;
+}
+
+.copywriting-model-switcher select {
+  appearance: none;
+  width: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #171717;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+  padding: 8px 28px 8px 0;
+}
+
+.copywriting-model-switcher::after {
+  content: '';
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid #8f8f8f;
+  border-bottom: 2px solid #8f8f8f;
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
+.copywriting-chat-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.copywriting-header-btn {
+  min-height: 34px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #333;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.copywriting-header-btn:hover:not(:disabled) {
+  background: #f4f4f4;
+  border-color: #ececec;
+}
+
+.copywriting-header-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.copywriting-chat-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: #fff;
+  overflow: hidden;
+}
+
 .left-panel {
   width: 520px;
   min-width: 520px;
@@ -32,10 +118,6 @@
   overflow: hidden;
 }
 
-.right-panel.text-workspace-panel {
-  background: var(--bg-card);
-}
-
 @media (max-width: 960px) {
   .app-main { flex-direction: column; }
   .left-panel {
@@ -44,7 +126,18 @@
     border-right: none;
     border-bottom: 1px solid var(--border-light);
   }
-  .right-panel.text-workspace-panel {
-    min-height: 45vh;
+  .copywriting-chat-header {
+    height: auto;
+    min-height: 58px;
+    padding: 10px 16px;
+    align-items: flex-start;
+  }
+  .copywriting-chat-actions {
+    gap: 4px;
+  }
+  .copywriting-header-btn {
+    min-height: 30px;
+    padding: 5px 8px;
+    font-size: 11px;
   }
 }

@@ -3,6 +3,8 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   ChevronDown,
   ChevronUp,
+  Copy,
+  Download,
   FileText,
   FileImage,
   Film,
@@ -54,6 +56,12 @@ export default function PromptInput({
   mode,
   onModeChange,
   expanded = false,
+  workspace = 'default',
+  textOutput,
+  error,
+  progress = 0,
+  copywritingMessages = [],
+  onClearCopywritingMessages,
   params,
   onParamUpdate,
   mediaList,
@@ -78,6 +86,7 @@ export default function PromptInput({
 
   const isImageOutput = providerConfig.outputType === 'image'
   const isTextOutput = providerConfig.outputType === 'text'
+  const isCopywritingWorkspace = workspace === 'copywriting' && isTextOutput
   const usesLocalReferenceAssets = providerConfig.referenceInputMode === 'local'
   const isVideoProvider = (providerConfig.outputType || 'video') === 'video'
   const usesAssetBuckets = isVideoProvider || usesLocalReferenceAssets
@@ -201,6 +210,24 @@ export default function PromptInput({
     setMediaError(null)
   }
 
+  const copyText = (text) => {
+    if (!text) return
+    void navigator.clipboard.writeText(text)
+  }
+
+  const downloadText = (text) => {
+    if (!text) return
+
+    const objectUrl = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }))
+    const link = document.createElement('a')
+    link.href = objectUrl
+    link.download = `copywriting-${Date.now()}.txt`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+  }
+
   const addVideoAssets = async (kind, files, limit) => {
     if (!files.length) return
 
@@ -317,6 +344,147 @@ export default function PromptInput({
       ? '描述参考图需要怎么修改...'
       : '描述这些参考素材将如何被转换、融合或延展...'
   })()
+
+  const hasCopywritingMessages = isCopywritingWorkspace && copywritingMessages.length > 0
+  const renderCopywritingComposer = () => (
+    <div className={`copywriting-composer ${hasCopywritingMessages ? 'docked' : 'centered'}`}>
+      <div className="copywriting-composer-box">
+        <textarea
+          className="copywriting-composer-input"
+          placeholder="有问题，尽管问"
+          value={prompt}
+          onChange={(event) => onPromptChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault()
+              onGenerate()
+            }
+          }}
+          rows={2}
+        />
+
+        {copywritingAttachments.length > 0 && (
+          <div className="copywriting-composer-attachments">
+            {copywritingAttachments.map((attachment) => (
+              <span key={attachment.id} className="copywriting-attachment-chip" title={attachment.name}>
+                <FileText size={12} />
+                <span>{attachment.name}</span>
+                <button type="button" onClick={() => removeCopywritingAttachment(attachment.id)} aria-label="移除附件">
+                  <X size={10} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="copywriting-composer-toolbar">
+          <button
+            type="button"
+            className="copywriting-tool-btn icon"
+            onClick={() => attachmentInputRef.current?.click()}
+            aria-label="添加附件"
+          >
+            <Plus size={20} strokeWidth={1.8} />
+          </button>
+          <input
+            ref={attachmentInputRef}
+            type="file"
+            className="hidden-input"
+            accept={COPYWRITING_ATTACHMENT_ACCEPT}
+            multiple
+            onChange={(event) => {
+              if (event.target.files?.length) {
+                void processCopywritingAttachmentFiles(Array.from(event.target.files))
+              }
+              event.target.value = ''
+            }}
+          />
+          <div className="copywriting-tool-pill">
+            <FileText size={14} />
+            <span>文案</span>
+          </div>
+          <button
+            type="button"
+            className="copywriting-send-btn"
+            onClick={onGenerate}
+            disabled={generationDisabled}
+            aria-label="发送"
+          >
+            {generating ? <Loader2 size={17} className="spin" /> : <Send size={17} />}
+          </button>
+        </div>
+      </div>
+      <div className="copywriting-composer-hint">
+        支持 PDF、TXT、Markdown、CSV、Word，以及 JPG、PNG、WebP、GIF。按 <kbd>Ctrl</kbd>+<kbd>Enter</kbd> 发送
+      </div>
+      {mediaError && <div className="copywriting-chat-error">{mediaError}</div>}
+    </div>
+  )
+
+  if (isCopywritingWorkspace) {
+    return (
+      <section className={`copywriting-chat-workspace ${hasCopywritingMessages ? 'has-messages' : 'is-empty'}`}>
+        {!hasCopywritingMessages ? (
+          <div className="copywriting-empty-stage">
+            <h1>我能帮什么忙吗？</h1>
+            {renderCopywritingComposer()}
+          </div>
+        ) : (
+          <>
+            <div className="copywriting-chat-thread" aria-live="polite">
+              {copywritingMessages.map((message) => (
+                <article key={message.id} className={`copywriting-chat-message ${message.role} ${message.status || ''}`}>
+                  <div className="copywriting-chat-bubble">
+                    {message.status === 'pending' ? (
+                      <div className="copywriting-chat-pending">
+                        <Loader2 size={16} className="spin" style={{ color: providerColor }} />
+                        <span>正在生成...</span>
+                        <div className="copywriting-progress" aria-hidden="true">
+                          <span style={{ width: `${progress}%`, background: providerColor }} />
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="copywriting-chat-text">{message.content}</div>
+                        {message.attachments?.length > 0 && (
+                          <div className="copywriting-chat-attachments">
+                            {message.attachments.map((attachment) => (
+                              <span key={attachment.id || attachment.name} className="copywriting-chat-attachment">
+                                <FileText size={12} />
+                                {attachment.name}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {message.role === 'assistant' && message.status !== 'error' && (
+                          <div className="copywriting-chat-message-actions">
+                            <button type="button" onClick={() => copyText(message.content)}>
+                              <Copy size={12} />
+                              <span>复制</span>
+                            </button>
+                            <button type="button" onClick={() => downloadText(message.content)}>
+                              <Download size={12} />
+                              <span>下载</span>
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </article>
+              ))}
+            </div>
+            {renderCopywritingComposer()}
+            {onClearCopywritingMessages && (
+              <button type="button" className="copywriting-clear-btn" onClick={onClearCopywritingMessages}>
+                新对话
+              </button>
+            )}
+          </>
+        )}
+      </section>
+    )
+  }
 
   return (
     <div className={`prompt-section ${expanded ? 'expanded-prompt' : ''}`}>

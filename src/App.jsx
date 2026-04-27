@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { PROVIDERS, PROVIDER_ORDER } from './modelConfig'
+import { MODEL_TYPES, MODEL_TYPE_ORDER, PROVIDERS, PROVIDER_ORDER } from './modelConfig'
 import {
   getLatestSnapshotMeta,
   loadLatestSnapshot,
@@ -85,6 +85,7 @@ function App() {
   const [provider, setProvider] = useState('veo')
   const [allParams, setAllParams] = useState(createInitialParams)
   const [prompt, setPrompt] = useState('')
+  const [copywritingMessages, setCopywritingMessages] = useState([])
   const [generationMode, setGenerationMode] = useState('t2v')
   const [referenceMedia, setReferenceMedia] = useState([])
   const [copywritingAttachments, setCopywritingAttachments] = useState([])
@@ -146,7 +147,7 @@ function App() {
     textOutput: null,
     error: null,
   }
-  const isTextOutput = config.outputType === 'text'
+  const isTextProvider = config.outputType === 'text'
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
   const maxImages = resolveImageLimit(config, generationMode, videoReferences)
   const maxVideos = resolveVideoLimit(config, generationMode, videoReferences)
@@ -321,6 +322,7 @@ function App() {
     const finalPrompt = selectedTemplate
       ? (prompt.trim() ? `${selectedTemplate.prompt}. Additional requirements: ${prompt.trim()}` : selectedTemplate.prompt)
       : prompt.trim()
+    const submittedCopywritingAttachments = copywritingAttachments
     const usesLocalReferenceAssets = usesLocalReferenceAssetsConfig(config)
     const usageMediaSummary = isCopywritingProvider(provider)
       ? buildUsageMediaSummaryFromCopywritingAttachments(copywritingAttachments)
@@ -342,6 +344,24 @@ function App() {
       return
     }
 
+    let pendingCopywritingMessageId = null
+    if (isCopywritingProvider(provider)) {
+      const userMessage = {
+        id: createChatMessageId('user'),
+        role: 'user',
+        content: finalPrompt,
+        attachments: summarizeCopywritingAttachments(submittedCopywritingAttachments),
+      }
+      pendingCopywritingMessageId = createChatMessageId('assistant')
+      setCopywritingMessages((prev) => [
+        ...prev,
+        userMessage,
+        { id: pendingCopywritingMessageId, role: 'assistant', content: '', status: 'pending' },
+      ])
+      setPrompt('')
+      setCopywritingAttachments([])
+    }
+
     updateProviderState(provider, { generating: true, progress: 0, error: null, videoUrl: null, downloadUrl: null, textOutput: null })
 
     let progress = 0
@@ -353,7 +373,7 @@ function App() {
 
     try {
       if (isCopywritingProvider(provider)) {
-        const requestInfo = buildCopywritingRequest(provider, params, finalPrompt, copywritingAttachments)
+        const requestInfo = buildCopywritingRequest(provider, params, finalPrompt, submittedCopywritingAttachments)
         const response = await fetch(requestInfo.url, {
           method: 'POST',
           headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
@@ -371,6 +391,13 @@ function App() {
         }
 
         window.clearInterval(progressTimer)
+        if (pendingCopywritingMessageId) {
+          setCopywritingMessages((prev) => prev.map((message) => (
+            message.id === pendingCopywritingMessageId
+              ? { ...message, content: textResult, status: 'done' }
+              : message
+          )))
+        }
         updateProviderState(provider, { progress: 100, textOutput: textResult })
         return
       }
@@ -942,7 +969,15 @@ function App() {
         throw new Error(buildImageResponseParseError(data))
       }
     } catch (error) {
-      updateProviderState(provider, { error: error.message || '生成失败' })
+      const errorMessage = error.message || '生成失败'
+      if (pendingCopywritingMessageId) {
+        setCopywritingMessages((prev) => prev.map((message) => (
+          message.id === pendingCopywritingMessageId
+            ? { ...message, content: errorMessage, status: 'error' }
+            : message
+        )))
+      }
+      updateProviderState(provider, { error: errorMessage })
     } finally {
       window.clearInterval(progressTimer)
       updateProviderState(provider, { generating: false })
@@ -984,51 +1019,109 @@ function App() {
       providerColor={config.color}
       selectedTemplate={selectedTemplate}
       onTemplateSelect={setSelectedTemplate}
-      expanded={isTextOutput}
+      expanded={isTextProvider}
+      workspace={isTextProvider ? 'copywriting' : 'default'}
+      textOutput={currentState.textOutput}
+      error={formatRuntimeErrorMessage(provider, currentState.error)}
+      progress={currentState.progress}
+      copywritingMessages={copywritingMessages}
+      onClearCopywritingMessages={() => {
+        setCopywritingMessages([])
+        updateProviderState(provider, { textOutput: null, error: null })
+      }}
     />
   )
 
   return (
-    <div className="app-layout">
-      <Header
-        onSaveSnapshot={handleSaveSnapshot}
-        onLoadSnapshot={handleLoadSnapshot}
-        onOpenAdmin={handleOpenAdmin}
-        snapshotBusy={snapshotBusy}
-        snapshotLoadDisabled={hasActiveGeneration}
-        hasSnapshot={Boolean(snapshotMeta?.savedAt)}
-        lastSavedAt={snapshotMeta?.savedAt ?? null}
-        snapshotNotice={snapshotNotice}
-        showAdminEntry={showAdminEntry}
-      />
-      <main className="app-main">
-        <div className="left-panel">
-          <ModelSelector provider={provider} onChange={handleProviderChange} />
-          {!isTextOutput && promptInput}
-          <ParameterPanel
-            provider={provider}
-            config={panelConfig}
-            params={params}
-            onUpdate={updateParam}
+    <div className={`app-layout ${isTextProvider ? 'copywriting-app-layout' : ''}`}>
+      {isTextProvider ? (
+        <>
+          <header className="copywriting-chat-header">
+            <div className="copywriting-model-switcher">
+              <select value={provider} onChange={(event) => handleProviderChange(event.target.value)} aria-label="模型选择">
+                {MODEL_TYPE_ORDER.map((typeId) => (
+                  <optgroup key={typeId} label={MODEL_TYPES[typeId].label}>
+                    {MODEL_TYPES[typeId].providers.map((providerId) => {
+                      const option = PROVIDERS[providerId]
+                      return (
+                        <option key={providerId} value={providerId}>
+                          {option.selectorLabel || option.name}
+                        </option>
+                      )
+                    })}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+
+            <div className="copywriting-chat-actions">
+              {showAdminEntry && (
+                <button type="button" className="copywriting-header-btn" onClick={handleOpenAdmin}>
+                  后台管理
+                </button>
+              )}
+              <button
+                type="button"
+                className="copywriting-header-btn"
+                onClick={handleSaveSnapshot}
+                disabled={snapshotBusy}
+              >
+                保存快照
+              </button>
+              <button
+                type="button"
+                className="copywriting-header-btn"
+                onClick={handleLoadSnapshot}
+                disabled={snapshotBusy || hasActiveGeneration || !snapshotMeta?.savedAt}
+              >
+                加载快照
+              </button>
+            </div>
+          </header>
+
+          <main className="copywriting-chat-main">
+            {promptInput}
+          </main>
+        </>
+      ) : (
+        <>
+          <Header
+            onSaveSnapshot={handleSaveSnapshot}
+            onLoadSnapshot={handleLoadSnapshot}
+            onOpenAdmin={handleOpenAdmin}
+            snapshotBusy={snapshotBusy}
+            snapshotLoadDisabled={hasActiveGeneration}
+            hasSnapshot={Boolean(snapshotMeta?.savedAt)}
+            lastSavedAt={snapshotMeta?.savedAt ?? null}
+            snapshotNotice={snapshotNotice}
+            showAdminEntry={showAdminEntry}
           />
-        </div>
-        <div className={`right-panel ${isTextOutput ? 'text-workspace-panel' : ''}`}>
-          {isTextOutput ? (
-            promptInput
-          ) : (
-            <VideoPreview
-              videoUrl={currentState.videoUrl}
-              downloadUrl={currentState.downloadUrl}
-              textOutput={currentState.textOutput}
-              generating={currentState.generating}
-              progress={currentState.progress}
-              error={formatRuntimeErrorMessage(provider, currentState.error)}
-              params={params}
-              provider={provider}
-            />
-          )}
-        </div>
-      </main>
+          <main className="app-main">
+            <div className="left-panel">
+              <ModelSelector provider={provider} onChange={handleProviderChange} />
+              {promptInput}
+              <ParameterPanel
+                provider={provider}
+                config={panelConfig}
+                params={params}
+                onUpdate={updateParam}
+              />
+            </div>
+            <div className="right-panel">
+              <VideoPreview
+                videoUrl={currentState.videoUrl}
+                downloadUrl={currentState.downloadUrl}
+                textOutput={currentState.textOutput}
+                generating={currentState.generating}
+                progress={currentState.progress}
+                error={formatRuntimeErrorMessage(provider, currentState.error)}
+                params={params}
+                provider={provider}
+              />
+            </div>
+          </main>
+        </>
+      )}
     </div>
   )
 }
@@ -1063,6 +1156,19 @@ function createInitialProviderState() {
     state[key] = createProviderRuntimeState()
   }
   return state
+}
+
+function createChatMessageId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+function summarizeCopywritingAttachments(attachments) {
+  return normalizeCopywritingAttachments(attachments).map((attachment) => ({
+    id: attachment.id,
+    name: attachment.name,
+    size: attachment.size,
+    kind: attachment.kind,
+  }))
 }
 
 function mergeProviderRuntimeState(currentState, updates) {

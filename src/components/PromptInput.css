@@ -103,6 +103,7 @@
   font-size: 15px;
   line-height: 1.75;
 }
+
 .prompt-ta::placeholder { color: var(--text-placeholder); }
 
 .prompt-bar {
@@ -156,6 +157,384 @@
 }
 
 .hidden-input { display: none; }
+
+.copywriting-chat-workspace {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #fff;
+  color: #111;
+}
+
+.copywriting-empty-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 66px;
+  padding: 40px 20px 12vh;
+}
+
+.copywriting-empty-stage h1 {
+  margin: 0;
+  color: #111;
+  font-size: clamp(28px, 3vw, 38px);
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: 0;
+  text-align: center;
+}
+
+.copywriting-chat-thread {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 32px clamp(18px, 8vw, 120px) 18px;
+}
+
+.copywriting-chat-message {
+  width: min(100%, 860px);
+  margin: 0 auto;
+  display: flex;
+}
+
+.copywriting-chat-message.user {
+  justify-content: flex-end;
+}
+
+.copywriting-chat-message.assistant {
+  justify-content: flex-start;
+}
+
+.copywriting-chat-bubble {
+  max-width: min(760px, 84%);
+  font-size: 15px;
+  line-height: 1.75;
+  word-break: break-word;
+}
+
+.copywriting-chat-message.user .copywriting-chat-bubble {
+  padding: 10px 15px;
+  border-radius: 22px;
+  background: #f4f4f4;
+  color: #111;
+}
+
+.copywriting-chat-message.assistant .copywriting-chat-bubble {
+  width: min(760px, 100%);
+  color: #111;
+}
+
+.copywriting-chat-message.error .copywriting-chat-bubble {
+  color: var(--error);
+}
+
+.copywriting-chat-text {
+  white-space: pre-wrap;
+}
+
+.copywriting-chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.copywriting-chat-attachment {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(0,0,0,0.05);
+  color: #5f5f5f;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copywriting-chat-pending {
+  display: grid;
+  gap: 10px;
+  width: min(260px, 100%);
+  color: #555;
+  font-size: 14px;
+}
+
+.copywriting-progress {
+  width: 100%;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #ededed;
+}
+
+.copywriting-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  transition: width var(--transition-normal);
+}
+
+.copywriting-chat-message-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.copywriting-chat-message-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #777;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.copywriting-chat-message-actions button:hover {
+  background: #f5f5f5;
+  color: #222;
+}
+
+.copywriting-composer {
+  width: min(100%, 860px);
+  margin: 0 auto;
+  padding: 0 18px;
+}
+
+.copywriting-composer.docked {
+  flex-shrink: 0;
+  padding-bottom: 22px;
+}
+
+.copywriting-composer-box {
+  display: grid;
+  gap: 8px;
+  padding: 18px 16px 10px;
+  border: 1px solid #d9d9d9;
+  border-radius: 28px;
+  background: #fff;
+  box-shadow: 0 14px 44px rgba(0,0,0,0.08), 0 2px 10px rgba(0,0,0,0.04);
+}
+
+.copywriting-composer-box:focus-within {
+  border-color: #cfcfcf;
+  box-shadow: 0 18px 54px rgba(0,0,0,0.1), 0 2px 10px rgba(0,0,0,0.05);
+}
+
+.copywriting-composer-input {
+  width: 100%;
+  min-height: 50px;
+  max-height: 170px;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #111;
+  font-size: 16px;
+  line-height: 1.6;
+  padding: 0 14px;
+}
+
+.copywriting-composer-input::placeholder {
+  color: #9b9b9b;
+}
+
+.copywriting-composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+}
+
+.copywriting-tool-btn,
+.copywriting-send-btn,
+.copywriting-tool-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+}
+
+.copywriting-tool-btn {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: transparent;
+  color: #111;
+  cursor: pointer;
+}
+
+.copywriting-tool-btn:hover {
+  background: #f3f3f3;
+}
+
+.copywriting-tool-pill {
+  gap: 6px;
+  min-height: 32px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: transparent;
+  color: #0874d1;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.copywriting-send-btn {
+  width: 42px;
+  height: 42px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: #050505;
+  color: #fff;
+  cursor: pointer;
+  transition: transform var(--transition-fast), opacity var(--transition-fast);
+}
+
+.copywriting-send-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.copywriting-send-btn:disabled {
+  opacity: 0.34;
+  cursor: not-allowed;
+}
+
+.copywriting-composer-hint {
+  padding: 9px 10px 0;
+  color: #898989;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.copywriting-composer-hint kbd {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 4px;
+  border: 1px solid #e4e4e4;
+  background: #f7f7f7;
+  color: #777;
+  font-size: 10px;
+}
+
+.copywriting-composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 0 8px;
+}
+
+.copywriting-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 240px;
+  min-height: 28px;
+  padding: 5px 7px 5px 9px;
+  border-radius: 999px;
+  background: #f4f4f4;
+  color: #555;
+  font-size: 11px;
+}
+
+.copywriting-attachment-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copywriting-attachment-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #777;
+  cursor: pointer;
+}
+
+.copywriting-attachment-chip button:hover {
+  background: #e8e8e8;
+  color: #222;
+}
+
+.copywriting-chat-error {
+  margin-top: 7px;
+  color: var(--error);
+  font-size: 12px;
+  text-align: center;
+}
+
+.copywriting-clear-btn {
+  position: absolute;
+  right: 28px;
+  bottom: 24px;
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid #e6e6e6;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.88);
+  color: #555;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(0,0,0,0.08);
+}
+
+.copywriting-clear-btn:hover {
+  background: #f7f7f7;
+  color: #111;
+}
+
+@media (max-width: 720px) {
+  .copywriting-empty-stage {
+    gap: 34px;
+    padding: 28px 0 8vh;
+  }
+
+  .copywriting-chat-thread {
+    padding: 22px 14px 12px;
+  }
+
+  .copywriting-chat-bubble {
+    max-width: 92%;
+    font-size: 14px;
+  }
+
+  .copywriting-composer {
+    padding: 0 12px;
+  }
+
+  .copywriting-composer-box {
+    border-radius: 24px;
+  }
+
+  .copywriting-clear-btn {
+    right: 14px;
+    bottom: 14px;
+  }
+}
 
 /* === Reference Images Section (below prompt) === */
 .ref-images-section {

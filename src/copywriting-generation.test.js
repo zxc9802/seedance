@@ -113,3 +113,28 @@ test('preview panel renders text output for copywriting models', async () => {
   assert.match(previewCss, /\.preview-frame\.text/)
   assert.match(previewCss, /\.preview-text-output/)
 })
+
+test('copywriting workspace switches the whole app into a chatbot page', async () => {
+  const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
+  const promptInputSource = await fs.readFile(path.resolve('src/components/PromptInput.jsx'), 'utf8')
+  const appCss = await fs.readFile(path.resolve('src/App.css'), 'utf8')
+  const promptInputCss = await fs.readFile(path.resolve('src/components/PromptInput.css'), 'utf8')
+
+  assert.match(appSource, /const isTextProvider = config\.outputType === 'text'/)
+  assert.match(appSource, /copywriting-app-layout/)
+  assert.match(appSource, /copywriting-chat-header/)
+  assert.match(appSource, /copywriting-chat-main/)
+  assert.match(appSource, /copywritingMessages/)
+  assert.match(appSource, /workspace=\{isTextProvider \? 'copywriting' : 'default'\}/)
+
+  assert.match(promptInputSource, /workspace = 'default'/)
+  assert.match(promptInputSource, /const isCopywritingWorkspace = workspace === 'copywriting' && isTextOutput/)
+  assert.match(promptInputSource, /copywriting-empty-stage/)
+  assert.match(promptInputSource, /copywriting-chat-thread/)
+  assert.match(promptInputSource, /copywriting-composer/)
+  assert.match(promptInputSource, /我能帮什么忙吗/)
+  assert.match(appCss, /\.copywriting-chat-header/)
+  assert.match(appCss, /\.copywriting-chat-main/)
+  assert.match(promptInputCss, /\.copywriting-chat-workspace/)
+  assert.match(promptInputCss, /\.copywriting-composer-box/)
+})
