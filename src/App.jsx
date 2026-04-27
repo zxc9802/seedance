@@ -3160,7 +3160,7 @@ async function formatHttpError(response) {
 
     if (isTransientCopywritingError(response, message)) {
       return appendRequestId(
-        `API 错误 (${response.status}): BCAI 文案服务暂时不可用，可能已产生计费但未返回内容。请不要连续点击生成，记录 requestId 后稍后重试或到服务商后台核对。`,
+        `API 错误 (${response.status}): BCAI 文案服务暂时不可用，已自动重试仍未成功。可能已产生计费但未返回内容，请记录 requestId 后稍后重试或到服务商后台核对。`,
         requestId,
       )
     }

@@ -66,11 +66,11 @@ const hasExplicitAdminAllowlist = [
 const UPSTREAM_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'request-id']
 const UPSTREAM_TRACE_ID_HEADERS = ['trace-id', 'x-trace-id', 'cf-ray']
 const COPYWRITING_RETRY_OPTIONS = Object.freeze({
-  maxAttempts: readPositiveIntegerEnv(process.env.BCAI_COPYWRITING_MAX_ATTEMPTS, 1),
+  maxAttempts: readPositiveIntegerEnv(process.env.BCAI_COPYWRITING_MAX_ATTEMPTS, 3),
   statusCodes: new Set([429, 502, 503, 504, 529]),
   delaysMs: [700, 1400, 2600, 4200],
   retryNetworkErrors: true,
-  exhaustedMessage: 'BCAI 文案服务暂时不可用，可能已产生计费但未返回内容。请不要连续点击生成，记录 requestId 后稍后重试或到服务商后台核对。',
+  exhaustedMessage: 'BCAI 文案服务暂时不可用，已自动重试仍未成功。可能已产生计费但未返回内容，请记录 requestId 后稍后重试或到服务商后台核对。',
 })
 const USAGE_STATUS_NEEDS_REVIEW = 'needs_review'
 const USAGE_STATUS_SYNC_INTERVAL_MS = Math.max(60000, Number(process.env.USAGE_STATUS_SYNC_INTERVAL_MS || 180000))
