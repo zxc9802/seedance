@@ -47,6 +47,18 @@ test('copywriting backend preserves multimodal chat content arrays', async () =>
   assert.match(serverSource, /normalizeCopywritingContentParts\(item\?\.content\)/)
 })
 
+test('copywriting backend retries transient upstream overloads before returning an error', async () => {
+  const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
+
+  assert.match(serverSource, /const COPYWRITING_RETRY_OPTIONS = Object\.freeze\(\{/)
+  assert.match(serverSource, /statusCodes: new Set\(\[429, 502, 503, 504, 529\]\)/)
+  assert.match(serverSource, /retry: COPYWRITING_RETRY_OPTIONS/)
+  assert.match(serverSource, /function shouldRetryProxyResponse\(status, retryOptions, attempt\)/)
+  assert.match(serverSource, /function didExhaustProxyRetries\(status, retryOptions, attempt\)/)
+  assert.match(serverSource, /X-Proxy-Retry-Attempts/)
+  assert.match(serverSource, /文案服务暂时繁忙，已自动重试仍未成功，请稍后再试。/)
+})
+
 test('preview panel renders text output for copywriting models', async () => {
   const previewSource = await fs.readFile(path.resolve('src/components/VideoPreview.jsx'), 'utf8')
   const previewCss = await fs.readFile(path.resolve('src/components/VideoPreview.css'), 'utf8')

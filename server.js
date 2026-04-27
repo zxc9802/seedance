@@ -65,6 +65,13 @@ const hasExplicitAdminAllowlist = [
 ].some((set) => set.size > 0)
 const UPSTREAM_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'request-id']
 const UPSTREAM_TRACE_ID_HEADERS = ['trace-id', 'x-trace-id', 'cf-ray']
+const COPYWRITING_RETRY_OPTIONS = Object.freeze({
+  maxAttempts: readPositiveIntegerEnv(process.env.BCAI_COPYWRITING_MAX_ATTEMPTS, 5),
+  statusCodes: new Set([429, 502, 503, 504, 529]),
+  delaysMs: [700, 1400, 2600, 4200],
+  retryNetworkErrors: true,
+  exhaustedMessage: '文案服务暂时繁忙，已自动重试仍未成功，请稍后再试。',
+})
 const USAGE_STATUS_NEEDS_REVIEW = 'needs_review'
 const USAGE_STATUS_SYNC_INTERVAL_MS = Math.max(60000, Number(process.env.USAGE_STATUS_SYNC_INTERVAL_MS || 180000))
 const USAGE_STATUS_SYNC_BATCH_SIZE = Math.max(1, Math.min(100, Number(process.env.USAGE_STATUS_SYNC_BATCH_SIZE || 20)))
@@ -653,6 +660,9 @@ async function handleCopywritingChatRequest(req, res) {
         status: textResult ? 'succeeded' : 'failed',
         errorMessage,
       }).catch(() => {})
+    },
+    {
+      retry: COPYWRITING_RETRY_OPTIONS,
     },
   )
 }
@@ -2873,49 +2883,187 @@ async function proxyJson(req, res, url, extraHeaders = {}, onResponse = null) {
   return proxyJsonWithBody(req, res, url, req.body, extraHeaders, onResponse)
 }
 
-async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onResponse = null) {
-  try {
-    const response = await fetch(url, {
-      method: req.method,
-      headers: {
-        'Content-Type': 'application/json',
-        ...extraHeaders,
-      },
-      body: JSON.stringify(body),
-    })
+async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onResponse = null, options = {}) {
+  const retryOptions = normalizeProxyRetryOptions(options.retry)
+  let lastResult = null
+  let lastError = null
 
-    const buffer = Buffer.from(await response.arrayBuffer())
-    const contentType = response.headers.get('content-type') || ''
-    const parsedPayload = tryParseJsonBuffer(buffer, contentType)
-    const traceMetadata = extractUpstreamTraceMetadata(response, parsedPayload)
-    const tracedPayload = injectUpstreamTraceMetadata(parsedPayload, traceMetadata)
+  for (let attempt = 1; attempt <= retryOptions.maxAttempts; attempt += 1) {
+    try {
+      const result = await fetchProxyJsonResult(req, url, body, extraHeaders)
+      lastResult = result
 
-    if (onResponse) {
-      try { onResponse({ payload: parsedPayload, traceMetadata, status: response.status, url }) } catch (_) {}
-    }
-
-    res.status(response.status)
-    copyUpstreamResponseHeaders(res, response.headers)
-    applyUpstreamTraceHeaders(res, traceMetadata)
-
-    if (tracedPayload !== null) {
-      if (!res.getHeader('Content-Type')) {
-        res.setHeader('Content-Type', contentType || 'application/json; charset=utf-8')
+      if (shouldRetryProxyResponse(result.response.status, retryOptions, attempt)) {
+        await sleep(resolveProxyRetryDelayMs(retryOptions, attempt))
+        continue
       }
-      res.send(JSON.stringify(tracedPayload))
+
+      const exhausted = didExhaustProxyRetries(result.response.status, retryOptions, attempt)
+      sendProxyJsonResult(res, url, result, onResponse, {
+        attempts: attempt,
+        retryOptions,
+        exhausted,
+      })
+      return
+    } catch (error) {
+      lastError = error
+      if (shouldRetryProxyError(error, retryOptions, attempt)) {
+        await sleep(resolveProxyRetryDelayMs(retryOptions, attempt))
+        continue
+      }
+
+      sendProxyError(res, error)
       return
     }
-
-    res.end(buffer)
-  } catch (error) {
-    applyUpstreamTraceHeaders(res, error)
-    res.status(502).json({
-      success: false,
-      message: error.message || 'Upstream request failed',
-      ...(error.requestId ? { requestId: error.requestId } : {}),
-      ...(error.traceId ? { traceId: error.traceId } : {}),
-    })
   }
+
+  if (lastResult) {
+    sendProxyJsonResult(res, url, lastResult, onResponse, {
+      attempts: retryOptions.maxAttempts,
+      retryOptions,
+      exhausted: true,
+    })
+    return
+  }
+
+  sendProxyError(res, lastError || new Error('Upstream request failed'))
+}
+
+async function fetchProxyJsonResult(req, url, body, extraHeaders) {
+  const response = await fetch(url, {
+    method: req.method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...extraHeaders,
+    },
+    body: JSON.stringify(body),
+  })
+
+  const buffer = Buffer.from(await response.arrayBuffer())
+  const contentType = response.headers.get('content-type') || ''
+  const parsedPayload = tryParseJsonBuffer(buffer, contentType)
+  const traceMetadata = extractUpstreamTraceMetadata(response, parsedPayload)
+
+  return {
+    response,
+    buffer,
+    contentType,
+    parsedPayload,
+    traceMetadata,
+  }
+}
+
+function sendProxyJsonResult(res, url, result, onResponse, retryContext) {
+  const { response, buffer, contentType, parsedPayload, traceMetadata } = result
+  const payload = retryContext?.exhausted
+    ? decorateRetryExhaustedPayload(parsedPayload, traceMetadata, retryContext)
+    : injectUpstreamTraceMetadata(parsedPayload, traceMetadata)
+
+  if (onResponse) {
+    try { onResponse({ payload: parsedPayload, traceMetadata, status: response.status, url }) } catch (_) {}
+  }
+
+  res.status(response.status)
+  copyUpstreamResponseHeaders(res, response.headers)
+  applyUpstreamTraceHeaders(res, traceMetadata)
+  if (retryContext?.attempts > 1) {
+    res.setHeader('X-Proxy-Retry-Attempts', String(retryContext.attempts))
+  }
+  if (retryContext?.exhausted) {
+    res.setHeader('X-Proxy-Retry-Exhausted', 'true')
+  }
+
+  if (payload !== null) {
+    if (!res.getHeader('Content-Type')) {
+      res.setHeader('Content-Type', contentType || 'application/json; charset=utf-8')
+    }
+    res.send(JSON.stringify(payload))
+    return
+  }
+
+  res.end(buffer)
+}
+
+function sendProxyError(res, error) {
+  applyUpstreamTraceHeaders(res, error)
+  res.status(502).json({
+    success: false,
+    message: error.message || 'Upstream request failed',
+    ...(error.requestId ? { requestId: error.requestId } : {}),
+    ...(error.traceId ? { traceId: error.traceId } : {}),
+  })
+}
+
+function normalizeProxyRetryOptions(retry) {
+  if (!retry) {
+    return {
+      maxAttempts: 1,
+      statusCodes: new Set(),
+      delaysMs: [],
+      retryNetworkErrors: false,
+      exhaustedMessage: '',
+    }
+  }
+
+  const maxAttempts = Math.max(1, Number(retry.maxAttempts) || 1)
+  return {
+    maxAttempts,
+    statusCodes: retry.statusCodes instanceof Set ? retry.statusCodes : new Set(retry.statusCodes || []),
+    delaysMs: Array.isArray(retry.delaysMs) ? retry.delaysMs : [],
+    retryNetworkErrors: Boolean(retry.retryNetworkErrors),
+    exhaustedMessage: typeof retry.exhaustedMessage === 'string' ? retry.exhaustedMessage : '',
+  }
+}
+
+function shouldRetryProxyResponse(status, retryOptions, attempt) {
+  return attempt < retryOptions.maxAttempts && retryOptions.statusCodes.has(status)
+}
+
+function didExhaustProxyRetries(status, retryOptions, attempt) {
+  return attempt >= retryOptions.maxAttempts && retryOptions.maxAttempts > 1 && retryOptions.statusCodes.has(status)
+}
+
+function shouldRetryProxyError(_error, retryOptions, attempt) {
+  return attempt < retryOptions.maxAttempts && retryOptions.retryNetworkErrors
+}
+
+function resolveProxyRetryDelayMs(retryOptions, attempt) {
+  const delay = retryOptions.delaysMs[attempt - 1] ?? retryOptions.delaysMs.at(-1) ?? 0
+  return Math.max(0, Number(delay) || 0)
+}
+
+function decorateRetryExhaustedPayload(parsedPayload, traceMetadata, retryContext) {
+  const tracedPayload = injectUpstreamTraceMetadata(parsedPayload, traceMetadata)
+  if (!retryContext?.exhaustedMessage || !tracedPayload || Array.isArray(tracedPayload) || typeof tracedPayload !== 'object') {
+    return tracedPayload
+  }
+
+  const originalMessage = readFirstString(
+    tracedPayload?.error?.message,
+    tracedPayload?.message,
+  )
+  const decoratedPayload = { ...tracedPayload }
+
+  if (decoratedPayload.error && typeof decoratedPayload.error === 'object' && !Array.isArray(decoratedPayload.error)) {
+    decoratedPayload.error = {
+      ...decoratedPayload.error,
+      message: retryContext.exhaustedMessage,
+    }
+  } else {
+    decoratedPayload.message = retryContext.exhaustedMessage
+  }
+
+  decoratedPayload.retryAttempts = retryContext.attempts
+  if (originalMessage) {
+    decoratedPayload.upstreamMessage = originalMessage
+  }
+
+  return decoratedPayload
+}
+
+function readPositiveIntegerEnv(value, fallback) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
 const YUNWU_VIDEO_PROVIDERS = {
