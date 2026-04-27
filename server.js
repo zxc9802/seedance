@@ -260,15 +260,15 @@ app.use(async (req, res, next) => {
     return
   }
 
-  if (session) {
-    next()
-    return
-  }
-
   const ticket = readSingleQueryValue(req.query.ticket)
   const requestedMainAppUrl = resolveRequestedMainAppUrl(req)
 
   if (!ticket) {
+    if (session) {
+      next()
+      return
+    }
+
     res.redirect(302, buildMainAppVideoEntryUrl(requestedMainAppUrl))
     return
   }
