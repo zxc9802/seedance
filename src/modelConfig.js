@@ -24,6 +24,7 @@ const BASE_PROVIDERS = {
     color: '#2563eb',
     models: [
       { value: 'doubao-seedance-2-0-260128', label: 'Seedance 1', tag: '已接入' },
+      { value: 'doubao-seedance-2-0-fast-260128', label: 'Seedance 2 Fast', tag: 'Fast' },
     ],
     aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {

@@ -22,6 +22,13 @@ test('seedance1 is configured to use the real backend path', async () => {
   assert.equal(seedance1.referenceInputMode, 'url')
 })
 
+test('seedance1 exposes the Seedance 2 fast model on the same channel', async () => {
+  const providers = await loadProviders()
+  const seedance1 = providers.veo
+
+  assert.ok(seedance1.models.some((model) => model.value === 'doubao-seedance-2-0-fast-260128'))
+})
+
 test('App generation flow no longer short-circuits seedance1 to a frontend mock', async () => {
   const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
 
