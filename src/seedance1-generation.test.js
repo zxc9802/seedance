@@ -29,10 +29,11 @@ test('seedance1 exposes the Seedance 2 fast model on the same channel', async ()
   assert.ok(seedance1.models.some((model) => model.value === 'doubao-seedance-2-0-fast-260128'))
 })
 
-test('seedance1 defaults the Seedance 2 fast model to person material review', async () => {
+test('seedance1 defaults Seedance 2 models to person material review', async () => {
   const providers = await loadProviders()
   const seedance1 = providers.veo
 
+  assert.equal(seedance1.defaults.imageMaterialType, 'role')
   assert.equal(seedance1.modelMaterialTypeDefaults?.['doubao-seedance-2-0-fast-260128'], 'role')
 })
 

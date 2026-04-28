@@ -19,7 +19,7 @@ test('Seedance 1 exposes 480p and 720p resolution options while defaulting to 72
 
   assert.deepEqual(providers.veo.resolutions.default, ['480p', '720p'])
   assert.equal(providers.veo.defaults.resolution, '720p')
-  assert.equal(providers.veo.defaults.imageMaterialType, 'direct')
+  assert.equal(providers.veo.defaults.imageMaterialType, 'role')
 })
 
 test('gpt-image2 exposes Yunwu image generation parameters in the frontend config', async () => {

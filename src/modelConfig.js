@@ -66,7 +66,7 @@ const BASE_PROVIDERS = {
       duration: 5,
       sampleCount: 1,
       generateAudio: false,
-      imageMaterialType: 'direct',
+      imageMaterialType: 'role',
     },
     materialTypes: [
       { value: 'role', label: '人物审核' },
