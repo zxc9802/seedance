@@ -29,6 +29,13 @@ test('seedance1 exposes the Seedance 2 fast model on the same channel', async ()
   assert.ok(seedance1.models.some((model) => model.value === 'doubao-seedance-2-0-fast-260128'))
 })
 
+test('seedance1 defaults the Seedance 2 fast model to person material review', async () => {
+  const providers = await loadProviders()
+  const seedance1 = providers.veo
+
+  assert.equal(seedance1.modelMaterialTypeDefaults?.['doubao-seedance-2-0-fast-260128'], 'role')
+})
+
 test('App generation flow no longer short-circuits seedance1 to a frontend mock', async () => {
   const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
 
@@ -36,4 +43,5 @@ test('App generation flow no longer short-circuits seedance1 to a frontend mock'
   assert.doesNotMatch(appSource, /isFrontendMockVideoProvider/)
   assert.doesNotMatch(appSource, /Failed to fetch/)
   assert.match(appSource, /function resolveImageMaterialType\(provider, params\) \{\s+if \(provider !== 'veo'\) return 'direct'\s+return params\.imageMaterialType \|\| 'direct'/s)
+  assert.match(appSource, /function resolveModelMaterialTypeDefault\(config, model\)/)
 })

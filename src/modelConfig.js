@@ -74,6 +74,9 @@ const BASE_PROVIDERS = {
       { value: 'scene', label: '场景审核' },
       { value: 'direct', label: '直接原图' },
     ],
+    modelMaterialTypeDefaults: {
+      'doubao-seedance-2-0-fast-260128': 'role',
+    },
   },
   ve31p: {
     id: 've31p',

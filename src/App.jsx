@@ -1135,6 +1135,13 @@ function createInitialParams() {
 function applyCoupledParamUpdate(config, params, key, value) {
   const nextParams = { ...(params || {}), [key]: value }
 
+  if (key === 'model') {
+    const materialType = resolveModelMaterialTypeDefault(config, value)
+    if (materialType) {
+      nextParams.imageMaterialType = materialType
+    }
+  }
+
   if (key === 'aspectRatio' && config?.resolutionByAspectRatio?.[value]) {
     nextParams.resolution = config.resolutionByAspectRatio[value]
   }
@@ -1144,6 +1151,13 @@ function applyCoupledParamUpdate(config, params, key, value) {
   }
 
   return nextParams
+}
+
+function resolveModelMaterialTypeDefault(config, model) {
+  const modelDefault = config?.modelMaterialTypeDefaults?.[model]
+  if (modelDefault) return modelDefault
+
+  return config?.defaults?.imageMaterialType || null
 }
 
 function createProviderRuntimeState() {
@@ -1460,6 +1474,15 @@ function normalizeParamsForProvider(provider, params, mode = 't2v', references =
     nextParams = {
       ...nextParams,
       resolution: aspectMatchedResolution,
+    }
+    changed = true
+  }
+
+  const modelMaterialType = resolveModelMaterialTypeDefault(config, nextParams.model)
+  if (modelMaterialType && !nextParams.imageMaterialType) {
+    nextParams = {
+      ...nextParams,
+      imageMaterialType: modelMaterialType,
     }
     changed = true
   }
