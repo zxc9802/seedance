@@ -143,6 +143,7 @@ function App() {
     generating: false,
     progress: 0,
     videoUrl: null,
+    imageUrls: [],
     downloadUrl: null,
     textOutput: null,
     error: null,
@@ -362,7 +363,7 @@ function App() {
       setCopywritingAttachments([])
     }
 
-    updateProviderState(provider, { generating: true, progress: 0, error: null, videoUrl: null, downloadUrl: null, textOutput: null })
+    updateProviderState(provider, { generating: true, progress: 0, error: null, videoUrl: null, imageUrls: [], downloadUrl: null, textOutput: null })
 
     let progress = 0
     const progressTimer = window.setInterval(() => {
@@ -845,9 +846,12 @@ function App() {
           window.clearInterval(progressTimer)
           updateProviderState(provider, { progress: 100 })
 
-          const imageResult = parseImageChatResponse(data, finalPrompt)
-          if (imageResult) {
-            updateProviderState(provider, { videoUrl: imageResult.url })
+          const imageResults = parseImageChatResponses(data, finalPrompt)
+          if (imageResults.length > 0) {
+            updateProviderState(provider, {
+              videoUrl: imageResults[0].url,
+              imageUrls: imageResults.map((result) => result.url),
+            })
             return
           }
 
@@ -884,7 +888,7 @@ function App() {
             if (initialTask.imageUrl) {
               window.clearInterval(progressTimer)
               const previewUrl = await resolvePreviewUrl(initialTask.imageUrl)
-              updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+              updateProviderState(provider, { progress: 100, videoUrl: previewUrl, imageUrls: [previewUrl] })
               return
             }
 
@@ -927,7 +931,7 @@ function App() {
               if (task.imageUrl) {
                 window.clearInterval(progressTimer)
                 const previewUrl = await resolvePreviewUrl(task.imageUrl)
-                updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+                updateProviderState(provider, { progress: 100, videoUrl: previewUrl, imageUrls: [previewUrl] })
                 return
               }
 
@@ -962,7 +966,7 @@ function App() {
         const imageResult = parseImageChatResponse(data, finalPrompt)
         if (imageResult) {
           const finalImageUrl = await finalizeOpenAiImageOutput(provider, params, imageResult.url)
-          updateProviderState(provider, { videoUrl: finalImageUrl })
+          updateProviderState(provider, { videoUrl: finalImageUrl, imageUrls: [finalImageUrl] })
           return
         }
 
@@ -1110,6 +1114,7 @@ function App() {
             <div className="right-panel">
               <VideoPreview
                 videoUrl={currentState.videoUrl}
+                imageUrls={currentState.imageUrls}
                 downloadUrl={currentState.downloadUrl}
                 textOutput={currentState.textOutput}
                 generating={currentState.generating}
@@ -1161,7 +1166,7 @@ function resolveModelMaterialTypeDefault(config, model) {
 }
 
 function createProviderRuntimeState() {
-  return { generating: false, progress: 0, videoUrl: null, downloadUrl: null, textOutput: null, error: null }
+  return { generating: false, progress: 0, videoUrl: null, imageUrls: [], downloadUrl: null, textOutput: null, error: null }
 }
 
 function createInitialProviderState() {
@@ -3784,25 +3789,47 @@ function parseInlineImagePayload(payload, fallbackPrompt) {
 }
 
 function parseImageParts(parts, fallbackPrompt) {
+  return parseImagePartsResponses(parts, fallbackPrompt)[0] || null
+}
+
+function parseImagePartsResponses(parts, fallbackPrompt) {
+  const results = []
   if (!Array.isArray(parts)) {
-    return null
+    return results
   }
 
   for (const part of parts) {
     const inlineImage = parseInlineImagePayload(part?.inline_data || part?.inlineData, fallbackPrompt)
     if (inlineImage) {
-      return inlineImage
+      appendImageResult(results, inlineImage)
     }
 
     if (typeof part?.text === 'string') {
-      const textResult = parseImageChatResponse({ choices: [{ message: { content: part.text } }] }, fallbackPrompt)
-      if (textResult) {
-        return textResult
-      }
+      appendImageResults(results, parseImageChatResponses({ choices: [{ message: { content: part.text } }] }, fallbackPrompt))
     }
+
+    appendImageResult(results, parseImageRecord(part, fallbackPrompt))
   }
 
-  return null
+  return results
+}
+
+function appendImageResult(results, result) {
+  if (!result?.url || results.some((item) => item.url === result.url)) {
+    return
+  }
+
+  results.push(result)
+}
+
+function appendImageResults(results, nextResults) {
+  if (!Array.isArray(nextResults)) {
+    return
+  }
+
+  for (const result of nextResults) {
+    appendImageResult(results, result)
+  }
 }
 
 function parseCopywritingChatResponse(data) {
@@ -3932,105 +3959,61 @@ function parseImageRecord(record, fallbackPrompt) {
 }
 
 function parseImageChatResponse(data, fallbackPrompt) {
+  return parseImageChatResponses(data, fallbackPrompt)[0] || null
+}
+
+function parseImageChatResponses(data, fallbackPrompt) {
+  const results = []
   const content = data?.choices?.[0]?.message?.content
 
   if (typeof content === 'string') {
-    const stringResult = extractImageUrlFromString(content, fallbackPrompt)
-    if (stringResult) {
-      return stringResult
-    }
+    appendImageResult(results, extractImageUrlFromString(content, fallbackPrompt))
   }
 
   if (Array.isArray(content)) {
-    const imageItem = content.find((item) => item?.type === 'image_url' && (
-      item?.image_url?.url || typeof item?.image_url === 'string'
-    ))
-    if (imageItem) {
-      const imageUrlValue = typeof imageItem.image_url === 'string'
-        ? imageItem.image_url
-        : imageItem.image_url.url
-      return {
-        url: normalizeParsedImageUrl(imageUrlValue),
-        revised_prompt: fallbackPrompt,
-      }
-    }
-
-    const base64Item = content.find((item) => item?.type === 'image_base64' && typeof item?.image_base64 === 'string')
-    if (base64Item) {
-      const mimeType = typeof base64Item.mime_type === 'string' ? base64Item.mime_type : 'image/png'
-      return {
-        url: `data:${mimeType};base64,${base64Item.image_base64.replace(/\s/g, '')}`,
-        revised_prompt: fallbackPrompt,
-      }
-    }
-
     for (const contentItem of content) {
-      const parsedRecord = parseImageRecord(contentItem, fallbackPrompt)
-      if (parsedRecord) {
-        return parsedRecord
-      }
+      appendImageResult(results, parseImageRecord(contentItem, fallbackPrompt))
     }
   }
 
-  const topLevelRecord = parseImageRecord(data, fallbackPrompt)
-  if (topLevelRecord) {
-    return topLevelRecord
-  }
+  appendImageResult(results, parseImageRecord(data, fallbackPrompt))
 
   const topLevelCollections = [data?.data, data?.images, data?.results, data?.artifacts]
   for (const collection of topLevelCollections) {
     if (!Array.isArray(collection)) continue
 
     for (const record of collection) {
-      const parsedRecord = parseImageRecord(record, fallbackPrompt)
-      if (parsedRecord) {
-        return parsedRecord
-      }
+      appendImageResult(results, parseImageRecord(record, fallbackPrompt))
     }
   }
 
   const directContainers = [data?.result, data?.image]
   for (const entry of directContainers) {
-    const directRecord = parseImageRecord(entry, fallbackPrompt)
-    if (directRecord) {
-      return directRecord
-    }
+    appendImageResult(results, parseImageRecord(entry, fallbackPrompt))
   }
 
   const outputEntries = Array.isArray(data?.output) ? data.output : []
   for (const entry of outputEntries) {
-    const directRecord = parseImageRecord(entry, fallbackPrompt)
-    if (directRecord) {
-      return directRecord
-    }
+    appendImageResult(results, parseImageRecord(entry, fallbackPrompt))
 
     if (!Array.isArray(entry?.content)) continue
 
     for (const contentItem of entry.content) {
-      const parsedRecord = parseImageRecord(contentItem, fallbackPrompt)
-      if (parsedRecord) {
-        return parsedRecord
-      }
+      appendImageResult(results, parseImageRecord(contentItem, fallbackPrompt))
     }
   }
 
   const parts = data?.choices?.[0]?.message?.parts
   if (parts) {
-    const partResult = parseImageParts(parts, fallbackPrompt)
-    if (partResult) {
-      return partResult
-    }
+    appendImageResults(results, parseImagePartsResponses(parts, fallbackPrompt))
   }
 
   const candidates = Array.isArray(data?.candidates) ? data.candidates : []
   for (const candidate of candidates) {
-    const partResult = parseImageParts(candidate?.content?.parts, fallbackPrompt)
-    if (partResult) {
-      return partResult
-    }
+    appendImageResults(results, parseImagePartsResponses(candidate?.content?.parts, fallbackPrompt))
   }
 
-  return null
+  return results
 }
 
 export default App

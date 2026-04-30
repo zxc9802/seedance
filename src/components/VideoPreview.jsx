@@ -4,7 +4,7 @@ import { Copy, Download, FileText, Loader2, Maximize2, MonitorPlay, X } from 'lu
 import { PROVIDERS } from '../modelConfig'
 import './VideoPreview.css'
 
-export default function VideoPreview({ videoUrl, downloadUrl, textOutput, generating, progress, error, params, provider }) {
+export default function VideoPreview({ videoUrl, imageUrls = [], downloadUrl, textOutput, generating, progress, error, params, provider }) {
   const cfg = PROVIDERS[provider]
   const isTextOutput = cfg.outputType === 'text'
   const isImageOutput = cfg.outputType === 'image'
@@ -13,42 +13,71 @@ export default function VideoPreview({ videoUrl, downloadUrl, textOutput, genera
   const [showFullscreen, setShowFullscreen] = useState(false)
   const [playbackError, setPlaybackError] = useState(null)
   const [playbackRetryCount, setPlaybackRetryCount] = useState(0)
+  const [selectedImageIndex, setSelectedImageIndex] = useState(0)
+
+  const previewImageUrls = useMemo(
+    () => normalizePreviewImageUrls(imageUrls, videoUrl),
+    [imageUrls, videoUrl],
+  )
+  const selectedImageUrl = isImageOutput
+    ? (previewImageUrls[selectedImageIndex] || previewImageUrls[0] || null)
+    : null
+  const playbackUrl = isImageOutput ? selectedImageUrl : videoUrl
 
   useEffect(() => {
     setPlaybackError(null)
     setPlaybackRetryCount(0)
-  }, [videoUrl, provider])
+  }, [playbackUrl, provider])
 
-  const effectiveVideoUrl = useMemo(
-    () => buildRetryablePlaybackUrl(videoUrl, playbackRetryCount),
-    [videoUrl, playbackRetryCount],
+  useEffect(() => {
+    setSelectedImageIndex(0)
+  }, [imageUrls, videoUrl, provider])
+
+  useEffect(() => {
+    if (selectedImageIndex >= previewImageUrls.length) {
+      setSelectedImageIndex(0)
+    }
+  }, [previewImageUrls.length, selectedImageIndex])
+
+  const effectivePlaybackUrl = useMemo(
+    () => buildRetryablePlaybackUrl(playbackUrl, playbackRetryCount),
+    [playbackUrl, playbackRetryCount],
   )
-  const effectiveDownloadUrl = downloadUrl || videoUrl
+  const effectiveDownloadUrl = isImageOutput ? selectedImageUrl : (downloadUrl || videoUrl)
+  const hasPreviewOutput = isTextOutput ? textOutput : (isImageOutput ? selectedImageUrl : videoUrl)
 
   const frameClass = isTextOutput ? 'text' : resolveAspectRatioFrameClass(params.aspectRatio)
   const frameStyle = isTextOutput ? undefined : resolveAspectRatioFrameStyle(params.aspectRatio)
+
+  const handleDownloadUrl = (url, filename) => {
+    if (!url) return
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
+  const handleCopyUrl = (url) => {
+    if (!url) return
+    navigator.clipboard.writeText(url)
+  }
 
   const handleDownload = () => {
     if (isTextOutput) {
       if (!textOutput) return
       const objectUrl = URL.createObjectURL(new Blob([textOutput], { type: 'text/plain;charset=utf-8' }))
-      const link = document.createElement('a')
-      link.href = objectUrl
-      link.download = `copywriting-${Date.now()}.txt`
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
+      handleDownloadUrl(objectUrl, `copywriting-${Date.now()}.txt`)
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
       return
     }
 
     if (!effectiveDownloadUrl) return
-    const link = document.createElement('a')
-    link.href = effectiveDownloadUrl
-    link.download = `${isImageOutput ? 'image' : 'video'}-${Date.now()}.${inferExtension(effectiveDownloadUrl, isImageOutput)}`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    handleDownloadUrl(
+      effectiveDownloadUrl,
+      `${isImageOutput ? 'image' : 'video'}-${Date.now()}.${inferExtension(effectiveDownloadUrl, isImageOutput)}`,
+    )
   }
 
   const handlePlaybackRecovered = () => {
@@ -63,7 +92,7 @@ export default function VideoPreview({ videoUrl, downloadUrl, textOutput, genera
       return
     }
 
-    if (isRetryablePlaybackUrl(videoUrl) && playbackRetryCount < 2) {
+    if (isRetryablePlaybackUrl(playbackUrl) && playbackRetryCount < 2) {
       setPlaybackRetryCount((current) => current + 1)
       return
     }
@@ -79,7 +108,7 @@ export default function VideoPreview({ videoUrl, downloadUrl, textOutput, genera
           <span>{isTextOutput ? '文案预览' : (isImageOutput ? '图片预览' : '视频预览')}</span>
         </div>
 
-        {(isTextOutput ? textOutput : videoUrl) && (
+        {hasPreviewOutput && (
           <div className="preview-actions">
             {!isTextOutput && (
               <button className="pa-btn" onClick={() => setShowFullscreen(true)}>
@@ -89,7 +118,7 @@ export default function VideoPreview({ videoUrl, downloadUrl, textOutput, genera
             <button className="pa-btn" onClick={handleDownload}>
               <Download size={13} /> 下载
             </button>
-            <button className="pa-btn" onClick={() => navigator.clipboard.writeText(isTextOutput ? textOutput : effectiveDownloadUrl)}>
+            <button className="pa-btn" onClick={() => handleCopyUrl(isTextOutput ? textOutput : effectiveDownloadUrl)}>
               <Copy size={13} /> {isTextOutput ? '复制内容' : '复制链接'}
             </button>
           </div>
@@ -97,87 +126,135 @@ export default function VideoPreview({ videoUrl, downloadUrl, textOutput, genera
       </div>
 
       <div className="preview-area">
-        <motion.div
-          className={`preview-frame ${frameClass}`}
-          style={frameStyle}
-          initial={{ opacity: 0, scale: 0.97 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 0.3 }}
-          key={isTextOutput ? provider : params.aspectRatio}
-        >
-          {isTextOutput && textOutput ? (
-            <div className="preview-text-output">{textOutput}</div>
-          ) : videoUrl && !playbackError ? (
-            isImageOutput ? (
+        <div className="preview-content">
+          {isImageOutput && previewImageUrls.length > 1 && hasPreviewOutput && !playbackError ? (
+          <motion.div
+            className="image-preview-shell"
+            style={{ '--prov': cfg.color }}
+            initial={{ opacity: 0, scale: 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.3 }}
+            key={`image-shell-${previewImageUrls.length}-${params.aspectRatio}`}
+          >
+            <div className={`preview-frame ${frameClass}`} style={frameStyle}>
               <img
-                src={effectiveVideoUrl}
+                src={effectivePlaybackUrl}
                 className="preview-video preview-image"
-                alt="Generated"
+                alt={`Generated ${selectedImageIndex + 1}`}
                 onClick={() => setShowFullscreen(true)}
                 onLoad={handlePlaybackRecovered}
                 onError={handlePlaybackError}
                 style={{ cursor: 'pointer' }}
               />
-            ) : (
-              <video
-                key={effectiveVideoUrl}
-                src={effectiveVideoUrl}
-                controls
-                autoPlay
-                muted
-                playsInline
-                preload="metadata"
-                loop
-                className="preview-video"
-                onCanPlay={handlePlaybackRecovered}
-                onLoadedData={handlePlaybackRecovered}
-                onError={handlePlaybackError}
-              />
-            )
-          ) : generating ? (
-            <div className="preview-generating">
-              <div className="gen-ring" style={{ '--ring-color': cfg.color }}>
-                <Loader2 size={28} className="spin" style={{ color: cfg.color }} />
-              </div>
-              <div className="gen-info">
-                <span className="gen-label">正在使用 {displayModelName} 生成{outputLabel}...</span>
-                <div className="gen-progress-bar">
-                  <motion.div
-                    className="gen-progress-fill"
-                    style={{ background: cfg.color }}
-                    initial={{ width: 0 }}
-                    animate={{ width: `${progress}%` }}
-                    transition={{ duration: 0.3 }}
-                  />
-                </div>
-                <span className="gen-percent">{progress}%</span>
-              </div>
             </div>
-          ) : (error || playbackError) ? (
-            <div className="preview-msg">
-              <p className="preview-error">{playbackError || error}</p>
-            </div>
-          ) : (
-            <div className="preview-empty">
-              <div className="empty-icon" style={{ '--ec': cfg.color }}>
-                {isTextOutput ? <FileText size={32} strokeWidth={1} /> : <MonitorPlay size={32} strokeWidth={1} />}
-              </div>
-              <p className="empty-title">准备就绪</p>
-              <p className="empty-desc">输入提示词并点击生成按钮来创建{outputLabel}</p>
-            </div>
-          )}
-        </motion.div>
 
-        <div className="preview-meta">
+            <div className="image-thumb-strip" role="list" aria-label="Generated images">
+              {previewImageUrls.map((url, index) => (
+                <button
+                  key={`${url}-${index}`}
+                  type="button"
+                  className={`image-thumb ${selectedImageIndex === index ? 'active' : ''}`}
+                  onClick={() => setSelectedImageIndex(index)}
+                  aria-label={`Select image ${index + 1}`}
+                  aria-pressed={selectedImageIndex === index}
+                  role="listitem"
+                >
+                  <img
+                    src={url}
+                    className="image-thumb-img"
+                    alt={`Generated ${index + 1}`}
+                    onLoad={handlePlaybackRecovered}
+                  />
+                  <span className="image-thumb-index">{index + 1}</span>
+                </button>
+              ))}
+            </div>
+          </motion.div>
+        ) : (
+          <motion.div
+            className={`preview-frame ${frameClass}`}
+            style={frameStyle}
+            initial={{ opacity: 0, scale: 0.97 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.3 }}
+            key={isTextOutput ? provider : params.aspectRatio}
+          >
+            {isTextOutput && textOutput ? (
+              <div className="preview-text-output">{textOutput}</div>
+            ) : hasPreviewOutput && !playbackError ? (
+              isImageOutput ? (
+                <img
+                  src={effectivePlaybackUrl}
+                  className="preview-video preview-image"
+                  alt="Generated"
+                  onClick={() => setShowFullscreen(true)}
+                  onLoad={handlePlaybackRecovered}
+                  onError={handlePlaybackError}
+                  style={{ cursor: 'pointer' }}
+                />
+              ) : (
+                <video
+                  key={effectivePlaybackUrl}
+                  src={effectivePlaybackUrl}
+                  controls
+                  autoPlay
+                  muted
+                  playsInline
+                  preload="metadata"
+                  loop
+                  className="preview-video"
+                  onCanPlay={handlePlaybackRecovered}
+                  onLoadedData={handlePlaybackRecovered}
+                  onError={handlePlaybackError}
+                />
+              )
+            ) : generating ? (
+              <div className="preview-generating">
+                <div className="gen-ring" style={{ '--ring-color': cfg.color }}>
+                  <Loader2 size={28} className="spin" style={{ color: cfg.color }} />
+                </div>
+                <div className="gen-info">
+                  <span className="gen-label">正在使用 {displayModelName} 生成{outputLabel}...</span>
+                  <div className="gen-progress-bar">
+                    <motion.div
+                      className="gen-progress-fill"
+                      style={{ background: cfg.color }}
+                      initial={{ width: 0 }}
+                      animate={{ width: `${progress}%` }}
+                      transition={{ duration: 0.3 }}
+                    />
+                  </div>
+                  <span className="gen-percent">{progress}%</span>
+                </div>
+              </div>
+            ) : (error || playbackError) ? (
+              <div className="preview-msg">
+                <p className="preview-error">{playbackError || error}</p>
+              </div>
+            ) : (
+              <div className="preview-empty">
+                <div className="empty-icon" style={{ '--ec': cfg.color }}>
+                  {isTextOutput ? <FileText size={32} strokeWidth={1} /> : <MonitorPlay size={32} strokeWidth={1} />}
+                </div>
+                <p className="empty-title">准备就绪</p>
+                <p className="empty-desc">输入提示词并点击生成按钮来创建{outputLabel}</p>
+              </div>
+            )}
+          </motion.div>
+        )}
+
+          <div className="preview-meta">
           <MetaTag label="模型" value={displayModelName} color={cfg.color} />
           {!isTextOutput && params.aspectRatio && <MetaTag label="比例" value={params.aspectRatio} />}
           {!isTextOutput && params.duration != null && <MetaTag label="时长" value={`${params.duration}秒`} />}
           {!isTextOutput && !cfg.hideResolutionSelector && params.resolution && <MetaTag label="分辨率" value={params.resolution} />}
+          {isImageOutput && previewImageUrls.length > 1 && <MetaTag label="数量" value={`${previewImageUrls.length}/${previewImageUrls.length}`} />}
+          </div>
         </div>
       </div>
 
       <AnimatePresence>
-        {!isTextOutput && showFullscreen && videoUrl && !playbackError && (
+        {!isTextOutput && showFullscreen && hasPreviewOutput && !playbackError && (
           <motion.div
             className="fullscreen-overlay"
             initial={{ opacity: 0 }}
@@ -195,7 +272,7 @@ export default function VideoPreview({ videoUrl, downloadUrl, textOutput, genera
             >
               {isImageOutput ? (
                 <img
-                  src={effectiveVideoUrl}
+                  src={effectivePlaybackUrl}
                   className="fullscreen-image"
                   alt="Preview"
                   onLoad={handlePlaybackRecovered}
@@ -203,8 +280,8 @@ export default function VideoPreview({ videoUrl, downloadUrl, textOutput, genera
                 />
               ) : (
                 <video
-                  key={`fullscreen-${effectiveVideoUrl}`}
-                  src={effectiveVideoUrl}
+                  key={`fullscreen-${effectivePlaybackUrl}`}
+                  src={effectivePlaybackUrl}
                   controls
                   autoPlay
                   muted
@@ -282,6 +359,18 @@ function inferExtension(url, isImageOutput) {
 
   if (url.includes('.mov')) return 'mov'
   return 'mp4'
+}
+
+function normalizePreviewImageUrls(imageUrls, fallbackUrl) {
+  const urls = (Array.isArray(imageUrls) ? imageUrls : [])
+    .filter((url) => typeof url === 'string' && url.trim())
+    .map((url) => url.trim())
+
+  if (typeof fallbackUrl === 'string' && fallbackUrl.trim() && !urls.includes(fallbackUrl.trim())) {
+    urls.unshift(fallbackUrl.trim())
+  }
+
+  return urls
 }
 
 function isRetryablePlaybackUrl(url) {

@@ -711,6 +711,17 @@ async function handleGptImage2GenerateRequest(req, res) {
 
   const mediaSummary = parseUsageMediaSummaryHeader(req)
   const upstreamUrl = `${gptImage2ApiBaseUrl}/v1/images/generations`
+  if (upstreamBody.n > 1) {
+    await handleGptImage2FanoutGenerateRequest(req, res, {
+      body,
+      upstreamBody,
+      upstreamUrl,
+      apiKey,
+      mediaSummary,
+    })
+    return
+  }
+
   await proxyJsonWithBody(
     req,
     res,
@@ -751,6 +762,206 @@ async function handleGptImage2GenerateRequest(req, res) {
       }).catch(() => {})
     },
   )
+}
+
+async function handleGptImage2FanoutGenerateRequest(req, res, {
+  body,
+  upstreamBody,
+  upstreamUrl,
+  apiKey,
+  mediaSummary,
+}) {
+  const upstreamHeaders = {
+    Accept: 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+  }
+  const fanoutBodies = Array.from({ length: upstreamBody.n }, () => ({
+    ...upstreamBody,
+    n: 1,
+  }))
+  const fanoutResults = await Promise.allSettled(
+    fanoutBodies.map(async (fanoutBody, index) => {
+      try {
+        return await fetchGptImage2FanoutResult(req, upstreamUrl, fanoutBody, upstreamHeaders, index)
+      } catch (error) {
+        error.fanoutIndex = index
+        throw error
+      }
+    }),
+  )
+
+  const successfulPayloads = fanoutResults
+    .filter((result) => result.status === 'fulfilled' && result.value.succeeded)
+    .map((result) => result.value)
+  const failedResults = fanoutResults
+    .filter((result) => result.status === 'rejected' || !result.value.succeeded)
+
+  const aggregatePayload = aggregateGptImage2FanoutPayload(successfulPayloads, failedResults, upstreamBody)
+  const traceMetadata = resolveGptImage2FanoutTraceMetadata(successfulPayloads, failedResults)
+  const errorMessage = failedResults.length > 0
+    ? aggregatePayload.partial_error?.message || 'Some image generation requests failed.'
+    : null
+
+  insertUsageLog({
+    session: req.videoSiteSession,
+    channel: 'image',
+    providerId: body.providerId || 'gpt-image2',
+    model: upstreamBody.model || null,
+    generationMode: upstreamBody.image?.length ? 'image-to-image' : 'text-to-image',
+    prompt: upstreamBody.prompt || null,
+    resolution: upstreamBody.size || null,
+    sampleCount: upstreamBody.n || null,
+    requestParams: attachUsageMediaSummary({
+      model: upstreamBody.model || null,
+      size: upstreamBody.size || null,
+      n: upstreamBody.n || null,
+      quality: upstreamBody.quality || null,
+      format: upstreamBody.format || null,
+      mediaCounts: { images: upstreamBody.image?.length || 0, videos: 0, audios: 0 },
+      fanout: {
+        requestedCount: upstreamBody.n,
+        succeededCount: successfulPayloads.length,
+        failedCount: failedResults.length,
+      },
+    }, mediaSummary),
+    upstreamRequestId: traceMetadata?.requestId || null,
+    upstreamTraceId: traceMetadata?.traceId || null,
+    upstreamUrl,
+    status: successfulPayloads.length > 0 ? 'succeeded' : 'failed',
+    errorMessage,
+  }).catch(() => {})
+
+  applyUpstreamTraceHeaders(res, traceMetadata)
+  if (successfulPayloads.length > 0) {
+    res.status(200).json(aggregatePayload)
+    return
+  }
+
+  res.status(resolveGptImage2FanoutFailureStatus(failedResults)).json({
+    error: {
+      message: resolveGptImage2FanoutFailureMessage(failedResults),
+      type: 'image_generation_error',
+    },
+    ...aggregatePayload,
+  })
+}
+
+async function fetchGptImage2FanoutResult(req, upstreamUrl, upstreamBody, headers, index) {
+  const result = await fetchProxyJsonResult(req, upstreamUrl, upstreamBody, headers)
+  const { response, parsedPayload, traceMetadata } = result
+  const imageResult = response.status < 400
+    ? extractImageResponseResult(parsedPayload, upstreamBody.prompt)
+    : null
+  const errorMessage = response.status >= 400
+    ? readGptImage2ErrorMessage(parsedPayload, response.status)
+    : (imageResult ? null : buildImageResponseParseError(parsedPayload))
+
+  return {
+    index,
+    status: response.status,
+    payload: injectUpstreamTraceMetadata(parsedPayload, traceMetadata),
+    traceMetadata,
+    imageResult,
+    errorMessage,
+    succeeded: response.status < 400 && Boolean(imageResult),
+  }
+}
+
+function aggregateGptImage2FanoutPayload(successfulPayloads, failedResults, upstreamBody) {
+  const requestedCount = upstreamBody.n
+  const data = successfulPayloads.map((result) => ({
+    url: result.imageResult.url,
+    revised_prompt: result.imageResult.revisedPrompt || upstreamBody.prompt || '',
+    fanout_index: result.index + 1,
+  }))
+  const payload = {
+    object: 'list',
+    created: Math.floor(Date.now() / 1000),
+    data,
+    fanout: {
+      requestedCount: upstreamBody.n,
+      succeededCount: successfulPayloads.length,
+      failedCount: failedResults.length,
+    },
+  }
+
+  if (failedResults.length > 0) {
+    payload.partial_error = {
+      type: 'partial_error',
+      message: `Generated ${successfulPayloads.length} of ${requestedCount} requested images. ${failedResults.length} request(s) failed.`,
+      failures: failedResults.map(summarizeGptImage2FanoutFailure),
+    }
+  }
+
+  return payload
+}
+
+function summarizeGptImage2FanoutFailure(result) {
+  if (result.status === 'rejected') {
+    return {
+      index: Number.isInteger(result.reason?.fanoutIndex) ? result.reason.fanoutIndex + 1 : null,
+      type: 'network_error',
+      message: result.reason?.message || 'Upstream request failed.',
+      ...(result.reason?.requestId ? { requestId: result.reason.requestId } : {}),
+      ...(result.reason?.traceId ? { traceId: result.reason.traceId } : {}),
+    }
+  }
+
+  return {
+    index: result.value.index + 1,
+    type: result.value.status >= 400 ? 'upstream_error' : 'parse_error',
+    status: result.value.status,
+    message: result.value.errorMessage || 'Image generation finished without a parseable image.',
+    ...(result.value.traceMetadata?.requestId ? { requestId: result.value.traceMetadata.requestId } : {}),
+    ...(result.value.traceMetadata?.traceId ? { traceId: result.value.traceMetadata.traceId } : {}),
+  }
+}
+
+function resolveGptImage2FanoutTraceMetadata(successfulPayloads, failedResults) {
+  const successfulTrace = successfulPayloads.find((result) => result.traceMetadata?.requestId || result.traceMetadata?.traceId)?.traceMetadata
+  if (successfulTrace) return successfulTrace
+
+  for (const result of failedResults) {
+    if (result.status === 'fulfilled' && (result.value.traceMetadata?.requestId || result.value.traceMetadata?.traceId)) {
+      return result.value.traceMetadata
+    }
+    if (result.status === 'rejected' && (result.reason?.requestId || result.reason?.traceId)) {
+      return result.reason
+    }
+  }
+
+  return {}
+}
+
+function resolveGptImage2FanoutFailureStatus(failedResults) {
+  const statuses = failedResults
+    .filter((result) => result.status === 'fulfilled')
+    .map((result) => Number(result.value.status))
+    .filter((status) => Number.isInteger(status) && status >= 400)
+
+  if (statuses.includes(401)) return 401
+  if (statuses.includes(403)) return 403
+  if (statuses.includes(429)) return 429
+  if (statuses.includes(400)) return 400
+  return statuses[0] || 502
+}
+
+function resolveGptImage2FanoutFailureMessage(failedResults) {
+  const firstFailure = failedResults[0]
+  if (!firstFailure) return 'Image generation failed.'
+  if (firstFailure.status === 'rejected') {
+    return firstFailure.reason?.message || 'Upstream request failed.'
+  }
+
+  return firstFailure.value.errorMessage || 'Image generation failed.'
+}
+
+function readGptImage2ErrorMessage(payload, status) {
+  return readFirstString(
+    payload?.error?.message,
+    payload?.message,
+    payload?.msg,
+  ) || `Upstream image generation request failed with status ${status}.`
 }
 
 async function handleGeminiImageGenerateRequest(req, res) {
