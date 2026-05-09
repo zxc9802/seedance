@@ -220,6 +220,7 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
   { header: '\u6a21\u578b', width: 28, value: (log) => log.model || '' },
   { header: '\u6a21\u5f0f', width: 12, align: 'center', value: (log) => log.generation_mode || '' },
   { header: '\u65f6\u957f(\u79d2)', width: 12, align: 'center', value: (log) => formatDurationLabel(log.duration) },
+  { header: '\u751f\u6210\u6570\u91cf', width: 12, align: 'center', value: (log) => Math.max(1, Number(log.sample_count) || 1) },
   { header: '\u63d0\u793a\u8bcd', width: 56, value: (log) => log.promptText || '' },
   { header: '\u56fe\u7247(\u6570\u91cf/\u5927\u5c0f)', width: 18, align: 'center', value: (log) => formatMediaMetric(log.imageCount, log.imageBytes) },
   { header: '\u89c6\u9891(\u6570\u91cf/\u5927\u5c0f)', width: 18, align: 'center', value: (log) => formatMediaMetric(log.videoCount, log.videoBytes) },
@@ -594,6 +595,30 @@ function buildUsageLogWhereClause(query = {}) {
   }
 }
 
+function parseUsageDayRange(value) {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (normalized === 'all') return null
+  if (!normalized) return 30
+
+  const parsed = Number(normalized)
+  if (!Number.isFinite(parsed) || parsed === 0) return 30
+  return Math.min(90, Math.max(1, parsed))
+}
+
+function buildUsageDayRangeFilter(days) {
+  if (days === null) {
+    return {
+      whereClause: '',
+      params: [],
+    }
+  }
+
+  return {
+    whereClause: 'WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)',
+    params: [days],
+  }
+}
+
 function appendUsageDateWindowClause(query, conditions, params, paramIdx, fallbackDays = null) {
   if (query.dateFrom) {
     conditions.push(`created_at >= $${paramIdx++}`)
@@ -646,7 +671,8 @@ router.use((req, res, next) => {
 router.get('/overview', async (req, res) => {
   const db = getPool()
   if (!db) return res.json({})
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const days = parseUsageDayRange(req.query.days)
+  const rangeFilter = buildUsageDayRangeFilter(days)
 
   try {
     const [totals, ranged] = await Promise.all([
@@ -663,8 +689,8 @@ router.get('/overview', async (req, res) => {
           COALESCE(SUM(estimated_cost), 0)::float AS total_cost,
           COUNT(DISTINCT user_id)::int AS active_users
         FROM video_usage_logs
-        WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)
-      `, [days]),
+        ${rangeFilter.whereClause}
+      `, rangeFilter.params),
     ])
 
     const t = totals.rows[0]
@@ -688,7 +714,8 @@ router.get('/trend', async (req, res) => {
   const db = getPool()
   if (!db) return res.json([])
 
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const days = parseUsageDayRange(req.query.days)
+  const rangeFilter = buildUsageDayRangeFilter(days)
 
   try {
     const result = await db.query(`
@@ -699,10 +726,10 @@ router.get('/trend', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
-      WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)
+      ${rangeFilter.whereClause}
       GROUP BY DATE(created_at)
       ORDER BY date
-    `, [days])
+    `, rangeFilter.params)
 
     res.json(result.rows)
   } catch (err) {
@@ -714,7 +741,8 @@ router.get('/by-model', async (req, res) => {
   const db = getPool()
   if (!db) return res.json([])
 
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const days = parseUsageDayRange(req.query.days)
+  const rangeFilter = buildUsageDayRangeFilter(days)
 
   try {
     const result = await db.query(`
@@ -725,10 +753,10 @@ router.get('/by-model', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
-      WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)
+      ${rangeFilter.whereClause}
       GROUP BY model, ${USAGE_CHANNEL_SQL}
       ORDER BY requests DESC
-    `, [days])
+    `, rangeFilter.params)
 
     res.json(result.rows)
   } catch (err) {
@@ -740,7 +768,7 @@ router.get('/by-user', async (req, res) => {
   const db = getPool()
   if (!db) return res.json([])
 
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const days = parseUsageDayRange(req.query.days)
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50))
   const conditions = ['1=1']
   const params = []
@@ -753,16 +781,21 @@ router.get('/by-user', async (req, res) => {
     const result = await db.query(`
       SELECT
         user_id,
-        COALESCE(user_nickname, user_email, user_id) AS user_name,
-        user_email,
-        user_group,
+        COALESCE(
+          (array_agg(user_nickname ORDER BY created_at DESC) FILTER (WHERE user_nickname IS NOT NULL AND user_nickname <> ''))[1],
+          (array_agg(user_email ORDER BY created_at DESC) FILTER (WHERE user_email IS NOT NULL AND user_email <> ''))[1],
+          user_id
+        ) AS user_name,
+        (array_agg(user_email ORDER BY created_at DESC) FILTER (WHERE user_email IS NOT NULL AND user_email <> ''))[1] AS user_email,
+        (array_agg(user_group ORDER BY created_at DESC) FILTER (WHERE user_group IS NOT NULL AND user_group <> ''))[1] AS user_group,
         COUNT(*)::int AS requests,
+        COALESCE(SUM(GREATEST(COALESCE(sample_count, 1), 1)), 0)::int AS generated_count,
         COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
         COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
       WHERE ${where}
-      GROUP BY user_id, user_nickname, user_email, user_group
+      GROUP BY user_id
       ORDER BY requests DESC
       LIMIT $${paramIdx}
     `, [...params, limit])
@@ -777,7 +810,8 @@ router.get('/by-channel', async (req, res) => {
   const db = getPool()
   if (!db) return res.json([])
 
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const days = parseUsageDayRange(req.query.days)
+  const rangeFilter = buildUsageDayRangeFilter(days)
 
   try {
     const result = await db.query(`
@@ -787,10 +821,10 @@ router.get('/by-channel', async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
-      WHERE created_at >= CURRENT_DATE - GREATEST($1::int - 1, 0)
+      ${rangeFilter.whereClause}
       GROUP BY ${USAGE_CHANNEL_SQL}
       ORDER BY requests DESC
-    `, [days])
+    `, rangeFilter.params)
 
     res.json(result.rows)
   } catch (err) {
@@ -1065,7 +1099,7 @@ router.get('/user-detail', async (req, res) => {
   const userIds = parseRequestedUserIds(req.query)
   if (!userIds.length) return res.status(400).json({ error: 'userId or userIds is required' })
 
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const days = parseUsageDayRange(req.query.days)
   const conditions = [`user_id = ANY($1::text[])`]
   const params = [userIds]
   let paramIdx = 2
@@ -1077,14 +1111,13 @@ router.get('/user-detail', async (req, res) => {
     const result = await db.query(`
       SELECT
         id, channel, provider_id, model, generation_mode, prompt,
-        aspect_ratio, resolution, duration, request_params, engine_task_id,
+        aspect_ratio, resolution, duration, sample_count, request_params, engine_task_id,
         upstream_request_id, upstream_trace_id, upstream_url, status, error_message,
         video_url, estimated_cost, created_at, completed_at
       FROM video_usage_logs
       WHERE ${where}
       ORDER BY created_at DESC
-      LIMIT $${paramIdx}
-    `, [...params, 200])
+    `, params)
 
     res.json(result.rows.map(enhanceUsageLog))
   } catch (err) {
@@ -1103,7 +1136,7 @@ router.get('/user-detail/export', async (req, res) => {
     return res.status(400).json({ error: 'userId or userIds is required' })
   }
 
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 30))
+  const days = parseUsageDayRange(req.query.days)
   const conditions = [`user_id = ANY($1::text[])`]
   const params = [userIds]
   let paramIdx = 2
