@@ -4,13 +4,17 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-async function loadProviders() {
+async function loadModelConfig() {
   const modelConfigPath = path.resolve('src/modelConfig.js')
   const yunwuProvidersUrl = pathToFileURL(path.resolve('src/yunwuProviders.js')).href
   const source = await fs.readFile(modelConfigPath, 'utf8')
   const rewrittenSource = source.replace("'./yunwuProviders'", `'${yunwuProvidersUrl}'`)
   const moduleUrl = `data:text/javascript,${encodeURIComponent(rewrittenSource)}`
-  const module = await import(moduleUrl)
+  return import(moduleUrl)
+}
+
+async function loadProviders() {
+  const module = await loadModelConfig()
   return module.PROVIDERS
 }
 
@@ -20,6 +24,29 @@ test('Seedance 1 exposes 480p and 720p resolution options while defaulting to 72
   assert.deepEqual(providers.veo.resolutions.default, ['480p', '720p'])
   assert.equal(providers.veo.defaults.resolution, '720p')
   assert.equal(providers.veo.defaults.imageMaterialType, 'role')
+})
+
+test('happyhorse exposes an open reference-image video provider locked to 720P', async () => {
+  const { MODEL_TYPES, PROVIDERS, PROVIDER_ORDER } = await loadModelConfig()
+  const provider = PROVIDERS.happyhorse
+
+  assert.ok(provider)
+  assert.equal(provider.id, 'happyhorse')
+  assert.equal(provider.backendKind, 'yunwu')
+  assert.equal(provider.typeId, 'happyhorse')
+  assert.equal(provider.selectorLabel, 'happyhorse')
+  assert.equal(provider.name, 'happyhorse')
+  assert.deepEqual(provider.models, [
+    { value: 'happyhorse-1.0-r2v', label: 'HappyHorse 1.0 R2V', tag: 'Yunwu' },
+  ])
+  assert.deepEqual(provider.resolutions.default, ['720P'])
+  assert.equal(provider.defaults.resolution, '720P')
+  assert.deepEqual(provider.aspectRatios, ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'])
+  assert.deepEqual(provider.durations, [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
+  assert.deepEqual(provider.maxReferenceImages, { ref: 10 })
+  assert.deepEqual(provider.generationModes.map((mode) => mode.value), ['ref'])
+  assert.ok(PROVIDER_ORDER.includes('happyhorse'))
+  assert.deepEqual(MODEL_TYPES.happyhorse.providers, ['happyhorse'])
 })
 
 test('gpt-image2 exposes Yunwu image generation parameters in the frontend config', async () => {

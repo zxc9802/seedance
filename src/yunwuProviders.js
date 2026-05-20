@@ -410,6 +410,46 @@ export const YUNWU_PROVIDERS = {
     },
     backendKind: 'yunwu',
   },
+  happyhorse: {
+    id: 'happyhorse',
+    typeId: 'happyhorse',
+    typeLabel: 'HappyHorse',
+    selectorLabel: 'happyhorse',
+    name: 'happyhorse',
+    vendor: 'Yunwu API',
+    color: '#8b5cf6',
+    models: [
+      { value: 'happyhorse-1.0-r2v', label: 'HappyHorse 1.0 R2V', tag: 'Yunwu' },
+    ],
+    aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
+    resolutions: {
+      default: ['720P'],
+    },
+    durations: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    sampleCounts: [1],
+    features: {
+      generateAudio: false,
+      negativePrompt: false,
+      referenceImage: true,
+      referenceVideo: false,
+      referenceAudio: false,
+    },
+    generationModes: [
+      { value: 'ref', label: '\u53c2\u8003\u56fe\u7247' },
+    ],
+    referenceInputMode: 'url',
+    maxReferenceImages: {
+      ref: 10,
+    },
+    defaults: {
+      model: 'happyhorse-1.0-r2v',
+      aspectRatio: '16:9',
+      resolution: '720P',
+      duration: 5,
+      sampleCount: 1,
+    },
+    backendKind: 'yunwu',
+  },
   'yunwu-tencent': {
     id: 'yunwu-tencent',
     typeId: 'tencent',
@@ -455,4 +495,5 @@ export const YUNWU_PROVIDERS = {
 
 export const YUNWU_PROVIDER_ORDER = [
   'yunwu-veo',
+  'happyhorse',
 ]

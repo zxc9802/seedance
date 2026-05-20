@@ -3294,6 +3294,7 @@ const YUNWU_VIDEO_PROVIDERS = {
   'yunwu-runway': { family: 'runway' },
   'yunwu-grok': { family: 'grok' },
   'yunwu-wanxiang': { family: 'wanxiang' },
+  'happyhorse': { family: 'happyhorse' },
   'yunwu-tencent': { family: 'tencent' },
 }
 
@@ -4903,6 +4904,26 @@ function buildYunwuGenerateRequest(input) {
           },
         },
       }
+    case 'happyhorse':
+      return {
+        method: 'POST',
+        path: '/alibailian/api/v1/services/aigc/video-generation/video-synthesis',
+        body: {
+          model: params.model,
+          input: {
+            prompt,
+            media: references.images.map((url) => ({
+              type: 'reference_image',
+              url,
+            })),
+          },
+          parameters: {
+            resolution: params.resolution || '720P',
+            ratio: params.aspectRatio || '16:9',
+            duration: coercePositiveNumber(params.duration, 5),
+          },
+        },
+      }
     case 'tencent':
       return {
         method: 'POST',
@@ -4980,6 +5001,7 @@ function buildYunwuQueryRequest(input) {
         path: mapYunwuKlingQueryPath(queryContext.createKind, taskId),
       }
     case 'wanxiang':
+    case 'happyhorse':
       return {
         method: 'GET',
         path: `/alibailian/api/v1/tasks/${encodeURIComponent(taskId)}`,
