@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion'
 import { Film, History, Loader2, Save, ShieldCheck } from 'lucide-react'
+import GenerationHistory from './GenerationHistory'
 import './Header.css'
 
 export default function Header({
@@ -12,6 +13,10 @@ export default function Header({
   lastSavedAt,
   snapshotNotice,
   showAdminEntry,
+  historyEntries = [],
+  historyBusy = false,
+  historyLoadDisabled = false,
+  onLoadHistory,
 }) {
   const noticeType = snapshotNotice?.type || 'neutral'
   const noticeText = snapshotNotice?.text || `\u6700\u8fd1\u4fdd\u5b58 ${lastSavedAt ? formatSnapshotTime(lastSavedAt) : '\u672a\u4fdd\u5b58'}`
@@ -26,6 +31,12 @@ export default function Header({
       <div className="header-left">
         <div className="logo-mark"><Film size={17} strokeWidth={1.5} /></div>
         <span className="logo-name">{'\u89c6\u9891\u5de5\u4f5c\u53f0'}</span>
+        <GenerationHistory
+          entries={historyEntries}
+          busy={historyBusy}
+          loadDisabled={historyLoadDisabled}
+          onLoad={onLoadHistory}
+        />
       </div>
 
       <div className="header-actions">

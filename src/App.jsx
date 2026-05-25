@@ -5,6 +5,12 @@ import {
   loadLatestSnapshot,
   saveLatestSnapshot,
 } from './snapshotStorage'
+import {
+  createHistoryRecordId,
+  getHistoryIndex,
+  loadHistoryRecord,
+  saveHistoryRecord,
+} from './historyStorage'
 import Header from './components/Header'
 import ModelSelector from './components/ModelSelector'
 import PromptInput from './components/PromptInput'
@@ -95,6 +101,8 @@ function App() {
   const [snapshotMeta, setSnapshotMeta] = useState(() => getLatestSnapshotMeta())
   const [snapshotBusy, setSnapshotBusy] = useState(false)
   const [snapshotNotice, setSnapshotNotice] = useState(null)
+  const [historyEntries, setHistoryEntries] = useState(() => getHistoryIndex())
+  const [historyBusy, setHistoryBusy] = useState(false)
   const [showAdminEntry, setShowAdminEntry] = useState(false)
   const videoReferencesRef = useRef(videoReferences)
   const providerStateRef = useRef(providerState)
@@ -290,6 +298,102 @@ function App() {
     }
   }, [hasActiveGeneration])
 
+  const saveCurrentHistory = useCallback(async (finalPrompt, resultUpdates = null) => {
+    const savedAt = Date.now()
+    const serializedVideoReferences = serializeVideoReferences(videoReferences)
+    const historyProviderState = resultUpdates
+      ? {
+        ...providerStateRef.current,
+        [provider]: mergeProviderRuntimeState(providerStateRef.current[provider], {
+          ...resultUpdates,
+          generating: false,
+          error: null,
+        }),
+      }
+      : providerStateRef.current
+    const record = {
+      id: createHistoryRecordId(savedAt),
+      savedAt,
+      version: 1,
+      provider,
+      allParams: normalizeAllParams(allParams),
+      params,
+      prompt: finalPrompt,
+      generationMode,
+      referenceMedia,
+      videoReferences: serializedVideoReferences,
+      selectedTemplate,
+      providerState: await serializeProviderState(historyProviderState),
+      mediaCounts: buildHistoryMediaCounts(referenceMedia, serializedVideoReferences),
+    }
+
+    const nextIndex = await saveHistoryRecord(record)
+    setHistoryEntries(nextIndex)
+  }, [
+    allParams,
+    generationMode,
+    params,
+    provider,
+    referenceMedia,
+    selectedTemplate,
+    videoReferences,
+  ])
+
+  const handleLoadHistory = useCallback(async (historyId) => {
+    if (hasActiveGeneration) {
+      setSnapshotNotice({
+        type: 'error',
+        text: '\u8bf7\u5148\u7b49\u5f53\u524d\u751f\u6210\u4efb\u52a1\u7ed3\u675f\u540e\u518d\u52a0\u8f7d\u5386\u53f2\u8bb0\u5f55',
+      })
+      return
+    }
+
+    setHistoryBusy(true)
+    setSnapshotNotice({ type: 'info', text: '\u6b63\u5728\u52a0\u8f7d\u5386\u53f2\u8bb0\u5f55...' })
+
+    try {
+      const record = await loadHistoryRecord(historyId)
+      if (!record) {
+        throw new Error('\u6ca1\u6709\u627e\u5230\u8fd9\u6761\u5386\u53f2\u8bb0\u5f55')
+      }
+
+      const nextProvider = isSupportedProvider(record.provider) ? record.provider : 'veo'
+      const nextGenerationMode = getSafeGenerationMode(nextProvider, record.generationMode)
+      const nextParams = mergeSnapshotParams(record.allParams)
+      const nextReferenceMedia = Array.isArray(record.referenceMedia)
+        ? record.referenceMedia.filter((item) => typeof item === 'string')
+        : []
+      const nextVideoReferences = hydrateVideoReferences(record.videoReferences)
+      const nextProviderState = hydrateSnapshotProviderState(record.providerState)
+
+      setProvider(nextProvider)
+      setAllParams(nextParams)
+      setPrompt(typeof record.prompt === 'string' ? record.prompt : '')
+      setGenerationMode(nextGenerationMode)
+      setReferenceMedia(nextReferenceMedia)
+      setSelectedTemplate(record.selectedTemplate ?? null)
+      setVideoReferences((prev) => {
+        releaseVideoReferences(prev)
+        return nextVideoReferences
+      })
+      if (record.providerState) {
+        setProviderState((prev) => {
+          releaseProviderPreviewUrls(prev)
+          return nextProviderState
+        })
+      }
+
+      setSnapshotNotice({
+        type: 'success',
+        text: `\u5df2\u56de\u586b ${formatSnapshotTime(record.savedAt || Date.now())} \u7684\u5386\u53f2\u8bb0\u5f55`,
+      })
+    } catch (error) {
+      setSnapshotNotice({ type: 'error', text: error.message || '\u52a0\u8f7d\u5386\u53f2\u8bb0\u5f55\u5931\u8d25' })
+    } finally {
+      setHistoryBusy(false)
+    }
+  }, [hasActiveGeneration])
+
   const handleProviderChange = useCallback((nextProvider) => {
     setProvider(nextProvider)
     setPrompt('')
@@ -366,6 +470,14 @@ function App() {
     updateProviderState(provider, { generating: true, progress: 0, error: null, videoUrl: null, imageUrls: [], downloadUrl: null, textOutput: null })
 
     let progress = 0
+    let historyResultUpdates = null
+    const completeGeneration = (updates) => {
+      historyResultUpdates = {
+        ...updates,
+        progress: updates.progress ?? 100,
+      }
+      updateProviderState(provider, historyResultUpdates)
+    }
     const progressTimer = window.setInterval(() => {
       progress += Math.random() * 8 + 3
       if (progress > 94) progress = 94
@@ -399,7 +511,7 @@ function App() {
               : message
           )))
         }
-        updateProviderState(provider, { progress: 100, textOutput: textResult })
+        completeGeneration({ progress: 100, textOutput: textResult })
         return
       }
 
@@ -452,7 +564,7 @@ function App() {
             const previewUrl = directUrl
               ? await resolvePreviewUrl(directUrl)
               : await resolveVeoFastPreviewUrl(taskId)
-            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            completeGeneration({ progress: 100, videoUrl: previewUrl })
             return
           }
 
@@ -497,7 +609,7 @@ function App() {
         if (initialTask.videoUrl) {
           window.clearInterval(progressTimer)
           const previewUrl = await resolveArkPlaybackUrl(initialTask, provider)
-          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          completeGeneration({ progress: 100, videoUrl: previewUrl })
           return
         }
 
@@ -533,7 +645,7 @@ function App() {
             finished = true
             window.clearInterval(progressTimer)
             const previewUrl = await resolveArkPlaybackUrl(task, provider)
-            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            completeGeneration({ progress: 100, videoUrl: previewUrl })
             return
           }
 
@@ -572,7 +684,7 @@ function App() {
         if (initialTask.videoUrl) {
           window.clearInterval(progressTimer)
           const previewUrl = await resolveArkPlaybackUrl(initialTask, provider)
-          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          completeGeneration({ progress: 100, videoUrl: previewUrl })
           return
         }
 
@@ -605,7 +717,7 @@ function App() {
             finished = true
             window.clearInterval(progressTimer)
             const previewUrl = await resolveArkPlaybackUrl(task, provider)
-            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            completeGeneration({ progress: 100, videoUrl: previewUrl })
             return
           }
 
@@ -641,7 +753,7 @@ function App() {
         if (initialTask.videoUrl) {
           window.clearInterval(progressTimer)
           const previewUrl = await resolveArkPlaybackUrl(initialTask, provider)
-          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          completeGeneration({ progress: 100, videoUrl: previewUrl })
           return
         }
 
@@ -674,7 +786,7 @@ function App() {
             finished = true
             window.clearInterval(progressTimer)
             const previewUrl = await resolveArkPlaybackUrl(task, provider)
-            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            completeGeneration({ progress: 100, videoUrl: previewUrl })
             return
           }
 
@@ -706,7 +818,7 @@ function App() {
         if (initialTask.videoUrl || initialTask.imageUrl) {
           window.clearInterval(progressTimer)
           const previewUrl = await resolveDreaminaPlaybackUrl(initialTask, provider)
-          updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+          completeGeneration({ progress: 100, videoUrl: previewUrl })
           return
         }
 
@@ -739,7 +851,7 @@ function App() {
             finished = true
             window.clearInterval(progressTimer)
             const previewUrl = await resolveDreaminaPlaybackUrl(task, provider)
-            updateProviderState(provider, { progress: 100, videoUrl: previewUrl })
+            completeGeneration({ progress: 100, videoUrl: previewUrl })
             return
           }
 
@@ -782,7 +894,7 @@ function App() {
           window.clearInterval(progressTimer)
           const previewUrl = await resolvePreviewUrl(initialTask.message, provider)
           const downloadUrl = await resolveAggregationDownloadUrl(initialTask, provider)
-          updateProviderState(provider, { progress: 100, videoUrl: previewUrl, downloadUrl })
+          completeGeneration({ progress: 100, videoUrl: previewUrl, downloadUrl })
           return
         }
 
@@ -821,7 +933,7 @@ function App() {
             window.clearInterval(progressTimer)
             const previewUrl = await resolvePreviewUrl(task.message, provider)
             const downloadUrl = await resolveAggregationDownloadUrl(task, provider)
-            updateProviderState(provider, { progress: 100, videoUrl: previewUrl, downloadUrl })
+            completeGeneration({ progress: 100, videoUrl: previewUrl, downloadUrl })
             return
           }
 
@@ -844,11 +956,10 @@ function App() {
 
           const data = await response.json()
           window.clearInterval(progressTimer)
-          updateProviderState(provider, { progress: 100 })
-
           const imageResults = parseImageChatResponses(data, finalPrompt)
           if (imageResults.length > 0) {
-            updateProviderState(provider, {
+            completeGeneration({
+              progress: 100,
               videoUrl: imageResults[0].url,
               imageUrls: imageResults.map((result) => result.url),
             })
@@ -888,7 +999,7 @@ function App() {
             if (initialTask.imageUrl) {
               window.clearInterval(progressTimer)
               const previewUrl = await resolvePreviewUrl(initialTask.imageUrl)
-              updateProviderState(provider, { progress: 100, videoUrl: previewUrl, imageUrls: [previewUrl] })
+              completeGeneration({ progress: 100, videoUrl: previewUrl, imageUrls: [previewUrl] })
               return
             }
 
@@ -931,7 +1042,7 @@ function App() {
               if (task.imageUrl) {
                 window.clearInterval(progressTimer)
                 const previewUrl = await resolvePreviewUrl(task.imageUrl)
-                updateProviderState(provider, { progress: 100, videoUrl: previewUrl, imageUrls: [previewUrl] })
+                completeGeneration({ progress: 100, videoUrl: previewUrl, imageUrls: [previewUrl] })
                 return
               }
 
@@ -961,12 +1072,10 @@ function App() {
 
         const data = await response.json()
         window.clearInterval(progressTimer)
-        updateProviderState(provider, { progress: 100 })
-
         const imageResult = parseImageChatResponse(data, finalPrompt)
         if (imageResult) {
           const finalImageUrl = await finalizeOpenAiImageOutput(provider, params, imageResult.url)
-          updateProviderState(provider, { videoUrl: finalImageUrl, imageUrls: [finalImageUrl] })
+          completeGeneration({ progress: 100, videoUrl: finalImageUrl, imageUrls: [finalImageUrl] })
           return
         }
 
@@ -984,6 +1093,13 @@ function App() {
       updateProviderState(provider, { error: errorMessage })
     } finally {
       window.clearInterval(progressTimer)
+      if (historyResultUpdates) {
+        try {
+          await saveCurrentHistory(finalPrompt, historyResultUpdates)
+        } catch (error) {
+          setSnapshotNotice({ type: 'error', text: error.message || '\u4fdd\u5b58\u5386\u53f2\u8bb0\u5f55\u5931\u8d25' })
+        }
+      }
       updateProviderState(provider, { generating: false })
     }
   }, [
@@ -993,6 +1109,7 @@ function App() {
     prompt,
     provider,
     referenceMedia,
+    saveCurrentHistory,
     selectedTemplate,
     updateProviderState,
     videoReferences,
@@ -1099,6 +1216,10 @@ function App() {
             lastSavedAt={snapshotMeta?.savedAt ?? null}
             snapshotNotice={snapshotNotice}
             showAdminEntry={showAdminEntry}
+            historyEntries={historyEntries}
+            historyBusy={historyBusy}
+            historyLoadDisabled={hasActiveGeneration}
+            onLoadHistory={handleLoadHistory}
           />
           <main className="app-main">
             <div className="left-panel">
@@ -1233,6 +1354,16 @@ function serializeVideoAssetList(list) {
       mimeType: asset.mimeType,
       file: asset.file,
     }))
+}
+
+function buildHistoryMediaCounts(referenceMedia, videoReferences) {
+  const imageMediaCount = Array.isArray(referenceMedia) ? referenceMedia.length : 0
+  const videoImageCount = Array.isArray(videoReferences?.images) ? videoReferences.images.length : 0
+  return {
+    images: imageMediaCount + videoImageCount,
+    videos: Array.isArray(videoReferences?.videos) ? videoReferences.videos.length : 0,
+    audios: Array.isArray(videoReferences?.audios) ? videoReferences.audios.length : 0,
+  }
 }
 
 const USAGE_MEDIA_SUMMARY_HEADER = 'X-Usage-Media-Summary'
@@ -1371,11 +1502,16 @@ async function serializeProviderState(state) {
   for (const key of PROVIDER_ORDER) {
     const current = state?.[key] || createProviderRuntimeState()
     const previewUrl = resolvePersistableSnapshotPreviewUrl(key, current.videoUrl)
+    const imageUrls = Array.isArray(current.imageUrls) ? current.imageUrls : []
     serialized[key] = {
       generating: false,
       progress: 0,
       error: null,
       previewAsset: await serializePreviewAsset(previewUrl),
+      imagePreviewAssets: await Promise.all(
+        imageUrls.map((url) => serializePreviewAsset(resolvePersistableSnapshotPreviewUrl(key, url) || url))
+      ),
+      downloadUrl: isPersistablePreviewUrl(current.downloadUrl) ? current.downloadUrl : null,
       textOutput: typeof current.textOutput === 'string' ? current.textOutput : null,
     }
   }
@@ -1388,13 +1524,19 @@ function hydrateSnapshotProviderState(snapshotState) {
   for (const key of PROVIDER_ORDER) {
     const current = snapshotState?.[key]
     if (!current) continue
+    const videoUrl = resolvePersistableSnapshotPreviewUrl(
+      key,
+      hydratePreviewAsset(current.previewAsset) || current.videoUrl || null,
+    )
+    const hydratedImageUrls = Array.isArray(current.imagePreviewAssets)
+      ? current.imagePreviewAssets.map((asset) => hydratePreviewAsset(asset)).filter(Boolean)
+      : []
 
     initial[key] = {
       ...initial[key],
-      videoUrl: resolvePersistableSnapshotPreviewUrl(
-        key,
-        hydratePreviewAsset(current.previewAsset) || current.videoUrl || null,
-      ),
+      videoUrl,
+      imageUrls: hydratedImageUrls.length > 0 ? hydratedImageUrls : (videoUrl ? [videoUrl] : []),
+      downloadUrl: typeof current.downloadUrl === 'string' ? current.downloadUrl : null,
       textOutput: typeof current.textOutput === 'string' ? current.textOutput : null,
     }
   }
