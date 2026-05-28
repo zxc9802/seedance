@@ -198,11 +198,14 @@ app.get('/api/health', (_, res) => {
   })
 })
 
-app.get('/api/session', (req, res) => {
-  const session = req.videoSiteSession || resolveLocalDevSession()
+app.get('/api/session', async (req, res) => {
+  const session = requireMainAppSso
+    ? await requireFreshVideoSiteSession(req, res)
+    : req.videoSiteSession || resolveLocalDevSession()
   if (!session) {
     res.status(401).json({
       success: false,
+      code: 'SESSION_REVOKED',
       message: 'Please launch VEO Studio from the main site first.',
       redirectUrl: buildMainAppVideoEntryUrl(mainAppUrl),
     })
@@ -255,15 +258,17 @@ app.use(async (req, res, next) => {
     return
   }
 
-  const session = req.videoSiteSession
   if (req.path.startsWith('/api/')) {
-    if (session) {
+    const session = req.videoSiteSession
+    const validSession = await requireFreshVideoSiteSession(req, res)
+    if (validSession) {
       next()
       return
     }
 
     res.status(401).json({
       success: false,
+      code: session ? 'SESSION_REVOKED' : 'SESSION_REQUIRED',
       message: 'Please launch VEO Studio from the main site first.',
       redirectUrl: buildMainAppVideoEntryUrl(resolveRequestedMainAppUrl(req)),
     })
@@ -279,7 +284,8 @@ app.use(async (req, res, next) => {
   const requestedMainAppUrl = resolveRequestedMainAppUrl(req)
 
   if (!ticket) {
-    if (session) {
+    const validSession = await requireFreshVideoSiteSession(req, res)
+    if (validSession) {
       next()
       return
     }
@@ -6619,6 +6625,36 @@ function resolveRequestedMainAppUrl(req) {
 
 function isLocalHostname(hostname) {
   return ['localhost', '127.0.0.1', '0.0.0.0'].includes(hostname)
+}
+
+async function requireFreshVideoSiteSession(req, res) {
+  const session = req.videoSiteSession
+  if (!session) return null
+
+  const valid = await validateVideoSiteSession(session)
+  if (valid) return session
+
+  clearVideoSiteSession(res)
+  req.videoSiteSession = null
+  return null
+}
+
+async function validateVideoSiteSession(session) {
+  if (!session?.token) return false
+
+  const sessionMainAppUrl = sanitizeMainAppUrl(session.mainAppUrl) || mainAppUrl
+  try {
+    const response = await fetch(`${stripTrailingSlash(sessionMainAppUrl)}/api/sso/session`, {
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+      },
+    })
+
+    return response.ok
+  } catch (error) {
+    console.error('[video-sso] Main-site session validation failed:', error)
+    return false
+  }
 }
 
 async function exchangeVideoSsoTicket(ticket, baseUrl) {
