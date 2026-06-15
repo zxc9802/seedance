@@ -2116,18 +2116,19 @@ function normalizeAggregationImageTask(payload, fallbackPrompt) {
 }
 
 function formatRuntimeErrorMessage(provider, message) {
-  if (typeof message !== 'string' || !message.trim()) {
-    return '生成失败'
-  }
+  if (typeof message !== 'string') return null
+
+  const normalizedMessage = message.trim()
+  if (!normalizedMessage) return null
 
   if (
     provider === 'yunwu-veo'
-    && message.toLowerCase().includes('download file failed')
+    && normalizedMessage.toLowerCase().includes('download file failed')
   ) {
     return '云雾无法下载参考图片。请检查参考图链接是否能被外网直接访问，优先使用稳定的 HTTPS 公网图片链接，或确认 PUBLIC_BASE_URL 指向可公网访问的地址。'
   }
 
-  return message
+  return normalizedMessage
 }
 
 function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
