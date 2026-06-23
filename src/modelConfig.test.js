@@ -58,19 +58,19 @@ test('gpt-image2 exposes Yunwu image generation parameters in the frontend confi
   assert.equal(provider.backendKind, 'gpt-image2')
   assert.equal(provider.defaults.model, 'gpt-image-2')
   assert.deepEqual(provider.aspectRatios, ['1:1', '16:9', '9:16', '3:4'])
-  assert.deepEqual(provider.resolutions.default, ['1024x1024', '1536x1024', '1024x1536', '1536x2048'])
+  assert.deepEqual(provider.resolutions.default, ['1024x1024', '1536x864', '864x1536', '1152x1536'])
   assert.equal(provider.hideResolutionSelector, true)
   assert.deepEqual(provider.resolutionByAspectRatio, {
     '1:1': '1024x1024',
-    '16:9': '1536x1024',
-    '9:16': '1024x1536',
-    '3:4': '1536x2048',
+    '16:9': '1536x864',
+    '9:16': '864x1536',
+    '3:4': '1152x1536',
   })
   assert.deepEqual(provider.aspectRatioByResolution, {
     '1024x1024': '1:1',
-    '1536x1024': '16:9',
-    '1024x1536': '9:16',
-    '1536x2048': '3:4',
+    '1536x864': '16:9',
+    '864x1536': '9:16',
+    '1152x1536': '3:4',
   })
   assert.deepEqual(provider.sampleCounts, [1, 2, 3, 4])
   assert.deepEqual(provider.qualityOptions.map((item) => item.value), ['low', 'medium', 'high'])

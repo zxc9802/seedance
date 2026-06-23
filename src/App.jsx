@@ -2161,6 +2161,8 @@ function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
 }
 
 function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
+  const size = resolveImageSizeForParams(provider, params)
+
   return {
     url: '/api/gpt-image2/generations',
     headers: {
@@ -2169,9 +2171,8 @@ function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
     body: {
       providerId: provider,
       model: params.model,
-      prompt,
-      size: resolveImageSizeForParams(provider, params),
-      aspect_ratio: params.aspectRatio,
+      prompt: buildGptImage2Prompt(prompt, params, size),
+      size,
       n: params.sampleCount,
       quality: params.quality,
       format: params.format,
@@ -2224,6 +2225,23 @@ function buildCopywritingContentParts(prompt, attachments) {
 function resolveImageSizeForParams(provider, params) {
   const config = PROVIDERS[provider]
   return config?.resolutionByAspectRatio?.[params?.aspectRatio] || params?.resolution
+}
+
+function buildGptImage2Prompt(prompt, params, size) {
+  const rules = []
+
+  if (size) {
+    rules.push(`The final image must be exactly ${size} pixels.`)
+  }
+
+  if (params?.aspectRatio) {
+    rules.push(`Use a strict ${params.aspectRatio} output aspect ratio.`)
+  }
+
+  rules.push('Fill the entire canvas edge-to-edge.')
+  rules.push('Do not place the requested content inside a smaller centered horizontal block with empty padding around it.')
+
+  return [prompt, rules.join(' ')].filter(Boolean).join('\n\n')
 }
 
 function buildOpenAiImageSystemInstruction(params, explicitDimensions) {

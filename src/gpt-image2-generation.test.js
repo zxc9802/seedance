@@ -8,8 +8,12 @@ test('gpt-image2 frontend sends prompt, exposed params, and image references to 
 
   assert.match(appSource, /function buildGptImage2Request\(provider, params, prompt, mode, mediaList\)/)
   assert.match(appSource, /url: '\/api\/gpt-image2\/generations'/)
-  assert.match(appSource, /size: resolveImageSizeForParams\(provider, params\)/)
-  assert.match(appSource, /aspect_ratio: params\.aspectRatio/)
+  assert.match(appSource, /const size = resolveImageSizeForParams\(provider, params\)/)
+  assert.match(appSource, /prompt: buildGptImage2Prompt\(prompt, params, size\)/)
+  assert.match(appSource, /size,/)
+  assert.match(appSource, /function buildGptImage2Prompt\(prompt, params, size\)/)
+  assert.match(appSource, /The final image must be exactly \$\{size\} pixels/)
+  assert.match(appSource, /Fill the entire canvas edge-to-edge/)
   assert.match(appSource, /function resolveImageSizeForParams\(provider, params\)/)
   assert.match(appSource, /n: params\.sampleCount/)
   assert.match(appSource, /quality: params\.quality/)
@@ -69,7 +73,7 @@ test('gpt-image2 backend proxies to Yunwu image generations with a private API k
   assert.match(serverSource, /\/v1\/images\/generations/)
   assert.match(serverSource, /process\.env\.GPT_IMAGE2_API_KEY/)
   assert.match(serverSource, /model: readFirstString\(body\.model\) \|\| 'gpt-image-2'/)
-  assert.match(serverSource, /aspect_ratio: readFirstString\(body\.aspect_ratio, body\.aspectRatio\)/)
+  assert.doesNotMatch(serverSource, /aspect_ratio: readFirstString/)
   assert.match(serverSource, /image: normalizeStringArray\(body\.image\)/)
 })
 
