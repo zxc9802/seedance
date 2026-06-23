@@ -67,6 +67,7 @@ test('gpt-image2 backend proxies to Yunwu image generations with a private API k
   assert.match(serverSource, /app\.post\('\/api\/gpt-image2\/generations', handleGptImage2GenerateRequest\)/)
   assert.match(serverSource, /\/v1\/images\/generations/)
   assert.match(serverSource, /process\.env\.GPT_IMAGE2_API_KEY/)
+  assert.match(serverSource, /model: readFirstString\(body\.model\) \|\| 'gpt-image-2'/)
   assert.match(serverSource, /image: normalizeStringArray\(body\.image\)/)
 })
 

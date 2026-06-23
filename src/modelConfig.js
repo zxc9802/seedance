@@ -393,7 +393,7 @@ const BASE_PROVIDERS = {
     outputType: 'image',
     showModelSelector: true,
     models: [
-      { value: 'gpt-image-2-all', label: 'gpt-image-2-all', tag: 'ref' },
+      { value: 'gpt-image-2', label: 'gpt-image-2', tag: 'ref' },
     ],
     aspectRatios: ['1:1', '16:9', '9:16', '3:4'],
     resolutions: { default: ['1024x1024', '1536x1024', '1024x1536', '1536x2048'] },
@@ -429,7 +429,7 @@ const BASE_PROVIDERS = {
       { value: 'webp', label: 'WebP' },
     ],
     defaults: {
-      model: 'gpt-image-2-all',
+      model: 'gpt-image-2',
       aspectRatio: '1:1',
       resolution: '1024x1024',
       sampleCount: 1,

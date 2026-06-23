@@ -5888,7 +5888,7 @@ function normalizeInteger(value, fallback, min, max) {
 
 function normalizeGptImage2GenerateBody(body) {
   const normalized = {
-    model: readFirstString(body.model) || 'gpt-image-2-all',
+    model: readFirstString(body.model) || 'gpt-image-2',
     prompt: readFirstString(body.prompt) || '',
     size: readFirstString(body.size, body.resolution) || '1024x1024',
     n: normalizeInteger(body.n ?? body.sampleCount, 1, 1, 4),
