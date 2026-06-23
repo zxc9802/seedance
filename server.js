@@ -5891,6 +5891,7 @@ function normalizeGptImage2GenerateBody(body) {
     model: readFirstString(body.model) || 'gpt-image-2',
     prompt: readFirstString(body.prompt) || '',
     size: readFirstString(body.size, body.resolution) || '1024x1024',
+    aspect_ratio: readFirstString(body.aspect_ratio, body.aspectRatio),
     n: normalizeInteger(body.n ?? body.sampleCount, 1, 1, 4),
     quality: readFirstString(body.quality) || 'low',
     format: readFirstString(body.format) || 'png',
@@ -5899,6 +5900,10 @@ function normalizeGptImage2GenerateBody(body) {
 
   if (normalized.image.length === 0) {
     delete normalized.image
+  }
+
+  if (!normalized.aspect_ratio) {
+    delete normalized.aspect_ratio
   }
 
   return normalized

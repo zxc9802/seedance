@@ -2171,6 +2171,7 @@ function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
       model: params.model,
       prompt,
       size: resolveImageSizeForParams(provider, params),
+      aspect_ratio: params.aspectRatio,
       n: params.sampleCount,
       quality: params.quality,
       format: params.format,
