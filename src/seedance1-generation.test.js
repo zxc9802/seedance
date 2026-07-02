@@ -46,3 +46,24 @@ test('App generation flow no longer short-circuits seedance1 to a frontend mock'
   assert.match(appSource, /function resolveImageMaterialType\(provider, params\) \{\s+if \(provider !== 'veo'\) return 'direct'\s+return params\.imageMaterialType \|\| 'direct'/s)
   assert.match(appSource, /function resolveModelMaterialTypeDefault\(config, model\)/)
 })
+
+test('seedance1 material upload starts review asynchronously and exposes a status endpoint', async () => {
+  const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
+
+  assert.match(serverSource, /app\.post\('\/api\/material\/status'/)
+  assert.match(serverSource, /async function createMaterialReferenceTask\(/)
+  assert.match(serverSource, /async function queryMaterialReferenceStatus\(/)
+  assert.match(serverSource, /item\.materialReviewPending = material\.status !== 2/)
+  assert.doesNotMatch(serverSource, /const material = await createMaterialReference\(\{\s*name: buildMaterialName\(file\.originalname\),\s*originalUrl: url,\s*type: materialType,\s*\}\)/s)
+})
+
+test('seedance1 frontend polls material review before generation and reuses reviewed resources', async () => {
+  const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
+  const promptInputSource = await fs.readFile(path.resolve('src/components/PromptInput.jsx'), 'utf8')
+
+  assert.match(promptInputSource, /uploadSeedance1MaterialAsset\(/)
+  assert.match(promptInputSource, /pollSeedance1MaterialStatus\(/)
+  assert.match(promptInputSource, /hasPendingVideoReferenceUploads\(/)
+  assert.match(appSource, /asset\.uploadStatus === 'ready' && asset\.resourceRef/)
+  assert.match(appSource, /const readyItems = assets\.filter\(\(asset\) => asset\.uploadStatus === 'ready' && asset\.resourceRef\)/)
+})

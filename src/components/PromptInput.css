@@ -858,6 +858,29 @@
   color: var(--text-placeholder);
 }
 
+.asset-card-status {
+  display: block;
+  padding: 0 8px 7px;
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--text-tertiary);
+  word-break: break-word;
+}
+
+.asset-card-status.uploading,
+.asset-card-status.reviewing,
+.asset-card-status.queued {
+  color: #2563eb;
+}
+
+.asset-card-status.ready {
+  color: #15803d;
+}
+
+.asset-card-status.failed {
+  color: #dc2626;
+}
+
 .asset-card-remove,
 .asset-card-index {
   position: absolute;

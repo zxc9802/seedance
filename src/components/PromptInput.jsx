@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   ChevronDown,
@@ -39,6 +39,8 @@ const COPYWRITING_ATTACHMENT_ACCEPT = [
   '.doc',
   '.docx',
 ].join(',')
+const MATERIAL_REVIEW_POLL_INTERVAL_MS = 3000
+const MATERIAL_REVIEW_POLL_TIMEOUT_MS = 180000
 
 function nextReferenceAssetOrder() {
   referenceAssetOrderCounter += 1
@@ -96,6 +98,8 @@ export default function PromptInput({
   const videoAccept = getVideoAccept(providerConfig)
   const multiframeSegmentCount = Math.max(0, videoReferences.images.length - 1)
   const isSeedanceMultiframe = providerConfig.id === 'seedance2' && mode === 'multiframe'
+  const seedance1MaterialType = resolveSeedance1MaterialType(providerConfig, params)
+  const usesSeedance1MaterialUpload = shouldUseSeedance1MaterialUpload(providerConfig, params)
   const shouldShowReferenceSection = isTextOutput
     ? false
     : usesAssetBuckets
@@ -111,6 +115,21 @@ export default function PromptInput({
     videoReferences,
     params,
   })
+
+  useEffect(() => {
+    if (!usesSeedance1MaterialUpload) return
+
+    const assetsToUpload = videoReferences.images.filter((asset) => (
+      asset?.file
+      && asset.uploadMaterialType !== seedance1MaterialType
+      && asset.uploadStatus !== 'uploading'
+      && asset.uploadStatus !== 'reviewing'
+    ))
+
+    for (const asset of assetsToUpload) {
+      void uploadSeedance1MaterialAsset(asset, seedance1MaterialType, onVideoReferencesChange)
+    }
+  }, [onVideoReferencesChange, seedance1MaterialType, usesSeedance1MaterialUpload, videoReferences.images])
 
   const processImageFiles = async (files) => {
     setMediaError(null)
@@ -256,7 +275,8 @@ export default function PromptInput({
         setMediaError(error)
         continue
       }
-      accepted.push(createLocalAsset(file))
+      const shouldUploadMaterial = kind === 'images' && usesSeedance1MaterialUpload
+      accepted.push(createLocalAsset(file, shouldUploadMaterial ? { uploadStatus: 'queued' } : null))
     }
 
     if (accepted.length > 0) {
@@ -922,6 +942,11 @@ function AssetUploadBucket({ title, subtitle, icon, accept, assets, maxItems, on
               <span className="asset-card-name" title={asset.name}>{asset.name}</span>
               <span className="asset-card-size">{formatFileSize(asset.size)}</span>
             </div>
+            {asset.uploadStatus && (
+              <span className={`asset-card-status ${asset.uploadStatus}`}>
+                {formatAssetUploadStatus(asset)}
+              </span>
+            )}
           </div>
         ))}
 
@@ -1063,6 +1088,10 @@ function hasAllRequiredInputs({ providerConfig, mode, prompt, hasTemplate, media
     return false
   }
 
+  if (hasPendingVideoReferenceUploads(providerConfig, params, videoReferences)) {
+    return false
+  }
+
   if (providerConfig.id === 'seedance2' && mode === 'multiframe') {
     const imageCount = videoReferences.images.length
     if (imageCount < 2) {
@@ -1101,6 +1130,25 @@ function hasAllRequiredInputs({ providerConfig, mode, prompt, hasTemplate, media
   return hasRequiredVideoAssets(mode, videoReferences)
 }
 
+function hasPendingVideoReferenceUploads(providerConfig, params, references) {
+  if (!shouldUseSeedance1MaterialUpload(providerConfig, params)) return false
+
+  const materialType = resolveSeedance1MaterialType(providerConfig, params)
+  return (references?.images || []).some((asset) => (
+    asset?.uploadStatus !== 'ready'
+    || !asset.resourceRef
+    || asset.uploadMaterialType !== materialType
+  ))
+}
+
+function shouldUseSeedance1MaterialUpload(providerConfig, params) {
+  return providerConfig?.id === 'veo' && resolveSeedance1MaterialType(providerConfig, params) !== 'direct'
+}
+
+function resolveSeedance1MaterialType(providerConfig, params) {
+  return params?.imageMaterialType || providerConfig?.defaults?.imageMaterialType || 'direct'
+}
+
 function isPromptRequiredForMode(providerConfig, mode, references) {
   if (providerConfig.id === 'seedance2' && mode === 'multiframe') {
     return (references?.images?.length || 0) <= 2
@@ -1109,7 +1157,7 @@ function isPromptRequiredForMode(providerConfig, mode, references) {
   return !Array.isArray(providerConfig.promptOptionalModes) || !providerConfig.promptOptionalModes.includes(mode)
 }
 
-function createLocalAsset(file) {
+function createLocalAsset(file, extras = null) {
   return {
     id: crypto.randomUUID(),
     order: nextReferenceAssetOrder(),
@@ -1120,7 +1168,164 @@ function createLocalAsset(file) {
     previewUrl: file.type.startsWith('image/') || file.type.startsWith('video/')
       ? URL.createObjectURL(file)
       : '',
+    ...(extras || {}),
   }
+}
+
+async function uploadSeedance1MaterialAsset(asset, materialType, onVideoReferencesChange) {
+  updateVideoReferenceAsset(onVideoReferencesChange, 'images', asset.id, {
+    uploadStatus: 'uploading',
+    uploadMaterialType: materialType,
+    uploadError: null,
+    materialId: null,
+    resourceRef: null,
+  })
+
+  try {
+    const formData = new FormData()
+    formData.append('files', asset.file, asset.file.name)
+    formData.append('materialType', materialType)
+
+    const response = await fetch('/api/upload', {
+      method: 'POST',
+      body: formData,
+    })
+
+    if (!response.ok) {
+      throw new Error(await formatUploadHttpError(response))
+    }
+
+    const data = await response.json()
+    const uploaded = Array.isArray(data?.files) ? data.files[0] : null
+    if (!data?.success || !uploaded?.materialId) {
+      throw new Error(data?.message || '素材上传失败')
+    }
+
+    const nextStatus = Number(uploaded.materialStatus || 1)
+    const basePatch = {
+      uploadMaterialType: materialType,
+      uploadError: uploaded.materialError || null,
+      url: uploaded.url,
+      materialId: uploaded.materialId,
+      materialStatus: nextStatus,
+      resourceRef: uploaded.resourceRef || null,
+    }
+
+    if (nextStatus === 2) {
+      updateVideoReferenceAsset(onVideoReferencesChange, 'images', asset.id, {
+        ...basePatch,
+        uploadStatus: 'ready',
+      })
+      return
+    }
+
+    if (nextStatus === 3) {
+      updateVideoReferenceAsset(onVideoReferencesChange, 'images', asset.id, {
+        ...basePatch,
+        uploadStatus: 'failed',
+        uploadError: uploaded.materialError || '素材审核未通过',
+      })
+      return
+    }
+
+    updateVideoReferenceAsset(onVideoReferencesChange, 'images', asset.id, {
+      ...basePatch,
+      uploadStatus: 'reviewing',
+    })
+    await pollSeedance1MaterialStatus(asset.id, uploaded.materialId, materialType, onVideoReferencesChange)
+  } catch (error) {
+    updateVideoReferenceAsset(onVideoReferencesChange, 'images', asset.id, {
+      uploadStatus: 'failed',
+      uploadMaterialType: materialType,
+      uploadError: error instanceof Error ? error.message : '素材上传失败',
+    })
+  }
+}
+
+async function pollSeedance1MaterialStatus(assetId, materialId, materialType, onVideoReferencesChange) {
+  const deadline = Date.now() + MATERIAL_REVIEW_POLL_TIMEOUT_MS
+
+  while (Date.now() < deadline) {
+    await sleep(MATERIAL_REVIEW_POLL_INTERVAL_MS)
+
+    const response = await fetch('/api/material/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ materialId }),
+    })
+
+    if (!response.ok) {
+      throw new Error(await formatUploadHttpError(response))
+    }
+
+    const data = await response.json()
+    const material = data?.data || {}
+    const status = Number(material.status || 1)
+
+    if (status === 2) {
+      updateVideoReferenceAsset(onVideoReferencesChange, 'images', assetId, {
+        uploadStatus: 'ready',
+        uploadMaterialType: materialType,
+        uploadError: null,
+        materialId,
+        materialStatus: status,
+        resourceRef: material.resourceRef || formatMaterialFallbackResource(materialId),
+      })
+      return
+    }
+
+    if (status === 3) {
+      updateVideoReferenceAsset(onVideoReferencesChange, 'images', assetId, {
+        uploadStatus: 'failed',
+        uploadMaterialType: materialType,
+        uploadError: material.errorMsg || '素材审核未通过',
+        materialId,
+        materialStatus: status,
+        resourceRef: null,
+      })
+      return
+    }
+
+    updateVideoReferenceAsset(onVideoReferencesChange, 'images', assetId, {
+      uploadStatus: 'reviewing',
+      uploadMaterialType: materialType,
+      materialId,
+      materialStatus: status,
+    })
+  }
+
+  updateVideoReferenceAsset(onVideoReferencesChange, 'images', assetId, {
+    uploadStatus: 'failed',
+    uploadMaterialType: materialType,
+    uploadError: '素材审核超时，请重新上传',
+    materialId,
+  })
+}
+
+function updateVideoReferenceAsset(onVideoReferencesChange, kind, assetId, patch) {
+  onVideoReferencesChange((prev) => ({
+    ...prev,
+    [kind]: (prev?.[kind] || []).map((asset) => (
+      asset.id === assetId ? { ...asset, ...patch } : asset
+    )),
+  }))
+}
+
+async function formatUploadHttpError(response) {
+  try {
+    const data = await response.json()
+    return data?.message || data?.msg || `请求失败：${response.status}`
+  } catch {
+    return `请求失败：${response.status}`
+  }
+}
+
+function formatMaterialFallbackResource(materialId) {
+  return materialId
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 async function validateAssetFile(kind, file, providerConfig) {
@@ -1297,6 +1502,23 @@ function formatFileSize(size) {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function formatAssetUploadStatus(asset) {
+  switch (asset?.uploadStatus) {
+    case 'queued':
+      return '待上传'
+    case 'uploading':
+      return '上传中'
+    case 'reviewing':
+      return '审核中'
+    case 'ready':
+      return '已通过'
+    case 'failed':
+      return asset.uploadError || '审核失败'
+    default:
+      return ''
+  }
 }
 
 function readFileAsDataUrl(file) {

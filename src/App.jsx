@@ -1353,6 +1353,13 @@ function serializeVideoAssetList(list) {
       size: asset.size,
       mimeType: asset.mimeType,
       file: asset.file,
+      url: asset.url || null,
+      resourceRef: asset.resourceRef || null,
+      materialId: asset.materialId || null,
+      materialStatus: asset.materialStatus ?? null,
+      uploadStatus: asset.uploadStatus || null,
+      uploadMaterialType: asset.uploadMaterialType || null,
+      uploadError: asset.uploadError || null,
     }))
 }
 
@@ -1494,6 +1501,13 @@ function hydrateVideoAsset(asset) {
     size: asset.size ?? file.size,
     mimeType: asset.mimeType || file.type,
     previewUrl: canPreviewAsset(file.type) ? URL.createObjectURL(file) : '',
+    url: asset.url || null,
+    resourceRef: asset.resourceRef || null,
+    materialId: asset.materialId || null,
+    materialStatus: asset.materialStatus ?? null,
+    uploadStatus: asset.uploadStatus || null,
+    uploadMaterialType: asset.uploadMaterialType || null,
+    uploadError: asset.uploadError || null,
   }
 }
 
@@ -2878,6 +2892,7 @@ function validateVideoReferenceInput(provider, params, mode, references, prompt 
   const wanValidationError = validateWanReferenceInput(provider, mode, references)
   const klingValidationError = validateKlingReferenceInput(provider, params, mode, references)
   const durationValidationError = validateRequestedDuration(provider, params, mode, references)
+  const seedanceMaterialError = validateSeedance1MaterialReferences(provider, params, references)
 
   if (operationalMode !== 't2v') {
     if (operationalMode === 'i2v' && references.images.length !== 1) return '图生视频模式需要 1 张参考图片'
@@ -2914,7 +2929,36 @@ function validateVideoReferenceInput(provider, params, mode, references, prompt 
     return klingValidationError
   }
 
+  if (seedanceMaterialError) {
+    return seedanceMaterialError
+  }
+
   return durationValidationError
+}
+
+function validateSeedance1MaterialReferences(provider, params, references) {
+  if (provider !== 'veo' || resolveImageMaterialType(provider, params) === 'direct') {
+    return null
+  }
+
+  const imageAssets = Array.isArray(references?.images) ? references.images : []
+  const materialType = resolveImageMaterialType(provider, params)
+  const failedAsset = imageAssets.find((asset) => asset.uploadStatus === 'failed')
+  if (failedAsset) {
+    return failedAsset.uploadError || '参考图片素材审核未通过，请移除后重新上传'
+  }
+
+  const unreadyCount = imageAssets.filter((asset) => (
+    asset.uploadStatus !== 'ready'
+    || !asset.resourceRef
+    || asset.uploadMaterialType !== materialType
+  )).length
+
+  if (unreadyCount > 0) {
+    return '参考图片仍在上传或审核中，请等待全部通过后再生成'
+  }
+
+  return null
 }
 
 function validateRequestedDuration(provider, params, mode, references) {
@@ -3035,6 +3079,19 @@ async function uploadReferenceBatch(assets, options = {}) {
     return { resourceRefs: [], items: [], requiresPublicBaseUrl: false }
   }
 
+  const readyItems = assets.filter((asset) => asset.uploadStatus === 'ready' && asset.resourceRef)
+  if (readyItems.length === assets.length && canReuseUploadedReferences(readyItems, options)) {
+    return {
+      resourceRefs: readyItems.map((asset) => asset.resourceRef),
+      items: readyItems.map((asset, index) => ({
+        assetId: asset.id || null,
+        order: typeof asset.order === 'number' ? asset.order : index,
+        resourceRef: asset.resourceRef,
+      })),
+      requiresPublicBaseUrl: false,
+    }
+  }
+
   const formData = new FormData()
   for (const asset of assets) {
     formData.append('files', asset.file, asset.file.name)
@@ -3072,6 +3129,11 @@ async function uploadReferenceBatch(assets, options = {}) {
     })),
     requiresPublicBaseUrl: data.publiclyReachable === false,
   }
+}
+
+function canReuseUploadedReferences(assets, options = {}) {
+  if (!options.materialType || options.materialType === 'direct') return false
+  return assets.every((asset) => asset.uploadMaterialType === options.materialType)
 }
 
 function resolveImageMaterialType(provider, params) {

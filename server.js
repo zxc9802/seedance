@@ -377,13 +377,15 @@ app.post('/api/upload', upload.array('files', 32), async (req, res) => {
         item.storageBackend = 'dashscope'
         registerUploadedReference(item.resourceRef, file.size, file.mimetype, uploaded.expiresAtMs)
       } else if (materialType !== null && publiclyReachable && file.mimetype.startsWith('image/')) {
-        const material = await createMaterialReference({
+        const material = await createMaterialReferenceTask({
           name: buildMaterialName(file.originalname),
           originalUrl: url,
           type: materialType,
         })
         item.materialId = material.materialId
         item.materialStatus = material.status
+        item.materialReviewPending = material.status !== 2
+        item.materialError = material.errorMsg || null
         item.resourceRef = material.resourceRef
         registerUploadedReference(item.url, file.size, file.mimetype, expiresAtMs)
         registerUploadedReference(item.resourceRef, file.size, file.mimetype, expiresAtMs)
@@ -411,6 +413,46 @@ app.post('/api/upload', upload.array('files', 32), async (req, res) => {
     res.status(statusCode).json({
       success: false,
       message: error.message || 'Upload failed',
+      ...(error.requestId ? { requestId: error.requestId } : {}),
+      ...(error.traceId ? { traceId: error.traceId } : {}),
+    })
+  }
+})
+
+app.post('/api/material/status', async (req, res) => {
+  const missing = getMissingMaterialConfig()
+  if (missing.length > 0) {
+    res.status(500).json({
+      success: false,
+      message: `Missing backend config: ${missing.join(', ')}`,
+    })
+    return
+  }
+
+  const materialId = String(req.body?.materialId || '').trim()
+  if (!materialId) {
+    res.status(400).json({ success: false, message: 'materialId is required' })
+    return
+  }
+
+  try {
+    const material = await queryMaterialReferenceStatus(materialId)
+    res.json({
+      success: true,
+      data: {
+        materialId: material.materialId,
+        status: material.status,
+        errorMsg: material.errorMsg || null,
+        resourceRef: material.resourceRef,
+        materialReviewPending: material.status !== 2 && material.status !== 3,
+      },
+    })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      success: false,
+      message: error.message || 'Material status query failed',
       ...(error.requestId ? { requestId: error.requestId } : {}),
       ...(error.traceId ? { traceId: error.traceId } : {}),
     })
@@ -6109,7 +6151,7 @@ function normalizeVeoFastRequest(body, promptMode) {
   return normalized
 }
 
-async function createMaterialReference({ name, originalUrl, type }) {
+async function createMaterialReferenceTask({ name, originalUrl, type }) {
   const createPayload = await requestJson(materialApiBaseUrl, '/openApi/material/create', buildMaterialHeaders(), {
     name,
     originalUrl,
@@ -6131,34 +6173,52 @@ async function createMaterialReference({ name, originalUrl, type }) {
     throw createHttpError(502, 'Material creation succeeded but no materialId was returned.')
   }
 
-  let currentStatus = Number(createPayload?.data?.status || 1)
-  let lastError = createPayload?.data?.errorMsg || ''
+  return {
+    materialId,
+    status: Number(createPayload?.data?.status || 1),
+    errorMsg: createPayload?.data?.errorMsg || '',
+    resourceRef: formatMaterialResource(materialId),
+  }
+}
+
+async function queryMaterialReferenceStatus(materialId) {
+  const listPayload = await requestJson(materialApiBaseUrl, '/openApi/material/pageList', buildMaterialHeaders(), {
+    materialId,
+    pageNo: 1,
+    pageSize: 10,
+  })
+
+  if (!listPayload?.success) {
+    throw createHttpError(
+      502,
+      listPayload?.msg || listPayload?.message || 'Material status query failed.',
+      extractTraceMetadataFromPayload(listPayload),
+    )
+  }
+
+  const records = Array.isArray(listPayload?.data?.records) ? listPayload.data.records : []
+  const record = records.find((item) => item?.materialId === materialId) || records[0]
+
+  return {
+    materialId,
+    status: Number(record?.status || 1),
+    errorMsg: record?.errorMsg || '',
+    resourceRef: formatMaterialResource(materialId),
+  }
+}
+
+async function createMaterialReference({ name, originalUrl, type }) {
+  const created = await createMaterialReferenceTask({ name, originalUrl, type })
+  let currentStatus = created.status
+  let lastError = created.errorMsg || ''
+  const materialId = created.materialId
   const deadline = Date.now() + materialPollTimeoutMs
 
   while (currentStatus === 1 && Date.now() < deadline) {
     await sleep(materialPollIntervalMs)
-    const listPayload = await requestJson(materialApiBaseUrl, '/openApi/material/pageList', buildMaterialHeaders(), {
-      materialId,
-      pageNo: 1,
-      pageSize: 10,
-    })
-
-    if (!listPayload?.success) {
-      throw createHttpError(
-        502,
-        listPayload?.msg || listPayload?.message || 'Material status query failed.',
-        extractTraceMetadataFromPayload(listPayload),
-      )
-    }
-
-    const records = Array.isArray(listPayload?.data?.records) ? listPayload.data.records : []
-    const record = records.find((item) => item?.materialId === materialId) || records[0]
-    if (!record) {
-      continue
-    }
-
-    currentStatus = Number(record.status || currentStatus)
-    lastError = record.errorMsg || lastError
+    const material = await queryMaterialReferenceStatus(materialId)
+    currentStatus = material.status || currentStatus
+    lastError = material.errorMsg || lastError
   }
 
   if (currentStatus !== 2) {
