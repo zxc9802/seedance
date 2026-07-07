@@ -122,3 +122,11 @@ test('credit center recharge form targets site balance instead of an employee ac
   assert.doesNotMatch(html, /id="r-email"/)
   assert.doesNotMatch(html, /id="r-nickname"/)
 })
+
+test('credit cost converts five credits into one yuan', async () => {
+  const credits = await import('../db/credits.js')
+
+  assert.equal(credits.convertCreditsToCny(5), 1)
+  assert.equal(credits.convertCreditsToCny(25.5), 5.1)
+  assert.equal(credits.convertCreditsToCny(null), 0)
+})

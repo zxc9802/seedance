@@ -41,3 +41,25 @@ test('admin overview day range can request all data without the 90 day cap', asy
   assert.match(apiSource, /normalized === 'all'[\s\S]*return null/)
   assert.doesNotMatch(apiSource, /Number\(req\.query\.days\) \|\| 30/)
 })
+
+test('main admin shows shared credit balance and converted credit fees', async () => {
+  const apiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
+  const adminSource = await readFile(new URL('../admin/index.html', import.meta.url), 'utf8')
+
+  assert.match(adminSource, /剩余积分/)
+  assert.match(adminSource, /消耗积分[\s\S]*费用/)
+  assert.match(adminSource, /id="s-credit-balance"/)
+  assert.match(adminSource, /overview\.creditBalance/)
+  assert.match(adminSource, /formatCredits\(task\.credit_spent\)[\s\S]*formatMoney\(task\.credit_cost\)/)
+  assert.match(adminSource, /formatCredits\(user\.credit_spent\)[\s\S]*formatMoney\(user\.credit_cost\)/)
+  assert.match(apiSource, /creditBalance/)
+  assert.match(apiSource, /creditConsumed/)
+  assert.match(apiSource, /creditCost/)
+})
+
+test('admin Excel export puts consumed credits before converted fee', async () => {
+  const apiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
+
+  assert.match(apiSource, /header: '\\u6d88\\u8017\\u79ef\\u5206'[\s\S]*value: \(log\) => safeExcelAmount\(log\.credit_spent\)/)
+  assert.match(apiSource, /header: '\\u8d39\\u7528'[\s\S]*value: \(log\) => safeExcelAmount\(log\.credit_cost\)/)
+})

@@ -15,6 +15,7 @@ const REFERENCE_VIDEO_RATES = Object.freeze({
 })
 
 const CREDIT_BILLED_PROVIDERS = new Set(['veo', 'seedance1'])
+export const CREDITS_PER_CNY = 5
 export const SITE_CREDIT_ACCOUNT_ID = '__site_shared_credits__'
 
 const SITE_CREDIT_ACCOUNT = Object.freeze({
@@ -30,6 +31,12 @@ export function shouldChargeCreditsForProvider(providerId) {
 
 export function getCreditBalanceAccountId() {
   return SITE_CREDIT_ACCOUNT_ID
+}
+
+export function convertCreditsToCny(credits) {
+  const amount = Number(credits)
+  if (!Number.isFinite(amount) || amount <= 0) return 0
+  return Number((amount / CREDITS_PER_CNY).toFixed(2))
 }
 
 export function shouldDeductCreditsForUsageUpdate(updates) {

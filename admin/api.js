@@ -3,7 +3,7 @@ import ExcelJS from 'exceljs'
 import express from 'express'
 import multer from 'multer'
 import { getPool } from '../db/postgres.js'
-import { getCreditBalanceAccountId, rechargeSiteCredits } from '../db/credits.js'
+import { convertCreditsToCny, getCreditBalanceAccountId, rechargeSiteCredits } from '../db/credits.js'
 import { syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
 import { buildUsageChannelSql, formatUsageChannelLabel, resolveUsageChannel } from './usageChannel.js'
@@ -166,6 +166,12 @@ function extractMediaSizes(log) {
   return { images: 0, videos: 0, audios: 0 }
 }
 
+function normalizeCreditSpent(value) {
+  const amount = Number(value)
+  if (!Number.isFinite(amount) || amount <= 0) return 0
+  return Number(amount.toFixed(2))
+}
+
 function enhanceUsageLog(log) {
   const requestParams = log?.request_params || {}
   const promptText = normalizeText(requestParams.rawPrompt)
@@ -177,9 +183,12 @@ function enhanceUsageLog(log) {
   const mediaSizes = extractMediaSizes(log)
   const rawChannel = log?.channel || null
   const statsChannel = resolveUsageChannel(rawChannel, log?.provider_id, log?.upstream_url) || rawChannel
+  const creditSpent = normalizeCreditSpent(log?.credit_spent)
 
   return {
     ...log,
+    credit_spent: creditSpent,
+    credit_cost: convertCreditsToCny(creditSpent),
     rawChannel,
     statsChannel,
     channel: statsChannel,
@@ -229,11 +238,18 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
   { header: '\u72b6\u6001', width: 12, align: 'center', value: (log) => formatStatusLabel(log.status) },
   { header: 'engine_task_id', width: 30, value: (log) => log.engine_task_id || '' },
   { header: 'upstream_url', width: 42, value: (log) => log.upstream_url || '' },
-  { header: '\u8d39\u7528', width: 14, align: 'right', type: 'amount', value: (log) => safeExcelAmount(log.estimated_cost) },
+  { header: '\u6d88\u8017\u79ef\u5206', width: 14, align: 'right', type: 'credit', value: (log) => safeExcelAmount(log.credit_spent) },
+  { header: '\u8d39\u7528', width: 14, align: 'right', type: 'amount', value: (log) => safeExcelAmount(log.credit_cost) },
 ])
 
 const USAGE_CHANNEL_SQL = buildUsageChannelSql()
 const CREDIT_USAGE_WHERE_SQL = `(provider_id = 'veo' OR provider_id = 'seedance1')`
+const CREDIT_USAGE_SUMMARY_SQL = `
+  SELECT usage_log_id, COALESCE(SUM(-amount), 0)::float AS credit_spent
+  FROM user_credit_transactions
+  WHERE type = 'consume' AND usage_log_id IS NOT NULL
+  GROUP BY usage_log_id
+`
 
 function emptyCreditSiteSummary() {
   return {
@@ -389,6 +405,8 @@ async function buildUsageWorkbook(logs, sheetName) {
 
       if (column.type === 'amount') {
         cell.numFmt = '\u00a5#,##0.00'
+      } else if (column.type === 'credit') {
+        cell.numFmt = '#,##0.00'
       }
     })
   })
@@ -404,18 +422,32 @@ async function buildUsageWorkbook(logs, sheetName) {
     }
   })
 
-  const labelCell = totalRow.getCell(TASK_EXPORT_COLUMNS.length - 1)
-  labelCell.value = '\u603b\u91d1\u989d'
+  const creditColumnIndex = TASK_EXPORT_COLUMNS.findIndex((column) => column.type === 'credit') + 1
+  const amountColumnIndex = TASK_EXPORT_COLUMNS.findIndex((column) => column.type === 'amount') + 1
+  const labelCell = totalRow.getCell(Math.max(1, creditColumnIndex - 1))
+  labelCell.value = '\u5408\u8ba1'
   labelCell.font = { bold: true }
   labelCell.alignment = { vertical: 'middle', horizontal: 'right' }
 
-  const amountCell = totalRow.getCell(TASK_EXPORT_COLUMNS.length)
-  amountCell.value = {
-    formula: `SUM(${excelColumnName(TASK_EXPORT_COLUMNS.length)}2:${excelColumnName(TASK_EXPORT_COLUMNS.length)}${Math.max(2, totalRow.number - 1)})`,
+  if (creditColumnIndex > 0) {
+    const creditCell = totalRow.getCell(creditColumnIndex)
+    creditCell.value = {
+      formula: `SUM(${excelColumnName(creditColumnIndex)}2:${excelColumnName(creditColumnIndex)}${Math.max(2, totalRow.number - 1)})`,
+    }
+    creditCell.numFmt = '#,##0.00'
+    creditCell.font = { bold: true }
+    creditCell.alignment = { vertical: 'middle', horizontal: 'right' }
   }
-  amountCell.numFmt = '\u00a5#,##0.00'
-  amountCell.font = { bold: true }
-  amountCell.alignment = { vertical: 'middle', horizontal: 'right' }
+
+  if (amountColumnIndex > 0) {
+    const amountCell = totalRow.getCell(amountColumnIndex)
+    amountCell.value = {
+      formula: `SUM(${excelColumnName(amountColumnIndex)}2:${excelColumnName(amountColumnIndex)}${Math.max(2, totalRow.number - 1)})`,
+    }
+    amountCell.numFmt = '\u00a5#,##0.00'
+    amountCell.font = { bold: true }
+    amountCell.alignment = { vertical: 'middle', horizontal: 'right' }
+  }
 
   worksheet.autoFilter = {
     from: { row: 1, column: 1 },
@@ -688,33 +720,49 @@ router.get('/overview', async (req, res) => {
   const rangeFilter = buildUsageDayRangeFilter(days)
 
   try {
-    const [totals, ranged] = await Promise.all([
+    const [totals, ranged, account] = await Promise.all([
       db.query(`
         SELECT
           COUNT(*)::int AS total_requests
         FROM video_usage_logs
       `),
       db.query(`
+        WITH filtered_logs AS (
+          SELECT *
+          FROM video_usage_logs
+          ${rangeFilter.whereClause}
+        )
         SELECT
           COUNT(*)::int AS range_requests,
-          COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
-          COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
-          COALESCE(SUM(estimated_cost), 0)::float AS total_cost,
-          COUNT(DISTINCT user_id)::int AS active_users
-        FROM video_usage_logs
-        ${rangeFilter.whereClause}
+          COUNT(*) FILTER (WHERE logs.status = 'succeeded')::int AS succeeded,
+          COUNT(*) FILTER (WHERE logs.status = 'failed')::int AS failed,
+          COALESCE(SUM(credit_usage.credit_spent), 0)::float AS credit_consumed,
+          COUNT(DISTINCT logs.user_id)::int AS active_users
+        FROM filtered_logs logs
+        LEFT JOIN (${CREDIT_USAGE_SUMMARY_SQL}) credit_usage ON credit_usage.usage_log_id = logs.id
       `, rangeFilter.params),
+      db.query(
+        `SELECT COALESCE(balance, 0)::float AS credit_balance
+         FROM user_credit_accounts
+         WHERE user_id = $1`,
+        [getCreditBalanceAccountId()],
+      ),
     ])
 
     const t = totals.rows[0]
     const r = ranged.rows[0]
+    const creditConsumed = normalizeCreditSpent(r.credit_consumed)
+    const creditCost = convertCreditsToCny(creditConsumed)
     res.json({
       totalRequests: t.total_requests,
       rangeRequests: r.range_requests,
       succeeded: r.succeeded,
       failed: r.failed,
       successRate: r.range_requests > 0 ? ((r.succeeded / r.range_requests) * 100).toFixed(1) : '0',
-      totalCost: r.total_cost,
+      creditBalance: Number(account.rows[0]?.credit_balance || 0),
+      creditConsumed,
+      creditCost,
+      totalCost: creditCost,
       todayRequests: r.range_requests,
       activeUsers: r.active_users,
     })
@@ -805,8 +853,11 @@ router.get('/by-user', async (req, res) => {
         COALESCE(SUM(GREATEST(COALESCE(sample_count, 1), 1)), 0)::int AS generated_count,
         COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
         COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
-        COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
+        COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost,
+        COALESCE(SUM(credit_usage.credit_spent), 0)::float AS credit_spent,
+        (COALESCE(SUM(credit_usage.credit_spent), 0) / 5)::float AS credit_cost
       FROM video_usage_logs
+      LEFT JOIN (${CREDIT_USAGE_SUMMARY_SQL}) credit_usage ON credit_usage.usage_log_id = video_usage_logs.id
       WHERE ${where}
       GROUP BY user_id
       ORDER BY requests DESC
@@ -860,7 +911,12 @@ router.get('/tasks', async (req, res) => {
     const [countResult, dataResult] = await Promise.all([
       db.query(`SELECT COUNT(*)::int AS total FROM video_usage_logs WHERE ${where}`, params),
       db.query(
-        `SELECT * FROM video_usage_logs WHERE ${where} ORDER BY created_at DESC LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}`,
+        `SELECT logs.*, COALESCE(credit_usage.credit_spent, 0)::float AS credit_spent
+         FROM video_usage_logs logs
+         LEFT JOIN (${CREDIT_USAGE_SUMMARY_SQL}) credit_usage ON credit_usage.usage_log_id = logs.id
+         WHERE ${where}
+         ORDER BY logs.created_at DESC
+         LIMIT $${limitParamIndex} OFFSET $${offsetParamIndex}`,
         [...params, pageSize, offset]
       ),
     ])
@@ -886,7 +942,11 @@ router.get('/tasks/export', async (req, res) => {
 
   try {
     const result = await db.query(
-      `SELECT * FROM video_usage_logs WHERE ${where} ORDER BY created_at DESC`,
+      `SELECT logs.*, COALESCE(credit_usage.credit_spent, 0)::float AS credit_spent
+       FROM video_usage_logs logs
+       LEFT JOIN (${CREDIT_USAGE_SUMMARY_SQL}) credit_usage ON credit_usage.usage_log_id = logs.id
+       WHERE ${where}
+       ORDER BY logs.created_at DESC`,
       params
     )
 
@@ -1271,13 +1331,15 @@ router.get('/user-detail', async (req, res) => {
   try {
     const result = await db.query(`
       SELECT
-        id, channel, provider_id, model, generation_mode, prompt,
-        aspect_ratio, resolution, duration, sample_count, request_params, engine_task_id,
-        upstream_request_id, upstream_trace_id, upstream_url, status, error_message,
-        video_url, estimated_cost, created_at, completed_at
-      FROM video_usage_logs
+        logs.id, logs.channel, logs.provider_id, logs.model, logs.generation_mode, logs.prompt,
+        logs.aspect_ratio, logs.resolution, logs.duration, logs.sample_count, logs.request_params, logs.engine_task_id,
+        logs.upstream_request_id, logs.upstream_trace_id, logs.upstream_url, logs.status, logs.error_message,
+        logs.video_url, logs.estimated_cost, logs.created_at, logs.completed_at,
+        COALESCE(credit_usage.credit_spent, 0)::float AS credit_spent
+      FROM video_usage_logs logs
+      LEFT JOIN (${CREDIT_USAGE_SUMMARY_SQL}) credit_usage ON credit_usage.usage_log_id = logs.id
       WHERE ${where}
-      ORDER BY created_at DESC
+      ORDER BY logs.created_at DESC
     `, params)
 
     res.json(result.rows.map(enhanceUsageLog))
@@ -1307,7 +1369,11 @@ router.get('/user-detail/export', async (req, res) => {
 
   try {
     const result = await db.query(
-      `SELECT * FROM video_usage_logs WHERE ${where} ORDER BY created_at DESC`,
+      `SELECT logs.*, COALESCE(credit_usage.credit_spent, 0)::float AS credit_spent
+       FROM video_usage_logs logs
+       LEFT JOIN (${CREDIT_USAGE_SUMMARY_SQL}) credit_usage ON credit_usage.usage_log_id = logs.id
+       WHERE ${where}
+       ORDER BY logs.created_at DESC`,
       params
     )
 
