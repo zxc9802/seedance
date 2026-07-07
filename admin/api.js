@@ -233,6 +233,7 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
 ])
 
 const USAGE_CHANNEL_SQL = buildUsageChannelSql()
+const CREDIT_USAGE_WHERE_SQL = `(provider_id = 'veo' OR provider_id = 'seedance1')`
 
 function formatChannelLabel(channel, providerId = null, upstreamUrl = null) {
   return formatUsageChannelLabel(channel, providerId, upstreamUrl)
@@ -1076,6 +1077,7 @@ router.get('/credits/users', async (req, res) => {
           COALESCE(SUM(estimated_cost), 0)::float AS consumed_credits,
           MAX(created_at) AS last_generated_at
         FROM video_usage_logs
+        WHERE ${CREDIT_USAGE_WHERE_SQL}
         GROUP BY user_id
       )
       SELECT
@@ -1145,7 +1147,7 @@ router.get('/credits/usage', async (req, res) => {
   if (!db) return res.json([])
   const userId = String(req.query.userId || '').trim()
   const params = []
-  const where = userId ? 'WHERE user_id = $1' : ''
+  const where = userId ? `WHERE ${CREDIT_USAGE_WHERE_SQL} AND user_id = $1` : `WHERE ${CREDIT_USAGE_WHERE_SQL}`
   if (userId) params.push(userId)
 
   try {

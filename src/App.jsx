@@ -1962,6 +1962,7 @@ function buildVideoRequest(provider, params, prompt, mode, references) {
       'Content-Type': 'application/json',
     },
     body: {
+      providerId: provider,
       modelId: params.model,
       abilityType: 'VIDEO',
       prompt,

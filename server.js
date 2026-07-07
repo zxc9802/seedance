@@ -12,7 +12,7 @@ import { promisify } from 'node:util'
 import { createServer as createViteServer, loadEnv } from 'vite'
 import { getPool, initDatabase, closePool } from './db/postgres.js'
 import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
-import { assertSufficientCredits, calculateVideoCreditCharge, deductUserCreditsForUsage } from './db/credits.js'
+import { assertSufficientCredits, calculateVideoCreditCharge, deductUserCreditsForUsage, shouldChargeCreditsForProvider } from './db/credits.js'
 import adminRouter from './admin/api.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -475,8 +475,9 @@ app.post('/api/veo/generate', async (req, res) => {
   const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
   const requestedParams = extractRequestedVideoParams(body)
   const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
-  const creditCharge = await prepareVideoCreditCharge(req, res, requestedParams, usageRequestParams)
-  if (!creditCharge) return
+  const providerId = body.providerId || 'veo'
+  const creditCharge = await prepareVideoCreditCharge(req, res, providerId, requestedParams, usageRequestParams)
+  if (shouldChargeCreditsForProvider(providerId) && !creditCharge) return
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
@@ -487,7 +488,7 @@ app.post('/api/veo/generate', async (req, res) => {
     insertChargedUsageLog({
       session: req.videoSiteSession,
       channel: 'aggregation',
-      providerId: body.providerId || null,
+      providerId,
       model: requestedParams.model || null,
       generationMode: body.mode || 't2v',
       prompt: body.prompt || null,
@@ -1223,14 +1224,12 @@ app.post('/api/yunwu/generate', async (req, res) => {
     const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
     const requestedParams = extractRequestedVideoParams(body)
     const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
-    const creditCharge = await prepareVideoCreditCharge(req, res, requestedParams, usageRequestParams)
-    if (!creditCharge) return
     const requestSpec = buildYunwuGenerateRequest(body)
     const upstream = await requestYunwu(requestSpec)
     const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
     const normalized = normalizeYunwuGenerateResponse(upstream.payload, requestSpec, traceMetadata)
 
-    insertChargedUsageLog({
+    insertUsageLog({
       session: req.videoSiteSession,
       channel: 'yunwu',
       providerId: body.providerId || null,
@@ -1247,7 +1246,7 @@ app.post('/api/yunwu/generate', async (req, res) => {
       upstreamUrl: `${yunwuApiBaseUrl}${requestSpec.path}`,
       status: normalized.taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
       errorMessage: normalized.taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
-    }, creditCharge).catch(() => {})
+    }).catch(() => {})
 
     applyUpstreamTraceHeaders(res, traceMetadata)
     res.json({
@@ -1332,14 +1331,12 @@ app.post('/api/ark/generate', async (req, res) => {
     const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
     const requestedParams = extractRequestedVideoParams(body)
     const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
-    const creditCharge = await prepareVideoCreditCharge(req, res, requestedParams, usageRequestParams)
-    if (!creditCharge) return
     const requestSpec = buildArkGenerateRequest(body)
     const upstream = await requestArk(requestSpec)
     const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
     const normalized = normalizeYunwuGenerateResponse(upstream.payload, requestSpec, traceMetadata)
 
-    insertChargedUsageLog({
+    insertUsageLog({
       session: req.videoSiteSession,
       channel: 'ark',
       providerId: body.providerId || null,
@@ -1356,7 +1353,7 @@ app.post('/api/ark/generate', async (req, res) => {
       upstreamUrl: `${arkApiBaseUrl}${requestSpec.path}`,
       status: normalized.taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
       errorMessage: normalized.taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
-    }, creditCharge).catch(() => {})
+    }).catch(() => {})
 
     applyUpstreamTraceHeaders(res, traceMetadata)
     res.json({
@@ -1489,14 +1486,12 @@ app.post('/api/wan/generate', async (req, res) => {
     const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
     const requestedParams = extractRequestedVideoParams(body)
     const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
-    const creditCharge = await prepareVideoCreditCharge(req, res, requestedParams, usageRequestParams)
-    if (!creditCharge) return
     const requestSpec = buildDashScopeWanGenerateRequest(body)
     const upstream = await requestDashScope(requestSpec)
     const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
     const normalized = normalizeYunwuGenerateResponse(upstream.payload, requestSpec, traceMetadata)
 
-    insertChargedUsageLog({
+    insertUsageLog({
       session: req.videoSiteSession,
       channel: 'wan',
       providerId: body.providerId || 'wan1',
@@ -1513,7 +1508,7 @@ app.post('/api/wan/generate', async (req, res) => {
       upstreamUrl: `${dashScopeBaseUrl}${requestSpec.path}`,
       status: normalized.taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
       errorMessage: normalized.taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
-    }, creditCharge).catch(() => {})
+    }).catch(() => {})
 
     applyUpstreamTraceHeaders(res, traceMetadata)
     res.json({
@@ -1588,9 +1583,6 @@ app.post('/api/dreamina/generate', async (req, res) => {
     const body = req.body || {}
     const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
     const requestedParams = extractRequestedVideoParams(body)
-    const preliminaryUsageParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
-    const preliminaryCharge = await prepareVideoCreditCharge(req, res, requestedParams, preliminaryUsageParams)
-    if (!preliminaryCharge) return
     const requestSpec = await buildDreaminaGenerateRequest(body)
     const finalRequestedParams = {
       ...requestedParams,
@@ -1599,17 +1591,11 @@ app.post('/api/dreamina/generate', async (req, res) => {
       sampleCount: requestedParams.sampleCount || 1,
     }
     const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, finalRequestedParams), mediaSummary)
-    const creditCharge = calculateVideoCreditCharge({
-      resolution: finalRequestedParams.resolution,
-      duration: finalRequestedParams.duration,
-      sampleCount: finalRequestedParams.sampleCount,
-      requestParams: usageRequestParams,
-    })
     const cliResult = await executeDreaminaCli(requestSpec.args)
     const normalized = normalizeDreaminaGenerateResponse(cliResult.payload, requestSpec)
     const terminalStatus = normalizeDreaminaTerminalUsageStatus(normalized.status)
 
-    insertChargedUsageLog({
+    insertUsageLog({
       session: req.videoSiteSession,
       channel: 'dreamina',
       providerId: requestSpec.providerId,
@@ -1631,7 +1617,7 @@ app.post('/api/dreamina/generate', async (req, res) => {
         : UNTRACKED_USAGE_STATUS_MESSAGE,
       videoUrl: terminalStatus === 'succeeded' ? (normalized.videoUrl || normalized.imageUrl || null) : null,
       completedAt: terminalStatus ? new Date().toISOString() : null,
-    }, creditCharge).catch(() => {})
+    }).catch(() => {})
 
     res.json({
       success: true,
@@ -2639,7 +2625,9 @@ function extractRequestedVideoParams(requestBody) {
   }
 }
 
-async function prepareVideoCreditCharge(req, res, requestedParams, requestParams) {
+async function prepareVideoCreditCharge(req, res, providerId, requestedParams, requestParams) {
+  if (!shouldChargeCreditsForProvider(providerId)) return null
+
   const charge = calculateVideoCreditCharge({
     resolution: requestedParams.resolution,
     duration: requestedParams.duration,
@@ -3069,14 +3057,12 @@ app.post('/api/veo-fast/generate', async (req, res) => {
     referenceCounts: extractVeoFastReferenceCounts(normalizedBody),
     requestedParams,
   }, mediaSummary)
-  const creditCharge = await prepareVideoCreditCharge(req, res, requestedParams, usageRequestParams)
-  if (!creditCharge) return
   await proxyJsonWithBody(req, res, `${veoFastGenerateUrl}/v1/video/generations`, normalizedBody, {
     Authorization: `Bearer ${apiKey}`,
   }, ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) return
     const taskId = payload?.name || payload?.task_id || payload?.id
-    insertChargedUsageLog({
+    insertUsageLog({
       session: req.videoSiteSession,
       channel: 'veo_fast',
       providerId: body.providerId || 'veo31fast',
@@ -3093,7 +3079,7 @@ app.post('/api/veo-fast/generate', async (req, res) => {
       upstreamUrl: url,
       status: taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
       errorMessage: taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
-    }, creditCharge).catch(() => {})
+    }).catch(() => {})
   })
 })
 

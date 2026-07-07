@@ -14,6 +14,12 @@ const REFERENCE_VIDEO_RATES = Object.freeze({
   '4k': 25.5,
 })
 
+const CREDIT_BILLED_PROVIDERS = new Set(['veo', 'seedance1'])
+
+export function shouldChargeCreditsForProvider(providerId) {
+  return CREDIT_BILLED_PROVIDERS.has(String(providerId || '').trim().toLowerCase())
+}
+
 export function normalizeCreditAmount(value) {
   const amount = Number(value)
   if (!Number.isFinite(amount) || amount <= 0) {

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   calculateVideoCreditCharge,
   extractCreditUserInfo,
+  shouldChargeCreditsForProvider,
   normalizeCreditAmount,
 } from '../db/credits.js'
 
@@ -84,4 +85,13 @@ test('admin recharge amount keeps one decimal or two decimal precision without n
   assert.equal(normalizeCreditAmount('12.345'), 12.35)
   assert.throws(() => normalizeCreditAmount('-1'), /must be greater than 0/)
   assert.throws(() => normalizeCreditAmount('abc'), /must be greater than 0/)
+})
+
+test('credit billing only applies to the seedance1 provider', () => {
+  assert.equal(shouldChargeCreditsForProvider('veo'), true)
+  assert.equal(shouldChargeCreditsForProvider('seedance1'), true)
+  assert.equal(shouldChargeCreditsForProvider('ark'), false)
+  assert.equal(shouldChargeCreditsForProvider('wan1'), false)
+  assert.equal(shouldChargeCreditsForProvider('veo31fast'), false)
+  assert.equal(shouldChargeCreditsForProvider('seedance2'), false)
 })
