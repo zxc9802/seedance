@@ -3199,7 +3199,7 @@ app.use('/api/admin', requireAdminApiAccess, adminRouter)
 app.get('/admin', requireAdminPageAccess, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'index.html'))
 })
-app.get(adminCreditsPath, requireAdminPageAccess, (req, res) => {
+app.get(adminCreditsPath, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'credits.html'))
 })
 
@@ -6690,6 +6690,8 @@ function resolveVideoSiteSessionSecret() {
 function shouldBypassSso(req) {
   if (!requireMainAppSso) return true
   if (req.path === '/api/health') return true
+  if (req.path === adminCreditsPath) return true
+  if (req.path.startsWith('/api/admin/credits/')) return true
   if (req.path.startsWith('/temp-assets/')) return true
   if (!isProduction && (
     req.path.startsWith('/@vite')
@@ -7029,6 +7031,11 @@ function isAdminRoleValue(value) {
 }
 
 function requireAdminApiAccess(req, res, next) {
+  if (req.path.startsWith('/credits/')) {
+    next()
+    return
+  }
+
   if (!requireMainAppSso) {
     next()
     return
