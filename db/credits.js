@@ -15,9 +15,21 @@ const REFERENCE_VIDEO_RATES = Object.freeze({
 })
 
 const CREDIT_BILLED_PROVIDERS = new Set(['veo', 'seedance1'])
+export const SITE_CREDIT_ACCOUNT_ID = '__site_shared_credits__'
+
+const SITE_CREDIT_ACCOUNT = Object.freeze({
+  userId: SITE_CREDIT_ACCOUNT_ID,
+  email: null,
+  nickname: '全站共享积分',
+  group: 'site',
+})
 
 export function shouldChargeCreditsForProvider(providerId) {
   return CREDIT_BILLED_PROVIDERS.has(String(providerId || '').trim().toLowerCase())
+}
+
+export function getCreditBalanceAccountId() {
+  return SITE_CREDIT_ACCOUNT_ID
 }
 
 export function shouldDeductCreditsForUsageUpdate(updates) {
@@ -96,6 +108,19 @@ export async function getUserCreditBalance(userId) {
     [userId],
   )
   return Number(result.rows[0]?.balance || 0)
+}
+
+export async function getSiteCreditBalance() {
+  return getUserCreditBalance(getCreditBalanceAccountId())
+}
+
+export async function rechargeSiteCredits({ amount, note, actor }) {
+  return rechargeUserCredits({
+    ...SITE_CREDIT_ACCOUNT,
+    amount,
+    note,
+    actor,
+  })
 }
 
 export async function rechargeUserCredits({ userId, email, nickname, group, amount, note, actor }) {
@@ -182,20 +207,14 @@ export async function deductUserCreditsForSucceededUsageLog(usageLogId) {
       }),
       amount: Number(estimatedCost.toFixed(2)),
     }
-    const account = await upsertCreditAccount(client, {
-      userId: log.user_id,
-      email: log.user_email,
-      nickname: log.user_nickname,
-      group: log.user_group,
-    })
+    const account = await upsertCreditAccount(client, SITE_CREDIT_ACCOUNT)
     const nextBalance = Number((Number(account.balance) - charge.amount).toFixed(2))
 
     await client.query(
       `UPDATE user_credit_accounts
-       SET balance = $2, user_email = COALESCE($3, user_email), user_nickname = COALESCE($4, user_nickname),
-           user_group = COALESCE($5, user_group), updated_at = NOW()
+       SET balance = $2, updated_at = NOW()
        WHERE user_id = $1`,
-      [log.user_id, nextBalance, log.user_email, log.user_nickname, log.user_group],
+      [getCreditBalanceAccountId(), nextBalance],
     )
     await client.query(
       `INSERT INTO user_credit_transactions (
@@ -227,8 +246,8 @@ export async function deductUserCreditsForSucceededUsageLog(usageLogId) {
 
 export async function assertSufficientCredits(session, charge) {
   const user = extractCreditUserInfo(session)
-  if (!user.userId || !charge?.amount) return { ok: true, userId: user.userId, balance: null }
-  const balance = await getUserCreditBalance(user.userId)
+  if (!charge?.amount) return { ok: true, userId: user.userId, balance: null }
+  const balance = await getSiteCreditBalance()
   if (balance === null || balance >= charge.amount) return { ok: true, userId: user.userId, balance }
   return { ok: false, userId: user.userId, balance }
 }

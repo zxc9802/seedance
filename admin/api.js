@@ -3,7 +3,7 @@ import ExcelJS from 'exceljs'
 import express from 'express'
 import multer from 'multer'
 import { getPool } from '../db/postgres.js'
-import { rechargeUserCredits } from '../db/credits.js'
+import { getCreditBalanceAccountId, rechargeSiteCredits } from '../db/credits.js'
 import { syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
 import { buildUsageChannelSql, formatUsageChannelLabel, resolveUsageChannel } from './usageChannel.js'
@@ -234,6 +234,17 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
 
 const USAGE_CHANNEL_SQL = buildUsageChannelSql()
 const CREDIT_USAGE_WHERE_SQL = `(provider_id = 'veo' OR provider_id = 'seedance1')`
+
+function emptyCreditSiteSummary() {
+  return {
+    balance: 0,
+    userCount: 0,
+    generationCount: 0,
+    outputCount: 0,
+    generatedSeconds: 0,
+    consumedCredits: 0,
+  }
+}
 
 function formatChannelLabel(channel, providerId = null, upstreamUrl = null) {
   return formatUsageChannelLabel(channel, providerId, upstreamUrl)
@@ -1059,6 +1070,47 @@ router.post('/cost-import/apply', async (req, res) => {
   }
 })
 
+router.get('/credits/site', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json(emptyCreditSiteSummary())
+
+  try {
+    const [accountResult, usageResult, transactionResult] = await Promise.all([
+      db.query(
+        `SELECT COALESCE(balance, 0)::float AS balance
+         FROM user_credit_accounts
+         WHERE user_id = $1`,
+        [getCreditBalanceAccountId()],
+      ),
+      db.query(`
+        SELECT
+          COUNT(DISTINCT user_id)::int AS user_count,
+          COUNT(*)::int AS generation_count,
+          COALESCE(SUM(GREATEST(COALESCE(sample_count, 1), 1)), 0)::int AS output_count,
+          COALESCE(SUM(duration * GREATEST(COALESCE(sample_count, 1), 1)), 0)::float AS generated_seconds
+        FROM video_usage_logs
+        WHERE ${CREDIT_USAGE_WHERE_SQL}
+      `),
+      db.query(`
+        SELECT COALESCE(SUM(-amount), 0)::float AS consumed_credits
+        FROM user_credit_transactions
+        WHERE type = 'consume'
+      `),
+    ])
+
+    res.json({
+      balance: Number(accountResult.rows[0]?.balance || 0),
+      userCount: Number(usageResult.rows[0]?.user_count || 0),
+      generationCount: Number(usageResult.rows[0]?.generation_count || 0),
+      outputCount: Number(usageResult.rows[0]?.output_count || 0),
+      generatedSeconds: Number(usageResult.rows[0]?.generated_seconds || 0),
+      consumedCredits: Number(transactionResult.rows[0]?.consumed_credits || 0),
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 router.get('/credits/users', async (req, res) => {
   const db = getPool()
   if (!db) return res.json([])
@@ -1074,25 +1126,31 @@ router.get('/credits/users', async (req, res) => {
           COUNT(*)::int AS generation_count,
           COALESCE(SUM(GREATEST(COALESCE(sample_count, 1), 1)), 0)::int AS output_count,
           COALESCE(SUM(duration * GREATEST(COALESCE(sample_count, 1), 1)), 0)::float AS generated_seconds,
-          COALESCE(SUM(estimated_cost), 0)::float AS consumed_credits,
           MAX(created_at) AS last_generated_at
         FROM video_usage_logs
         WHERE ${CREDIT_USAGE_WHERE_SQL}
         GROUP BY user_id
+      ),
+      transaction_stats AS (
+        SELECT
+          user_id,
+          COALESCE(SUM(-amount), 0)::float AS consumed_credits
+        FROM user_credit_transactions
+        WHERE type = 'consume'
+        GROUP BY user_id
       )
       SELECT
-        COALESCE(accounts.user_id, usage_stats.user_id) AS user_id,
-        COALESCE(accounts.user_email, usage_stats.user_email) AS user_email,
-        COALESCE(accounts.user_nickname, usage_stats.user_nickname) AS user_nickname,
-        COALESCE(accounts.user_group, usage_stats.user_group) AS user_group,
-        COALESCE(accounts.balance, 0)::float AS balance,
+        usage_stats.user_id,
+        usage_stats.user_email,
+        usage_stats.user_nickname,
+        usage_stats.user_group,
         COALESCE(usage_stats.generation_count, 0)::int AS generation_count,
         COALESCE(usage_stats.output_count, 0)::int AS output_count,
         COALESCE(usage_stats.generated_seconds, 0)::float AS generated_seconds,
-        COALESCE(usage_stats.consumed_credits, 0)::float AS consumed_credits,
+        COALESCE(transaction_stats.consumed_credits, 0)::float AS consumed_credits,
         usage_stats.last_generated_at
-      FROM user_credit_accounts accounts
-      FULL OUTER JOIN usage_stats ON usage_stats.user_id = accounts.user_id
+      FROM usage_stats
+      LEFT JOIN transaction_stats ON transaction_stats.user_id = usage_stats.user_id
       ORDER BY last_generated_at DESC NULLS LAST, user_id
       LIMIT 300
     `)
@@ -1103,13 +1161,9 @@ router.get('/credits/users', async (req, res) => {
 })
 
 router.post('/credits/recharge', async (req, res) => {
-  const { userId, email, nickname, group, amount, note } = req.body || {}
+  const { amount, note } = req.body || {}
   try {
-    const result = await rechargeUserCredits({
-      userId: String(userId || '').trim(),
-      email: email ? String(email).trim() : null,
-      nickname: nickname ? String(nickname).trim() : null,
-      group: group ? String(group).trim() : null,
+    const result = await rechargeSiteCredits({
       amount,
       note: note ? String(note).trim() : null,
       actor: getAdminActor(req),

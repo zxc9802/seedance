@@ -31,14 +31,14 @@
   <div class="flex items-center justify-between mb-5">
     <div>
       <h1 class="text-2xl font-bold">积分中心</h1>
-      <p class="text-sm text-slate-400 mt-1">用户充值、余额、生成数量、生成时长和逐条扣费明细</p>
+      <p class="text-sm text-slate-400 mt-1">全站共享积分充值、员工生成数量、生成时长和逐条扣费明细</p>
     </div>
     <button class="btn btn-secondary" onclick="loadAll()">刷新</button>
   </div>
 
   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-5">
-    <div class="card"><div class="text-sm text-slate-400">用户数</div><div class="text-2xl font-bold" id="s-users">-</div></div>
-    <div class="card"><div class="text-sm text-slate-400">总余额</div><div class="text-2xl font-bold text-sky-300" id="s-balance">-</div></div>
+    <div class="card"><div class="text-sm text-slate-400">使用员工数</div><div class="text-2xl font-bold" id="s-users">-</div></div>
+    <div class="card"><div class="text-sm text-slate-400">站点余额</div><div class="text-2xl font-bold text-sky-300" id="s-balance">-</div></div>
     <div class="card"><div class="text-sm text-slate-400">总生成次数</div><div class="text-2xl font-bold" id="s-generations">-</div></div>
     <div class="card"><div class="text-sm text-slate-400">总消耗积分</div><div class="text-2xl font-bold text-amber-300" id="s-consumed">-</div></div>
   </div>
@@ -46,23 +46,21 @@
   <div class="grid grid-cols-1 lg:grid-cols-[1.5fr_1fr] gap-4 mb-5">
     <div class="card">
       <div class="flex items-center justify-between mb-3">
-        <h2 class="font-bold">用户余额</h2>
+        <h2 class="font-bold">员工使用</h2>
         <input id="user-search" placeholder="搜索用户/邮箱" oninput="renderUsers()" class="w-56">
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>用户</th><th>邮箱</th><th>余额</th><th>生成次数</th><th>生成数量</th><th>生成时长</th><th>消耗</th><th>最近生成</th></tr></thead>
+          <thead><tr><th>用户</th><th>邮箱</th><th>生成次数</th><th>生成数量</th><th>生成时长</th><th>消耗</th><th>最近生成</th></tr></thead>
           <tbody id="user-tbody"></tbody>
         </table>
       </div>
     </div>
 
     <div class="card">
-      <h2 class="font-bold mb-3">充值</h2>
+      <h2 class="font-bold mb-1">全站充值</h2>
+      <p class="text-sm text-slate-400 mb-3">充值后主站所有员工共用同一个站点余额</p>
       <div class="grid gap-3">
-        <label class="text-sm text-slate-400">用户 ID<input id="r-user-id" class="block w-full mt-1"></label>
-        <label class="text-sm text-slate-400">邮箱<input id="r-email" class="block w-full mt-1"></label>
-        <label class="text-sm text-slate-400">昵称<input id="r-nickname" class="block w-full mt-1"></label>
         <label class="text-sm text-slate-400">充值积分<input id="r-amount" type="number" min="0.01" step="0.01" class="block w-full mt-1"></label>
         <label class="text-sm text-slate-400">备注<textarea id="r-note" rows="3" class="block w-full mt-1"></textarea></label>
         <button class="btn btn-primary" onclick="recharge()">确认充值</button>
@@ -97,6 +95,14 @@
 <script>
 let TOKEN = localStorage.getItem('admin_token') || ''
 let users = []
+let siteSummary = {
+  balance: 0,
+  userCount: 0,
+  generationCount: 0,
+  outputCount: 0,
+  generatedSeconds: 0,
+  consumedCredits: 0,
+}
 let selectedUserId = ''
 
 function request(path, opts = {}) {
@@ -132,17 +138,22 @@ function login() {
 }
 
 async function loadAll() {
-  users = await request('/credits/users')
+  const [summary, userRows] = await Promise.all([
+    request('/credits/site'),
+    request('/credits/users'),
+  ])
+  siteSummary = summary
+  users = userRows
   renderSummary()
   renderUsers()
   await loadDetails(selectedUserId)
 }
 
 function renderSummary() {
-  document.getElementById('s-users').textContent = users.length
-  document.getElementById('s-balance').textContent = fmtCredit(users.reduce((sum, item) => sum + Number(item.balance || 0), 0))
-  document.getElementById('s-generations').textContent = users.reduce((sum, item) => sum + Number(item.generation_count || 0), 0)
-  document.getElementById('s-consumed').textContent = fmtCredit(users.reduce((sum, item) => sum + Number(item.consumed_credits || 0), 0))
+  document.getElementById('s-users').textContent = Number(siteSummary.userCount || 0)
+  document.getElementById('s-balance').textContent = fmtCredit(siteSummary.balance)
+  document.getElementById('s-generations').textContent = Number(siteSummary.generationCount || 0)
+  document.getElementById('s-consumed').textContent = fmtCredit(siteSummary.consumedCredits)
 }
 
 function renderUsers() {
@@ -155,7 +166,6 @@ function renderUsers() {
     <tr class="${user.user_id === selectedUserId ? 'active' : ''}" onclick="selectUser('${escAttr(user.user_id)}')">
       <td>${esc(user.user_nickname || user.user_id || '-')}</td>
       <td>${esc(user.user_email || '-')}</td>
-      <td>${fmtCredit(user.balance)}</td>
       <td>${Number(user.generation_count || 0)}</td>
       <td>${Number(user.output_count || 0)}</td>
       <td>${fmtSeconds(user.generated_seconds)}</td>
@@ -167,10 +177,6 @@ function renderUsers() {
 
 async function selectUser(userId) {
   selectedUserId = userId
-  const user = users.find((item) => item.user_id === userId)
-  document.getElementById('r-user-id').value = user?.user_id || ''
-  document.getElementById('r-email').value = user?.user_email || ''
-  document.getElementById('r-nickname').value = user?.user_nickname || ''
   renderUsers()
   await loadDetails(userId)
 }
@@ -189,14 +195,11 @@ async function loadDetails(userId = '') {
 
 async function recharge() {
   const body = {
-    userId: document.getElementById('r-user-id').value.trim(),
-    email: document.getElementById('r-email').value.trim(),
-    nickname: document.getElementById('r-nickname').value.trim(),
     amount: document.getElementById('r-amount').value,
     note: document.getElementById('r-note').value.trim(),
   }
-  if (!body.userId || !body.amount) {
-    alert('请填写用户 ID 和充值积分')
+  if (!body.amount) {
+    alert('请填写充值积分')
     return
   }
   document.getElementById('recharge-state').textContent = '正在充值...'
@@ -206,7 +209,6 @@ async function recharge() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    selectedUserId = body.userId
     document.getElementById('recharge-state').textContent = `充值成功，当前余额 ${fmtCredit(result.balance)}`
     document.getElementById('r-amount').value = ''
     await loadAll()

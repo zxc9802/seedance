@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import {
   calculateVideoCreditCharge,
   extractCreditUserInfo,
@@ -102,4 +103,22 @@ test('credit deduction waits for a successful video url', () => {
   assert.equal(shouldDeductCreditsForUsageUpdate({ status: 'succeeded', videoUrl: null }), false)
   assert.equal(shouldDeductCreditsForUsageUpdate({ status: 'succeeded', videoUrl: '' }), false)
   assert.equal(shouldDeductCreditsForUsageUpdate({ status: 'succeeded', videoUrl: 'https://cdn.example/a.mp4' }), true)
+})
+
+test('credit balance account is shared across all employees', async () => {
+  const credits = await import('../db/credits.js')
+
+  assert.equal(typeof credits.getCreditBalanceAccountId, 'function')
+  assert.equal(credits.getCreditBalanceAccountId({ userId: 'employee-a' }), credits.SITE_CREDIT_ACCOUNT_ID)
+  assert.equal(credits.getCreditBalanceAccountId({ userId: 'employee-b' }), credits.SITE_CREDIT_ACCOUNT_ID)
+})
+
+test('credit center recharge form targets site balance instead of an employee account', async () => {
+  const html = await readFile(new URL('../admin/credits.html', import.meta.url), 'utf8')
+
+  assert.match(html, /站点余额/)
+  assert.doesNotMatch(html, /用户 ID/)
+  assert.doesNotMatch(html, /id="r-user-id"/)
+  assert.doesNotMatch(html, /id="r-email"/)
+  assert.doesNotMatch(html, /id="r-nickname"/)
 })
