@@ -275,8 +275,12 @@ export default function PromptInput({
         setMediaError(error)
         continue
       }
+      const metadata = kind === 'videos' ? await readVideoMetadata(file).catch(() => null) : null
       const shouldUploadMaterial = kind === 'images' && usesSeedance1MaterialUpload
-      accepted.push(createLocalAsset(file, shouldUploadMaterial ? { uploadStatus: 'queued' } : null))
+      accepted.push(createLocalAsset(file, {
+        ...(shouldUploadMaterial ? { uploadStatus: 'queued' } : {}),
+        ...(metadata?.duration ? { duration: metadata.duration } : {}),
+      }))
     }
 
     if (accepted.length > 0) {

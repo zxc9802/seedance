@@ -91,6 +91,39 @@ export async function initDatabase() {
       )
     `)
 
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS user_credit_accounts (
+        user_id       TEXT PRIMARY KEY,
+        user_email    TEXT,
+        user_nickname TEXT,
+        user_group    TEXT,
+        balance       NUMERIC(12,2) NOT NULL DEFAULT 0,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS user_credit_transactions (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id       TEXT NOT NULL,
+        user_email    TEXT,
+        user_nickname TEXT,
+        user_group    TEXT,
+        type          TEXT NOT NULL,
+        amount        NUMERIC(12,2) NOT NULL,
+        balance_after NUMERIC(12,2) NOT NULL,
+        usage_log_id  UUID,
+        note          TEXT,
+        created_by    TEXT,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_user_id ON user_credit_transactions(user_id)`)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_created_at ON user_credit_transactions(created_at)`)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_usage_log_id ON user_credit_transactions(usage_log_id)`)
+
     console.log('[usage-db] Tables initialized successfully.')
   } catch (err) {
     console.error('[usage-db] Failed to initialize tables:', err.message)

@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs'
 import express from 'express'
 import multer from 'multer'
 import { getPool } from '../db/postgres.js'
+import { rechargeUserCredits } from '../db/credits.js'
 import { syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
 import { buildUsageChannelSql, formatUsageChannelLabel, resolveUsageChannel } from './usageChannel.js'
@@ -1054,6 +1055,110 @@ router.post('/cost-import/apply', async (req, res) => {
   } catch (err) {
     const status = getCostImportErrorStatus(err)
     res.status(status).json({ error: err.message || '费用导入失败' })
+  }
+})
+
+router.get('/credits/users', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json([])
+
+  try {
+    const result = await db.query(`
+      WITH usage_stats AS (
+        SELECT
+          user_id,
+          (array_agg(user_email ORDER BY created_at DESC) FILTER (WHERE user_email IS NOT NULL AND user_email <> ''))[1] AS user_email,
+          (array_agg(user_nickname ORDER BY created_at DESC) FILTER (WHERE user_nickname IS NOT NULL AND user_nickname <> ''))[1] AS user_nickname,
+          (array_agg(user_group ORDER BY created_at DESC) FILTER (WHERE user_group IS NOT NULL AND user_group <> ''))[1] AS user_group,
+          COUNT(*)::int AS generation_count,
+          COALESCE(SUM(GREATEST(COALESCE(sample_count, 1), 1)), 0)::int AS output_count,
+          COALESCE(SUM(duration * GREATEST(COALESCE(sample_count, 1), 1)), 0)::float AS generated_seconds,
+          COALESCE(SUM(estimated_cost), 0)::float AS consumed_credits,
+          MAX(created_at) AS last_generated_at
+        FROM video_usage_logs
+        GROUP BY user_id
+      )
+      SELECT
+        COALESCE(accounts.user_id, usage_stats.user_id) AS user_id,
+        COALESCE(accounts.user_email, usage_stats.user_email) AS user_email,
+        COALESCE(accounts.user_nickname, usage_stats.user_nickname) AS user_nickname,
+        COALESCE(accounts.user_group, usage_stats.user_group) AS user_group,
+        COALESCE(accounts.balance, 0)::float AS balance,
+        COALESCE(usage_stats.generation_count, 0)::int AS generation_count,
+        COALESCE(usage_stats.output_count, 0)::int AS output_count,
+        COALESCE(usage_stats.generated_seconds, 0)::float AS generated_seconds,
+        COALESCE(usage_stats.consumed_credits, 0)::float AS consumed_credits,
+        usage_stats.last_generated_at
+      FROM user_credit_accounts accounts
+      FULL OUTER JOIN usage_stats ON usage_stats.user_id = accounts.user_id
+      ORDER BY last_generated_at DESC NULLS LAST, user_id
+      LIMIT 300
+    `)
+    res.json(result.rows)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.post('/credits/recharge', async (req, res) => {
+  const { userId, email, nickname, group, amount, note } = req.body || {}
+  try {
+    const result = await rechargeUserCredits({
+      userId: String(userId || '').trim(),
+      email: email ? String(email).trim() : null,
+      nickname: nickname ? String(nickname).trim() : null,
+      group: group ? String(group).trim() : null,
+      amount,
+      note: note ? String(note).trim() : null,
+      actor: getAdminActor(req),
+    })
+    res.json({ success: true, ...result })
+  } catch (err) {
+    res.status(400).json({ error: err.message || '充值失败' })
+  }
+})
+
+router.get('/credits/transactions', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json([])
+  const userId = String(req.query.userId || '').trim()
+  const params = []
+  const where = userId ? 'WHERE user_id = $1' : ''
+  if (userId) params.push(userId)
+
+  try {
+    const result = await db.query(`
+      SELECT *
+      FROM user_credit_transactions
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT 200
+    `, params)
+    res.json(result.rows)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/credits/usage', async (req, res) => {
+  const db = getPool()
+  if (!db) return res.json([])
+  const userId = String(req.query.userId || '').trim()
+  const params = []
+  const where = userId ? 'WHERE user_id = $1' : ''
+  if (userId) params.push(userId)
+
+  try {
+    const result = await db.query(`
+      SELECT *
+      FROM video_usage_logs
+      ${where}
+      ORDER BY created_at DESC
+      LIMIT 300
+    `, params)
+    res.json(result.rows.map(enhanceUsageLog))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
   }
 })
 

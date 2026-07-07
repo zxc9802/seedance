@@ -57,6 +57,8 @@ export async function insertUsageLog({
   status = 'submitted',
   videoUrl = null,
   errorMessage = null,
+  unitPrice = null,
+  estimatedCost = null,
 }) {
   const db = getPool()
   if (!db) return null
@@ -76,8 +78,8 @@ export async function insertUsageLog({
         channel, provider_id, model, generation_mode,
         prompt, aspect_ratio, resolution, duration, sample_count, request_params,
         engine_task_id, upstream_request_id, upstream_trace_id, upstream_url,
-        status, video_url, error_message
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+        status, video_url, error_message, unit_price, estimated_cost
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
       RETURNING id`,
       [
         userId, email, nickname, group,
@@ -85,7 +87,7 @@ export async function insertUsageLog({
         prompt || null, aspectRatio || null, resolution || null, duration || null,
         sampleCount || 1, requestParams ? JSON.stringify(requestParams) : null,
         engineTaskId || null, upstreamRequestId || null, upstreamTraceId || null, upstreamUrl || null,
-        status, videoUrl, errorMessage,
+        status, videoUrl, errorMessage, unitPrice, estimatedCost,
       ]
     )
     const insertedId = result.rows[0]?.id || null
