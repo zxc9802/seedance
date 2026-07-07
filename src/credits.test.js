@@ -4,6 +4,7 @@ import {
   calculateVideoCreditCharge,
   extractCreditUserInfo,
   shouldChargeCreditsForProvider,
+  shouldDeductCreditsForUsageUpdate,
   normalizeCreditAmount,
 } from '../db/credits.js'
 
@@ -94,4 +95,11 @@ test('credit billing only applies to the seedance1 provider', () => {
   assert.equal(shouldChargeCreditsForProvider('wan1'), false)
   assert.equal(shouldChargeCreditsForProvider('veo31fast'), false)
   assert.equal(shouldChargeCreditsForProvider('seedance2'), false)
+})
+
+test('credit deduction waits for a successful video url', () => {
+  assert.equal(shouldDeductCreditsForUsageUpdate({ status: 'submitted', videoUrl: 'https://cdn.example/a.mp4' }), false)
+  assert.equal(shouldDeductCreditsForUsageUpdate({ status: 'succeeded', videoUrl: null }), false)
+  assert.equal(shouldDeductCreditsForUsageUpdate({ status: 'succeeded', videoUrl: '' }), false)
+  assert.equal(shouldDeductCreditsForUsageUpdate({ status: 'succeeded', videoUrl: 'https://cdn.example/a.mp4' }), true)
 })

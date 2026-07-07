@@ -12,7 +12,7 @@ import { promisify } from 'node:util'
 import { createServer as createViteServer, loadEnv } from 'vite'
 import { getPool, initDatabase, closePool } from './db/postgres.js'
 import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
-import { assertSufficientCredits, calculateVideoCreditCharge, deductUserCreditsForUsage, shouldChargeCreditsForProvider } from './db/credits.js'
+import { assertSufficientCredits, calculateVideoCreditCharge, shouldChargeCreditsForProvider } from './db/credits.js'
 import adminRouter from './admin/api.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -2665,18 +2665,6 @@ function insertChargedUsageLog(options, charge) {
     ...options,
     unitPrice: charge?.rate ?? null,
     estimatedCost: charge?.amount ?? null,
-  }).then((usageLogId) => {
-    if (usageLogId && charge?.amount > 0) {
-      deductUserCreditsForUsage({
-        session: options.session,
-        charge,
-        usageLogId,
-        note: `${charge.category === 'reference' ? '参考素材生成' : '文生视频'} ${charge.resolution} ${charge.billableSeconds}秒`,
-      }).catch((error) => {
-        console.error('[credits] deduct failed:', error.message)
-      })
-    }
-    return usageLogId
   })
 }
 

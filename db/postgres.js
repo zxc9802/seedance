@@ -123,6 +123,11 @@ export async function initDatabase() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_user_id ON user_credit_transactions(user_id)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_created_at ON user_credit_transactions(created_at)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_usage_log_id ON user_credit_transactions(usage_log_id)`)
+    await db.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_unique_consume_usage
+      ON user_credit_transactions(usage_log_id)
+      WHERE type = 'consume' AND usage_log_id IS NOT NULL
+    `)
 
     console.log('[usage-db] Tables initialized successfully.')
   } catch (err) {
