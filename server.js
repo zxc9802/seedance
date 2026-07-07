@@ -197,6 +197,7 @@ app.get('/api/health', (_, res) => {
     uploadTtlMinutes,
     publicBaseUrl: publicBaseUrl || null,
     requireMainAppSso,
+    adminCreditsPath: adminCreditsPath,
   })
 })
 
@@ -6662,16 +6663,18 @@ function resolveVideoSiteSessionSecret() {
 }
 
 function shouldBypassSso(req) {
+  const requestPath = resolveRequestPath(req)
   if (!requireMainAppSso) return true
-  if (req.path === '/api/health') return true
-  if (req.path === adminCreditsPath) return true
-  if (req.path.startsWith('/api/admin/credits/')) return true
-  if (req.path.startsWith('/temp-assets/')) return true
+  if (requestPath === '/api/health') return true
+  if (requestPath === adminCreditsPath) return true
+  if (requestPath === '/admin/credit-center') return true
+  if (requestPath.startsWith('/api/admin/credits/')) return true
+  if (requestPath.startsWith('/temp-assets/')) return true
   if (!isProduction && (
-    req.path.startsWith('/@vite')
-    || req.path.startsWith('/@react-refresh')
-    || req.path.startsWith('/src/')
-    || req.path.startsWith('/node_modules/')
+    requestPath.startsWith('/@vite')
+    || requestPath.startsWith('/@react-refresh')
+    || requestPath.startsWith('/src/')
+    || requestPath.startsWith('/node_modules/')
   )) {
     return true
   }
@@ -6679,21 +6682,34 @@ function shouldBypassSso(req) {
 }
 
 function isHtmlDocumentRequest(req) {
+  const requestPath = resolveRequestPath(req)
   if (req.method !== 'GET' && req.method !== 'HEAD') return false
-  if (req.path.startsWith('/api/')) return false
-  if (req.path.startsWith('/temp-assets/')) return false
-  if (path.extname(req.path)) return false
+  if (requestPath.startsWith('/api/')) return false
+  if (requestPath.startsWith('/temp-assets/')) return false
+  if (path.extname(requestPath)) return false
   if (!isProduction && (
-    req.path.startsWith('/@vite')
-    || req.path.startsWith('/@react-refresh')
-    || req.path.startsWith('/src/')
-    || req.path.startsWith('/node_modules/')
+    requestPath.startsWith('/@vite')
+    || requestPath.startsWith('/@react-refresh')
+    || requestPath.startsWith('/src/')
+    || requestPath.startsWith('/node_modules/')
   )) {
     return false
   }
 
   const accept = req.get('accept') || ''
   return !accept || accept.includes('text/html') || accept.includes('*/*')
+}
+
+function resolveRequestPath(req) {
+  if (typeof req?.path === 'string' && req.path) return req.path
+  const rawUrl = typeof req?.originalUrl === 'string' && req.originalUrl
+    ? req.originalUrl
+    : req?.url
+  try {
+    return new URL(rawUrl || '/', 'http://localhost').pathname
+  } catch {
+    return '/'
+  }
 }
 
 function parseCookieHeader(cookieHeader = '') {
