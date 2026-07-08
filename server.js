@@ -12,7 +12,10 @@ import { promisify } from 'node:util'
 import { createServer as createViteServer, loadEnv } from 'vite'
 import { getPool, initDatabase, closePool } from './db/postgres.js'
 import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
+import { assertSufficientCredits, calculateVideoCreditCharge, normalizeCreditProviderId, shouldChargeCreditsForProvider } from './db/credits.js'
 import adminRouter from './admin/api.js'
+import { startCreditHubSyncLoop } from './admin/creditHub.js'
+import creditAgentRouter from './credit/agentApi.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -64,6 +67,8 @@ const adminUserIdAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_IDS)
 const adminUserAccountAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_ACCOUNTS)
 const adminUserEmailAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_EMAILS)
 const adminUserNameAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_NAMES)
+const adminCreditsPath = normalizeAdminCreditsPath(process.env.ADMIN_CREDITS_PATH || '/admin/credit-center')
+const creditCenterMode = normalizeCreditCenterMode(process.env.CREDIT_CENTER_MODE || 'site')
 const hasExplicitAdminAllowlist = [
   adminUserIdAllowlist,
   adminUserAccountAllowlist,
@@ -195,6 +200,7 @@ app.get('/api/health', (_, res) => {
     uploadTtlMinutes,
     publicBaseUrl: publicBaseUrl || null,
     requireMainAppSso,
+    adminCreditsPath: adminCreditsPath,
   })
 })
 
@@ -472,6 +478,11 @@ app.post('/api/veo/generate', async (req, res) => {
   const body = req.body || {}
   const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
   const requestedParams = extractRequestedVideoParams(body)
+  const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
+  const providerId = body.providerId || 'veo'
+  const creditProviderId = normalizeCreditProviderId(providerId)
+  const creditCharge = await prepareVideoCreditCharge(req, res, creditProviderId, requestedParams, usageRequestParams)
+  if (shouldChargeCreditsForProvider(creditProviderId) && !creditCharge) return
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
@@ -479,10 +490,10 @@ app.post('/api/veo/generate', async (req, res) => {
   }, ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) return
     const taskId = extractAggregationTaskId(payload)
-    insertUsageLog({
+    insertChargedUsageLog({
       session: req.videoSiteSession,
       channel: 'aggregation',
-      providerId: body.providerId || null,
+      providerId: creditProviderId,
       model: requestedParams.model || null,
       generationMode: body.mode || 't2v',
       prompt: body.prompt || null,
@@ -490,14 +501,14 @@ app.post('/api/veo/generate', async (req, res) => {
       resolution: requestedParams.resolution || null,
       duration: requestedParams.duration ?? null,
       sampleCount: requestedParams.sampleCount || 1,
-      requestParams: attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
+      requestParams: usageRequestParams,
       engineTaskId: taskId || null,
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
       upstreamUrl: url,
       status: taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
       errorMessage: taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
-    }).catch(() => {})
+    }, creditCharge).catch(() => {})
   })
 })
 
@@ -1149,6 +1160,7 @@ app.post('/api/image/aggregation/generate', async (req, res) => {
   const body = req.body || {}
   const mediaSummary = parseUsageMediaSummaryHeader(req)
   const upstreamBody = normalizeAggregationImageGenerateBody(body)
+  const requestedSampleCount = Math.max(1, Math.trunc(Number(upstreamBody.n ?? body.sampleCount) || 1))
 
   await proxyJsonWithBody(req, res, `${imageAggregationApiBaseUrl}/openApi/generate`, upstreamBody, buildImageAggregationHeaders(), ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) return
@@ -1162,7 +1174,7 @@ app.post('/api/image/aggregation/generate', async (req, res) => {
       prompt: upstreamBody.prompt || null,
       aspectRatio: upstreamBody.payload?.params?.scale || null,
       resolution: upstreamBody.payload?.params?.resolution || null,
-      sampleCount: 1,
+      sampleCount: requestedSampleCount,
       requestParams: attachUsageMediaSummary({
         modelId: upstreamBody.modelId || null,
         abilityType: 'IMAGE',
@@ -1217,6 +1229,7 @@ app.post('/api/yunwu/generate', async (req, res) => {
     const body = req.body || {}
     const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
     const requestedParams = extractRequestedVideoParams(body)
+    const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
     const requestSpec = buildYunwuGenerateRequest(body)
     const upstream = await requestYunwu(requestSpec)
     const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
@@ -1232,7 +1245,7 @@ app.post('/api/yunwu/generate', async (req, res) => {
       aspectRatio: requestedParams.aspectRatio || null,
       resolution: requestedParams.resolution || null,
       duration: requestedParams.duration ?? null,
-      requestParams: attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
+      requestParams: usageRequestParams,
       engineTaskId: normalized.taskId || null,
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
@@ -1323,6 +1336,7 @@ app.post('/api/ark/generate', async (req, res) => {
     const body = req.body || {}
     const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
     const requestedParams = extractRequestedVideoParams(body)
+    const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
     const requestSpec = buildArkGenerateRequest(body)
     const upstream = await requestArk(requestSpec)
     const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
@@ -1338,7 +1352,7 @@ app.post('/api/ark/generate', async (req, res) => {
       aspectRatio: requestedParams.aspectRatio || null,
       resolution: requestedParams.resolution || null,
       duration: requestedParams.duration ?? null,
-      requestParams: attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
+      requestParams: usageRequestParams,
       engineTaskId: normalized.taskId || null,
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
@@ -1477,6 +1491,7 @@ app.post('/api/wan/generate', async (req, res) => {
     const body = req.body || {}
     const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
     const requestedParams = extractRequestedVideoParams(body)
+    const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
     const requestSpec = buildDashScopeWanGenerateRequest(body)
     const upstream = await requestDashScope(requestSpec)
     const traceMetadata = extractUpstreamTraceMetadata(upstream.response, upstream.payload)
@@ -1492,7 +1507,7 @@ app.post('/api/wan/generate', async (req, res) => {
       aspectRatio: requestedParams.aspectRatio || null,
       resolution: requestedParams.resolution || null,
       duration: requestedParams.duration ?? null,
-      requestParams: attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
+      requestParams: usageRequestParams,
       engineTaskId: normalized.taskId || null,
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
@@ -1575,6 +1590,13 @@ app.post('/api/dreamina/generate', async (req, res) => {
     const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
     const requestedParams = extractRequestedVideoParams(body)
     const requestSpec = await buildDreaminaGenerateRequest(body)
+    const finalRequestedParams = {
+      ...requestedParams,
+      resolution: requestSpec.resolution || requestedParams.resolution,
+      duration: requestSpec.duration ?? requestedParams.duration,
+      sampleCount: requestedParams.sampleCount || 1,
+    }
+    const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, finalRequestedParams), mediaSummary)
     const cliResult = await executeDreaminaCli(requestSpec.args)
     const normalized = normalizeDreaminaGenerateResponse(cliResult.payload, requestSpec)
     const terminalStatus = normalizeDreaminaTerminalUsageStatus(normalized.status)
@@ -1590,7 +1612,7 @@ app.post('/api/dreamina/generate', async (req, res) => {
       resolution: requestSpec.resolution || requestedParams.resolution || null,
       duration: requestSpec.duration ?? requestedParams.duration ?? null,
       sampleCount: requestedParams.sampleCount || 1,
-      requestParams: attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
+      requestParams: usageRequestParams,
       engineTaskId: normalized.taskId || null,
       upstreamUrl: `dreamina-cli://${requestSpec.command}`,
       status: terminalStatus || (normalized.taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW),
@@ -2609,6 +2631,51 @@ function extractRequestedVideoParams(requestBody) {
   }
 }
 
+async function prepareVideoCreditCharge(req, res, providerId, requestedParams, requestParams) {
+  if (!shouldChargeCreditsForProvider(providerId)) return null
+
+  const charge = calculateVideoCreditCharge({
+    providerId,
+    model: requestedParams.model,
+    resolution: requestedParams.resolution,
+    duration: requestedParams.duration,
+    sampleCount: requestedParams.sampleCount || 1,
+    requestParams,
+  })
+
+  if (charge.amount <= 0) return charge
+
+  try {
+    const creditStatus = await assertSufficientCredits(req.videoSiteSession, charge)
+    if (!creditStatus.ok) {
+      res.status(402).json({
+        success: false,
+        code: 'INSUFFICIENT_CREDITS',
+        message: `积分不足，本次需要 ${charge.amount} 积分，当前余额 ${creditStatus.balance || 0} 积分。`,
+        requiredCredits: charge.amount,
+        balance: creditStatus.balance || 0,
+      })
+      return null
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message || '积分校验失败',
+    })
+    return null
+  }
+
+  return charge
+}
+
+function insertChargedUsageLog(options, charge) {
+  return insertUsageLog({
+    ...options,
+    unitPrice: charge?.rate ?? null,
+    estimatedCost: charge?.amount ?? null,
+  })
+}
+
 function resolveUsageMediaSummary(requestParams, headerSummary) {
   if (headerSummary) {
     return headerSummary
@@ -2979,6 +3046,13 @@ app.post('/api/veo-fast/generate', async (req, res) => {
 
   const body = req.body || {}
   const mediaSummary = parseUsageMediaSummaryHeader(req)
+  const requestedParams = extractRequestedVideoParams(body)
+  const usageRequestParams = attachUsageMediaSummary({
+    model: normalizedBody?.model,
+    parameters: normalizedBody?.parameters,
+    referenceCounts: extractVeoFastReferenceCounts(normalizedBody),
+    requestedParams,
+  }, mediaSummary)
   await proxyJsonWithBody(req, res, `${veoFastGenerateUrl}/v1/video/generations`, normalizedBody, {
     Authorization: `Bearer ${apiKey}`,
   }, ({ payload, traceMetadata, status, url }) => {
@@ -2994,11 +3068,7 @@ app.post('/api/veo-fast/generate', async (req, res) => {
       aspectRatio: body.params?.aspectRatio || null,
       resolution: body.params?.resolution || null,
       duration: body.params?.duration || null,
-      requestParams: attachUsageMediaSummary({
-        model: normalizedBody?.model,
-        parameters: normalizedBody?.parameters,
-        referenceCounts: extractVeoFastReferenceCounts(normalizedBody),
-      }, mediaSummary),
+      requestParams: usageRequestParams,
       engineTaskId: taskId || null,
       upstreamRequestId: traceMetadata?.requestId || null,
       upstreamTraceId: traceMetadata?.traceId || null,
@@ -3107,9 +3177,20 @@ cleanupExpiredUploads().catch((error) => {
 })
 
 // Admin dashboard
+app.use('/api/credit-agent', creditAgentRouter)
 app.use('/api/admin', requireAdminApiAccess, adminRouter)
 app.get('/admin', requireAdminPageAccess, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'index.html'))
+})
+app.get(adminCreditsPath, (req, res) => {
+  const page = creditCenterMode === 'hub' ? 'credit-hub.html' : 'credits.html'
+  res.sendFile(path.join(__dirname, 'admin', page))
+})
+app.get('/admin/site-credit-center', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin', 'credits.html'))
+})
+app.get('/admin/credit-hub', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin', 'credit-hub.html'))
 })
 
 const httpServer = createHttpServer(app)
@@ -3144,6 +3225,7 @@ httpServer.listen(port, async () => {
   console.log(`[server] ${mode} listening on http://localhost:${port}`)
   await initDatabase()
   startUsageStatusMaintenanceLoop()
+  startCreditHubSyncLoop()
 })
 
 async function proxyJson(req, res, url, extraHeaders = {}, onResponse = null) {
@@ -6597,14 +6679,22 @@ function resolveVideoSiteSessionSecret() {
 }
 
 function shouldBypassSso(req) {
+  const requestPath = resolveRequestPath(req)
   if (!requireMainAppSso) return true
-  if (req.path === '/api/health') return true
-  if (req.path.startsWith('/temp-assets/')) return true
+  if (requestPath === '/api/health') return true
+  if (requestPath === adminCreditsPath) return true
+  if (requestPath === '/admin/credit-center') return true
+  if (requestPath === '/admin/site-credit-center') return true
+  if (requestPath === '/admin/credit-hub') return true
+  if (requestPath.startsWith('/api/admin/credits/')) return true
+  if (requestPath.startsWith('/api/admin/credit-hub/')) return true
+  if (requestPath.startsWith('/api/credit-agent/')) return true
+  if (requestPath.startsWith('/temp-assets/')) return true
   if (!isProduction && (
-    req.path.startsWith('/@vite')
-    || req.path.startsWith('/@react-refresh')
-    || req.path.startsWith('/src/')
-    || req.path.startsWith('/node_modules/')
+    requestPath.startsWith('/@vite')
+    || requestPath.startsWith('/@react-refresh')
+    || requestPath.startsWith('/src/')
+    || requestPath.startsWith('/node_modules/')
   )) {
     return true
   }
@@ -6612,21 +6702,34 @@ function shouldBypassSso(req) {
 }
 
 function isHtmlDocumentRequest(req) {
+  const requestPath = resolveRequestPath(req)
   if (req.method !== 'GET' && req.method !== 'HEAD') return false
-  if (req.path.startsWith('/api/')) return false
-  if (req.path.startsWith('/temp-assets/')) return false
-  if (path.extname(req.path)) return false
+  if (requestPath.startsWith('/api/')) return false
+  if (requestPath.startsWith('/temp-assets/')) return false
+  if (path.extname(requestPath)) return false
   if (!isProduction && (
-    req.path.startsWith('/@vite')
-    || req.path.startsWith('/@react-refresh')
-    || req.path.startsWith('/src/')
-    || req.path.startsWith('/node_modules/')
+    requestPath.startsWith('/@vite')
+    || requestPath.startsWith('/@react-refresh')
+    || requestPath.startsWith('/src/')
+    || requestPath.startsWith('/node_modules/')
   )) {
     return false
   }
 
   const accept = req.get('accept') || ''
   return !accept || accept.includes('text/html') || accept.includes('*/*')
+}
+
+function resolveRequestPath(req) {
+  if (typeof req?.path === 'string' && req.path) return req.path
+  const rawUrl = typeof req?.originalUrl === 'string' && req.originalUrl
+    ? req.originalUrl
+    : req?.url
+  try {
+    return new URL(rawUrl || '/', 'http://localhost').pathname
+  } catch {
+    return '/'
+  }
 }
 
 function parseCookieHeader(cookieHeader = '') {
@@ -6825,6 +6928,17 @@ function parseIdentityAllowlist(value) {
   )
 }
 
+function normalizeAdminCreditsPath(value) {
+  const normalized = String(value || '').trim()
+  if (!normalized || normalized === '/') return '/admin/credit-center'
+  return normalized.startsWith('/') ? normalized : `/${normalized}`
+}
+
+function normalizeCreditCenterMode(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'hub' ? 'hub' : 'site'
+}
+
 function normalizeIdentityValue(value) {
   if (value == null) return ''
   return String(value).trim().toLowerCase()
@@ -6932,6 +7046,11 @@ function isAdminRoleValue(value) {
 }
 
 function requireAdminApiAccess(req, res, next) {
+  if (req.path.startsWith('/credits/') || req.path.startsWith('/credit-hub/')) {
+    next()
+    return
+  }
+
   if (!requireMainAppSso) {
     next()
     return

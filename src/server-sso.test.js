@@ -41,3 +41,15 @@ test('/api/session rejects stale child-site cookies before returning a user', as
   assert.match(routeSource, /await requireFreshVideoSiteSession\(req, res\)/)
   assert.doesNotMatch(routeSource, /const session = req\.videoSiteSession \|\| resolveLocalDevSession\(\)/)
 })
+
+test('hidden credit center bypasses SSO using the original request url', async () => {
+  const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
+  const bypassStart = serverSource.indexOf('function shouldBypassSso(req)')
+  const bypassEnd = serverSource.indexOf('function isHtmlDocumentRequest(req)', bypassStart)
+  const bypassSource = serverSource.slice(bypassStart, bypassEnd)
+
+  assert.match(bypassSource, /resolveRequestPath\(req\)/)
+  assert.match(bypassSource, /requestPath === adminCreditsPath/)
+  assert.match(bypassSource, /requestPath\.startsWith\('\/api\/admin\/credits\/'\)/)
+  assert.match(serverSource, /adminCreditsPath: adminCreditsPath/)
+})

@@ -1352,6 +1352,7 @@ function serializeVideoAssetList(list) {
       name: asset.name,
       size: asset.size,
       mimeType: asset.mimeType,
+      duration: asset.duration || null,
       file: asset.file,
       url: asset.url || null,
       resourceRef: asset.resourceRef || null,
@@ -1387,6 +1388,7 @@ function normalizeUsageMediaMetric(items) {
   return {
     count: items.length,
     bytes: items.reduce((total, item) => total + Math.max(0, Number(item?.size) || 0), 0),
+    durationSeconds: items.reduce((total, item) => total + Math.max(0, Number(item?.duration) || 0), 0),
   }
 }
 
@@ -1500,6 +1502,7 @@ function hydrateVideoAsset(asset) {
     name: asset.name || file.name,
     size: asset.size ?? file.size,
     mimeType: asset.mimeType || file.type,
+    duration: asset.duration || null,
     previewUrl: canPreviewAsset(file.type) ? URL.createObjectURL(file) : '',
     url: asset.url || null,
     resourceRef: asset.resourceRef || null,
@@ -1959,6 +1962,7 @@ function buildVideoRequest(provider, params, prompt, mode, references) {
       'Content-Type': 'application/json',
     },
     body: {
+      providerId: provider,
       modelId: params.model,
       abilityType: 'VIDEO',
       prompt,

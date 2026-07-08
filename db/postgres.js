@@ -91,6 +91,108 @@ export async function initDatabase() {
       )
     `)
 
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS user_credit_accounts (
+        user_id       TEXT PRIMARY KEY,
+        user_email    TEXT,
+        user_nickname TEXT,
+        user_group    TEXT,
+        balance       NUMERIC(12,2) NOT NULL DEFAULT 0,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS user_credit_transactions (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id       TEXT NOT NULL,
+        user_email    TEXT,
+        user_nickname TEXT,
+        user_group    TEXT,
+        type          TEXT NOT NULL,
+        amount        NUMERIC(12,2) NOT NULL,
+        balance_after NUMERIC(12,2) NOT NULL,
+        usage_log_id  UUID,
+        note          TEXT,
+        created_by    TEXT,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_user_id ON user_credit_transactions(user_id)`)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_created_at ON user_credit_transactions(created_at)`)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_usage_log_id ON user_credit_transactions(usage_log_id)`)
+    await db.query(`ALTER TABLE user_credit_transactions ADD COLUMN IF NOT EXISTS request_id TEXT`)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_request_id ON user_credit_transactions(request_id)`)
+    await db.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_unique_consume_usage
+      ON user_credit_transactions(usage_log_id)
+      WHERE type = 'consume' AND usage_log_id IS NOT NULL
+    `)
+    await db.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_unique_recharge_request
+      ON user_credit_transactions(request_id)
+      WHERE type = 'recharge' AND request_id IS NOT NULL
+    `)
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS credit_hub_instances (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name             TEXT NOT NULL,
+        base_url         TEXT NOT NULL,
+        token_ciphertext TEXT NOT NULL,
+        token_hint       TEXT,
+        enabled          BOOLEAN NOT NULL DEFAULT TRUE,
+        note             TEXT,
+        last_sync_status TEXT,
+        last_sync_error  TEXT,
+        last_synced_at   TIMESTAMPTZ,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(name)
+      )
+    `)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_hub_instances_enabled ON credit_hub_instances(enabled)`)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_hub_instances_last_synced_at ON credit_hub_instances(last_synced_at)`)
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_hub_instances_base_url ON credit_hub_instances(base_url)`)
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS credit_hub_snapshots (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        instance_id         UUID NOT NULL REFERENCES credit_hub_instances(id) ON DELETE CASCADE,
+        balance             NUMERIC(12,2) NOT NULL DEFAULT 0,
+        total_consumed      NUMERIC(12,2) NOT NULL DEFAULT 0,
+        today_consumed      NUMERIC(12,2) NOT NULL DEFAULT 0,
+        total_generations   INT NOT NULL DEFAULT 0,
+        last_transaction_at TIMESTAMPTZ,
+        server_time         TIMESTAMPTZ,
+        status              TEXT NOT NULL DEFAULT 'online',
+        error_message       TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_hub_snapshots_instance_created ON credit_hub_snapshots(instance_id, created_at DESC)`)
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS credit_hub_actions (
+        id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        instance_id   UUID NOT NULL REFERENCES credit_hub_instances(id) ON DELETE CASCADE,
+        type          TEXT NOT NULL,
+        amount        NUMERIC(12,2),
+        request_id    TEXT,
+        note          TEXT,
+        status        TEXT NOT NULL DEFAULT 'pending',
+        error_message TEXT,
+        response      JSONB,
+        created_by    TEXT,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_hub_actions_instance_created ON credit_hub_actions(instance_id, created_at DESC)`)
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_hub_actions_request_id ON credit_hub_actions(request_id) WHERE request_id IS NOT NULL`)
+
     console.log('[usage-db] Tables initialized successfully.')
   } catch (err) {
     console.error('[usage-db] Failed to initialize tables:', err.message)
