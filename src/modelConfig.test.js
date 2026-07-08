@@ -54,7 +54,7 @@ test('public header exposes the current credit pricing explanation', async () =>
   assert.match(headerSource, /seedance2\.0[\s\S]*文生视频[\s\S]*480P: 2积分\/秒[\s\S]*720P: 4积分\/秒[\s\S]*1080P: 10积分\/秒/)
   assert.match(headerSource, /seedance2\.0 fast[\s\S]*文生视频[\s\S]*480P: 1积分\/秒[\s\S]*720P: 3积分\/秒/)
   assert.match(headerSource, /nanobanana企业稳定版[\s\S]*3\.5积分\/张/)
-  assert.match(headerStyle, /\.pricing-info-panel\s*\{[\s\S]*position: fixed;[\s\S]*left: calc\(50% \+ 180px\);[\s\S]*z-index: 80;[\s\S]*translateX\(-50%\)/)
+  assert.match(headerStyle, /\.pricing-info-panel\s*\{[\s\S]*position: fixed;[\s\S]*left: calc\(50% \+ 260px\);[\s\S]*z-index: 80;[\s\S]*translateX\(-50%\)/)
 })
 
 test('happyhorse exposes an open reference-image video provider locked to 720P', async () => {

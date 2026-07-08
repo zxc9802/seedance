@@ -35,7 +35,7 @@
 
 .pricing-info-panel {
   position: fixed;
-  left: calc(50% + 180px);
+  left: calc(50% + 260px);
   top: 62px;
   z-index: 80;
   width: min(860px, calc(100vw - 48px));
