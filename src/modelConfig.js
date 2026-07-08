@@ -1,4 +1,4 @@
-import { YUNWU_PROVIDER_ORDER, YUNWU_PROVIDERS } from './yunwuProviders'
+import { YUNWU_PROVIDERS } from './yunwuProviders'
 
 const IMAGE_PROVIDER_NAME = readClientEnv('VITE_IMAGE_PROVIDER_NAME', 'nanobanana1')
 const IMAGE_PROVIDER_SELECTOR_LABEL = readClientEnv('VITE_IMAGE_PROVIDER_SELECTOR_LABEL', 'nanobanana1')
@@ -6,8 +6,6 @@ const IMAGE_PROVIDER_VENDOR = readClientEnv('VITE_IMAGE_PROVIDER_VENDOR', 'Gemin
 const IMAGE_MODEL_ID = readClientEnv('VITE_IMAGE_MODEL_ID', 'gemini-3.1-flash-image-preview')
 const IMAGE_MODEL_LABEL = readClientEnv('VITE_IMAGE_MODEL_LABEL', 'Gemini 3.1 Flash')
 const IMAGE_MODEL_TAG = readClientEnv('VITE_IMAGE_MODEL_TAG', 'native')
-const IMAGE_AGGREGATION_PROVIDER_NAME = readClientEnv('VITE_IMAGE_AGGREGATION_PROVIDER_NAME', 'nanobanana2')
-const IMAGE_AGGREGATION_PROVIDER_SELECTOR_LABEL = readClientEnv('VITE_IMAGE_AGGREGATION_PROVIDER_SELECTOR_LABEL', 'nanobanana2')
 const IMAGE_AGGREGATION_PROVIDER_VENDOR = readClientEnv('VITE_IMAGE_AGGREGATION_PROVIDER_VENDOR', 'AI Aggregation')
 const IMAGE_AGGREGATION_MODEL_ID = readClientEnv('VITE_IMAGE_AGGREGATION_MODEL_ID', 'gemini-3.1-flash-image-preview')
 const IMAGE_AGGREGATION_MODEL_LABEL = readClientEnv('VITE_IMAGE_AGGREGATION_MODEL_LABEL', 'Gemini 3.1 Flash')
@@ -18,8 +16,8 @@ const BASE_PROVIDERS = {
     id: 'veo',
     typeId: 'seedance',
     typeLabel: 'Seedance',
-    selectorLabel: 'seedance1',
-    name: 'Seedance 1',
+    selectorLabel: 'seedance企业稳定版',
+    name: 'seedance企业稳定版',
     vendor: '聚合 API',
     color: '#2563eb',
     models: [
@@ -444,8 +442,8 @@ const BASE_PROVIDERS = {
     id: 'gemini-image-aggregation',
     typeId: 'image',
     typeLabel: 'Image',
-    selectorLabel: IMAGE_AGGREGATION_PROVIDER_SELECTOR_LABEL,
-    name: IMAGE_AGGREGATION_PROVIDER_NAME,
+    selectorLabel: 'nanobanana企业稳定版',
+    name: 'nanobanana企业稳定版',
     vendor: IMAGE_AGGREGATION_PROVIDER_VENDOR,
     color: '#ef4444',
     outputType: 'image',
@@ -546,18 +544,12 @@ export const PROVIDERS = {
 
 const BASE_PROVIDER_ORDER = [
   'veo',
-  've31p',
-  'veo31fast',
-  'kling',
-  'wan1',
-  'gemini-image',
   'gpt-image2',
   'gemini-image-aggregation',
-  'claude1-copywriting',
-  'bcai-copywriting',
+  'happyhorse',
 ]
 
-export const PROVIDER_ORDER = [...BASE_PROVIDER_ORDER, ...YUNWU_PROVIDER_ORDER]
+export const PROVIDER_ORDER = BASE_PROVIDER_ORDER
 
 export const MODEL_TYPES = PROVIDER_ORDER.reduce((acc, providerId) => {
   const config = PROVIDERS[providerId]

@@ -21,9 +21,25 @@ async function loadProviders() {
 test('Seedance 1 exposes 480p through 4K resolution options while defaulting to 720p', async () => {
   const providers = await loadProviders()
 
+  assert.equal(providers.veo.selectorLabel, 'seedance企业稳定版')
+  assert.equal(providers.veo.name, 'seedance企业稳定版')
   assert.deepEqual(providers.veo.resolutions.default, ['480p', '720p', '1080p', '4K'])
   assert.equal(providers.veo.defaults.resolution, '720p')
   assert.equal(providers.veo.defaults.imageMaterialType, 'role')
+})
+
+test('main model selector only shows the approved provider entries', async () => {
+  const { PROVIDERS, PROVIDER_ORDER, MODEL_TYPES } = await loadModelConfig()
+
+  assert.deepEqual(PROVIDER_ORDER, ['veo', 'gpt-image2', 'gemini-image-aggregation', 'happyhorse'])
+  assert.equal(PROVIDERS['gemini-image-aggregation'].selectorLabel, 'nanobanana企业稳定版')
+  assert.equal(PROVIDERS['gemini-image-aggregation'].name, 'nanobanana企业稳定版')
+  assert.deepEqual(MODEL_TYPES.seedance.providers, ['veo'])
+  assert.deepEqual(MODEL_TYPES.image.providers, ['gpt-image2', 'gemini-image-aggregation'])
+  assert.equal(MODEL_TYPES.veo, undefined)
+  assert.equal(MODEL_TYPES.kling, undefined)
+  assert.equal(MODEL_TYPES.wan, undefined)
+  assert.equal(MODEL_TYPES.copywriting, undefined)
 })
 
 test('happyhorse exposes an open reference-image video provider locked to 720P', async () => {
