@@ -2633,6 +2633,8 @@ async function prepareVideoCreditCharge(req, res, providerId, requestedParams, r
   if (!shouldChargeCreditsForProvider(providerId)) return null
 
   const charge = calculateVideoCreditCharge({
+    providerId,
+    model: requestedParams.model,
     resolution: requestedParams.resolution,
     duration: requestedParams.duration,
     sampleCount: requestedParams.sampleCount || 1,

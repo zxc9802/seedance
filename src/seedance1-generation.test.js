@@ -29,6 +29,13 @@ test('seedance1 exposes the Seedance 2 fast model on the same channel', async ()
   assert.ok(seedance1.models.some((model) => model.value === 'doubao-seedance-2-0-fast-260128'))
 })
 
+test('seedance1 limits Seedance 2 fast model to 480p and 720p', async () => {
+  const providers = await loadProviders()
+  const seedance1 = providers.veo
+
+  assert.deepEqual(seedance1.resolutions['doubao-seedance-2-0-fast-260128'], ['480p', '720p'])
+})
+
 test('seedance1 defaults Seedance 2 models to person material review', async () => {
   const providers = await loadProviders()
   const seedance1 = providers.veo

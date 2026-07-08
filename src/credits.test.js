@@ -32,6 +32,110 @@ test('text-to-video credit charge uses the base resolution rate per generated se
   })
 })
 
+test('seedance2 fast model on seedance1 channel uses its own 480p and 720p rates', () => {
+  const standardCharge = calculateVideoCreditCharge({
+    providerId: 'seedance1',
+    model: 'doubao-seedance-2-0-260128',
+    resolution: '720p',
+    duration: 5,
+    sampleCount: 1,
+    requestParams: {
+      mediaSummary: {
+        images: { count: 0 },
+        videos: { count: 0 },
+      },
+    },
+  })
+  const fast480TextCharge = calculateVideoCreditCharge({
+    providerId: 'seedance1',
+    model: 'doubao-seedance-2-0-fast-260128',
+    resolution: '480p',
+    duration: 5,
+    sampleCount: 1,
+    requestParams: {
+      mediaSummary: {
+        images: { count: 0 },
+        videos: { count: 0 },
+      },
+    },
+  })
+  const fast720TextCharge = calculateVideoCreditCharge({
+    providerId: 'seedance1',
+    model: 'doubao-seedance-2-0-fast-260128',
+    resolution: '720p',
+    duration: 5,
+    sampleCount: 1,
+    requestParams: {
+      mediaSummary: {
+        images: { count: 0 },
+        videos: { count: 0 },
+      },
+    },
+  })
+  const fast480InputVideoCharge = calculateVideoCreditCharge({
+    providerId: 'seedance1',
+    model: 'doubao-seedance-2-0-fast-260128',
+    resolution: '480p',
+    duration: 5,
+    sampleCount: 1,
+    requestParams: {
+      mediaSummary: {
+        images: { count: 0 },
+        videos: { count: 1, durationSeconds: 3 },
+      },
+    },
+  })
+  const fast720InputVideoCharge = calculateVideoCreditCharge({
+    providerId: 'seedance1',
+    model: 'doubao-seedance-2-0-fast-260128',
+    resolution: '720p',
+    duration: 5,
+    sampleCount: 1,
+    requestParams: {
+      mediaSummary: {
+        images: { count: 0 },
+        videos: { count: 1, durationSeconds: 3 },
+      },
+    },
+  })
+
+  assert.deepEqual(standardCharge, {
+    category: 'text',
+    resolution: '720p',
+    rate: 3.05,
+    billableSeconds: 5,
+    amount: 15.25,
+  })
+  assert.deepEqual(fast480TextCharge, {
+    category: 'text',
+    resolution: '480p',
+    rate: 2,
+    billableSeconds: 5,
+    amount: 10,
+  })
+  assert.deepEqual(fast720TextCharge, {
+    category: 'text',
+    resolution: '720p',
+    rate: 4.05,
+    billableSeconds: 5,
+    amount: 20.25,
+  })
+  assert.deepEqual(fast480InputVideoCharge, {
+    category: 'reference',
+    resolution: '480p',
+    rate: 1.2,
+    billableSeconds: 8,
+    amount: 9.6,
+  })
+  assert.deepEqual(fast720InputVideoCharge, {
+    category: 'reference',
+    resolution: '720p',
+    rate: 2.5,
+    billableSeconds: 8,
+    amount: 20,
+  })
+})
+
 test('reference credit charge uses reference rates and includes reference video length', () => {
   const charge = calculateVideoCreditCharge({
     resolution: '720p',

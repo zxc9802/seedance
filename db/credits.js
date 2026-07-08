@@ -17,6 +17,15 @@ const REFERENCE_VIDEO_RATES = Object.freeze({
 const NANOBANANA2_IMAGE_RATE = 2.412
 const IMAGE_CREDIT_BILLED_PROVIDERS = new Set(['gemini-image-aggregation'])
 const CREDIT_BILLED_PROVIDERS = new Set(['veo', 'seedance1', ...IMAGE_CREDIT_BILLED_PROVIDERS])
+const SEEDANCE1_FAST_MODELS = new Set(['doubao-seedance-2-0-fast-260128'])
+const SEEDANCE1_FAST_TEXT_VIDEO_RATES = Object.freeze({
+  '480p': 2,
+  '720p': 4.05,
+})
+const SEEDANCE1_FAST_INPUT_VIDEO_RATES = Object.freeze({
+  '480p': 1.2,
+  '720p': 2.5,
+})
 export const CREDITS_PER_CNY = 5
 export const SITE_CREDIT_ACCOUNT_ID = '__site_shared_credits__'
 
@@ -33,6 +42,12 @@ export function shouldChargeCreditsForProvider(providerId) {
 
 function shouldChargeImageCreditsForProvider(providerId) {
   return IMAGE_CREDIT_BILLED_PROVIDERS.has(String(providerId || '').trim().toLowerCase())
+}
+
+function isSeedance1FastModel(log) {
+  const providerId = String(log?.providerId ?? log?.provider_id ?? '').trim().toLowerCase()
+  const model = String(log?.model ?? log?.requestParams?.requestedParams?.model ?? '').trim().toLowerCase()
+  return providerId === 'seedance1' && SEEDANCE1_FAST_MODELS.has(model)
 }
 
 export function getCreditBalanceAccountId() {
@@ -99,7 +114,10 @@ export function calculateVideoCreditCharge(log) {
   const referenceVideoSeconds = Math.max(0, Number(mediaSummary?.videos?.durationSeconds) || 0)
   const category = imageCount + videoCount > 0 ? 'reference' : 'text'
   const rates = category === 'reference' ? REFERENCE_VIDEO_RATES : TEXT_VIDEO_RATES
-  const rate = rates[resolution] || rates['720p']
+  const fastRates = videoCount > 0 ? SEEDANCE1_FAST_INPUT_VIDEO_RATES : SEEDANCE1_FAST_TEXT_VIDEO_RATES
+  const rate = isSeedance1FastModel(log)
+    ? (fastRates[resolution] || fastRates['720p'])
+    : (rates[resolution] || rates['720p'])
   const billableSeconds = (duration * sampleCount) + (category === 'reference' ? referenceVideoSeconds : 0)
   const amount = Number((rate * billableSeconds).toFixed(2))
 
