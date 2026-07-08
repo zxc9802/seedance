@@ -35,7 +35,7 @@
   }
   table {
     width: 100%;
-    min-width: 1660px;
+    min-width: 1500px;
     border-collapse: collapse;
     table-layout: fixed;
   }
@@ -186,16 +186,16 @@
   </div>
 
   <div id="tab-overview">
-    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
       <div class="card"><div class="text-sm text-gray-400 mb-1" id="s-range-label">今日请求</div><div class="stat-value text-blue-400" id="s-today">-</div></div>
       <div class="card"><div class="text-sm text-gray-400 mb-1">总请求数</div><div class="stat-value text-white" id="s-total">-</div></div>
-      <div class="card"><div class="text-sm text-gray-400 mb-1">剩余积分</div><div class="stat-value text-sky-400" id="s-credit-balance">-</div></div>
-      <div class="card"><div class="text-sm text-gray-400 mb-1">消耗积分</div><div class="stat-value text-amber-300" id="s-credit-consumed">-</div></div>
-      <div class="card"><div class="text-sm text-gray-400 mb-1">费用</div><div class="stat-value text-yellow-400" id="s-cost">-</div></div>
+      <div class="card"><div class="text-sm text-gray-400 mb-1">成功率</div><div class="stat-value text-green-400" id="s-rate">-</div></div>
+      <div class="card"><div class="text-sm text-gray-400 mb-1">预估费用</div><div class="stat-value text-yellow-400" id="s-cost">-</div></div>
       <div class="card"><div class="text-sm text-gray-400 mb-1">活跃用户</div><div class="stat-value text-purple-400" id="s-users">-</div></div>
     </div>
-    <div class="grid grid-cols-1 gap-4 mb-6">
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
       <div class="card"><canvas id="trendChart" height="200"></canvas></div>
+      <div class="card"><canvas id="channelChart" height="200"></canvas></div>
     </div>
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <div class="card"><canvas id="modelChart" height="200"></canvas></div>
@@ -205,10 +205,52 @@
 
   <div id="tab-detail" style="display:none">
     <div class="card mb-4">
+      <div class="flex flex-col gap-4">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 class="text-lg font-bold">费用导入</h3>
+            <p class="text-sm text-gray-400 mt-1">先选择通道，再上传供应商 Excel/CSV。系统按当前通道内的 engine_task_id 预检，确认后覆盖写入现有费用列。</p>
+          </div>
+          <div id="cost-import-state" class="text-sm text-gray-400">请选择通道并上传文件后预检</div>
+        </div>
+        <div class="flex flex-wrap gap-3 items-end">
+          <div>
+            <label class="text-xs text-gray-400">导入通道</label>
+            <select id="ci-channel" class="block mt-1" onchange="handleCostImportSourceChange()">
+              <option value="">请选择通道</option>
+              <option value="aggregation">国达丰</option>
+              <option value="zhouzong">周总</option>
+            </select>
+          </div>
+          <div class="min-w-[260px]">
+            <label class="text-xs text-gray-400">文件</label>
+            <input id="ci-file" type="file" accept=".xlsx,.xls,.csv" class="block mt-1 w-full" onchange="handleCostImportSourceChange()">
+          </div>
+          <button id="ci-preview-btn" class="btn btn-primary mt-auto" onclick="previewCostImport()">预检</button>
+          <button id="ci-apply-btn" class="btn btn-secondary mt-auto" onclick="applyCostImport()" disabled>确认导入</button>
+          <button class="btn btn-secondary mt-auto" onclick="resetCostImportState(true)">清空</button>
+        </div>
+        <div id="cost-import-summary" style="display:none"></div>
+        <div id="cost-import-result" style="display:none"></div>
+      </div>
+    </div>
+    <div class="card mb-4">
       <div class="flex flex-wrap gap-3 items-end">
+        <div>
+          <label class="text-xs text-gray-400">通道</label>
+          <select id="f-channel" class="block mt-1">
+            <option value="">全部</option>
+            <option value="aggregation">国达丰</option>
+            <option value="zhouzong">周总</option>
+          </select>
+        </div>
         <div>
           <label class="text-xs text-gray-400">模型</label>
           <input id="f-model" class="block mt-1" placeholder="模型名">
+        </div>
+        <div>
+          <label class="text-xs text-gray-400">task_id</label>
+          <input id="f-task-id" class="block mt-1" placeholder="engine_task_id">
         </div>
         <div>
           <label class="text-xs text-gray-400">状态</label>
@@ -261,7 +303,6 @@
             <th>engine_task_id</th>
             <th>upstream_url</th>
             <th>错误信息</th>
-            <th>消耗积分</th>
             <th>费用</th>
           </tr>
         </thead>
@@ -309,8 +350,7 @@
             <th>生成数量</th>
             <th>成功</th>
             <th>失败</th>
-            <th>消耗积分</th>
-            <th>费用</th>
+            <th>预估费用</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -340,7 +380,6 @@
               <th>engine_task_id</th>
               <th>upstream_url</th>
               <th>错误信息</th>
-              <th>消耗积分</th>
               <th>费用</th>
             </tr>
           </thead>
@@ -361,8 +400,15 @@ let activeUserQuickDateRange = ''
 let currentUserDetailId = ''
 let currentUserDetailName = ''
 let charts = {}
+let costImportPreviewToken = ''
+let costImportLastResult = null
 
-const CHANNEL_LABEL = '起芽'
+const CHANNEL_LABELS = {
+  aggregation: '国达丰',
+  zhouzong: '周总',
+  veo_fast: '周总',
+  image: '周总',
+}
 
 const STATUS_LABELS = {
   submitted: '已提交',
@@ -377,6 +423,16 @@ const STATUS_LABELS = {
 }
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1']
+const COST_IMPORT_STATUS_META = {
+  writable: { label: '可写入', className: 'text-sky-400' },
+  applied: { label: '已写入', className: 'text-green-400' },
+  overwritten: { label: '已覆盖', className: 'text-yellow-400' },
+  invalid: { label: '无效', className: 'text-red-400' },
+  unmatched: { label: '未匹配', className: 'text-amber-400' },
+  conflict: { label: '冲突', className: 'text-orange-400' },
+  duplicate_ignored: { label: '重复忽略', className: 'text-slate-400' },
+  skipped: { label: '跳过', className: 'text-slate-400' },
+}
 
 function api(path, opts = {}) {
   const days = document.getElementById('dayRange')?.value || '30'
@@ -479,10 +535,11 @@ function getOverviewRangeLabel(range) {
 async function refreshAll() {
   try {
     const selectedRange = getSelectedOverviewRange()
-    const [overview, trend, models, rawUsers] = await Promise.all([
+    const [overview, trend, models, channels, rawUsers] = await Promise.all([
       api('/overview'),
       api('/trend'),
       api('/by-model'),
+      api('/by-channel'),
       api('/by-user?limit=100'),
     ])
     const users = mergeUsersByName(rawUsers).slice(0, 20)
@@ -490,12 +547,12 @@ async function refreshAll() {
     document.getElementById('s-range-label').textContent = getOverviewRangeLabel(selectedRange)
     document.getElementById('s-today').textContent = overview.rangeRequests ?? overview.todayRequests ?? 0
     document.getElementById('s-total').textContent = overview.totalRequests ?? 0
-    document.getElementById('s-credit-balance').textContent = formatCredits(overview.creditBalance)
-    document.getElementById('s-credit-consumed').textContent = formatCredits(overview.creditConsumed)
-    document.getElementById('s-cost').textContent = formatMoney(overview.creditCost ?? overview.totalCost)
+    document.getElementById('s-rate').textContent = `${overview.successRate ?? 0}%`
+    document.getElementById('s-cost').textContent = `¥${Number(overview.totalCost ?? 0).toFixed(2)}`
     document.getElementById('s-users').textContent = overview.activeUsers ?? 0
 
     renderTrendChart(trend)
+    renderChannelChart(channels)
     renderModelChart(models)
     renderUserRankChart(users)
 
@@ -547,8 +604,44 @@ function renderTrendChart(data) {
   })
 }
 
-function formatChannel() {
-  return CHANNEL_LABEL
+function formatChannel(channel) {
+  return CHANNEL_LABELS[channel] || channel || '-'
+}
+
+function mergeChannelRows(data) {
+  const merged = new Map()
+
+  data.forEach((item) => {
+    const label = formatChannel(item.channel)
+    if (!merged.has(label)) {
+      merged.set(label, {
+        channel: label,
+        requests: 0,
+      })
+    }
+    merged.get(label).requests += Number(item.requests) || 0
+  })
+
+  return Array.from(merged.values()).sort((left, right) => right.requests - left.requests)
+}
+
+function renderChannelChart(data) {
+  destroyChart('channel')
+  const mergedData = mergeChannelRows(data)
+  charts.channel = new Chart(document.getElementById('channelChart'), {
+    type: 'doughnut',
+    data: {
+      labels: mergedData.map((item) => item.channel),
+      datasets: [{ data: mergedData.map((item) => item.requests), backgroundColor: COLORS }],
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        title: { display: true, text: '通道用量分布', color: '#e2e8f0' },
+        legend: { labels: { color: '#94a3b8' } },
+      },
+    },
+  })
 }
 
 function renderModelChart(data) {
@@ -604,14 +697,7 @@ function formatStatus(status) {
 
 function formatMoney(value) {
   if (value === null || value === undefined || value === '') return '-'
-  const amount = Number(value)
-  return Number.isFinite(amount) ? `¥${amount.toFixed(2)}` : '-'
-}
-
-function formatCredits(value) {
-  if (value === null || value === undefined || value === '') return '-'
-  const amount = Number(value)
-  return Number.isFinite(amount) ? amount.toFixed(2) : '-'
+  return `¥${Number(value).toFixed(2)}`
 }
 
 function formatDurationLabel(value) {
@@ -652,8 +738,6 @@ function mergeUsersByName(rows = []) {
         succeeded: 0,
         failed: 0,
         estimated_cost: 0,
-        credit_spent: 0,
-        credit_cost: 0,
       })
     }
 
@@ -673,8 +757,6 @@ function mergeUsersByName(rows = []) {
     target.succeeded += Number(user.succeeded) || 0
     target.failed += Number(user.failed) || 0
     target.estimated_cost += Number(user.estimated_cost) || 0
-    target.credit_spent += Number(user.credit_spent) || 0
-    target.credit_cost += Number(user.credit_cost) || 0
   })
 
   return [...grouped.values()]
@@ -692,13 +774,11 @@ function mergeUsersByName(rows = []) {
         succeeded: user.succeeded,
         failed: user.failed,
         estimated_cost: user.estimated_cost,
-        credit_spent: user.credit_spent,
-        credit_cost: user.credit_cost,
       }
     })
     .sort((left, right) => {
       if (right.requests !== left.requests) return right.requests - left.requests
-      if (right.credit_spent !== left.credit_spent) return right.credit_spent - left.credit_spent
+      if (right.estimated_cost !== left.estimated_cost) return right.estimated_cost - left.estimated_cost
       return String(left.user_name).localeCompare(String(right.user_name), 'zh-CN')
     })
 }
@@ -827,10 +907,286 @@ function handleUserCustomDateChange() {
   syncUserQuickDateButtons()
 }
 
+function getCostImportSelection() {
+  return {
+    channel: document.getElementById('ci-channel')?.value || '',
+    file: document.getElementById('ci-file')?.files?.[0] || null,
+  }
+}
+
+function clearCostImportPanels() {
+  const summary = document.getElementById('cost-import-summary')
+  const result = document.getElementById('cost-import-result')
+  if (summary) {
+    summary.style.display = 'none'
+    summary.innerHTML = ''
+  }
+  if (result) {
+    result.style.display = 'none'
+    result.innerHTML = ''
+  }
+}
+
+function setCostImportStateText(text, colorClass = 'text-gray-400') {
+  const state = document.getElementById('cost-import-state')
+  if (!state) return
+  state.className = `text-sm ${colorClass}`
+  state.textContent = text
+}
+
+function syncCostImportButtons(isBusy = false) {
+  const previewBtn = document.getElementById('ci-preview-btn')
+  const applyBtn = document.getElementById('ci-apply-btn')
+  const canApply = !isBusy && !!costImportPreviewToken && (Number(costImportLastResult?.summary?.writableRows) || 0) > 0
+
+  if (previewBtn) {
+    previewBtn.disabled = isBusy
+  }
+  if (applyBtn) {
+    applyBtn.disabled = !canApply
+  }
+}
+
+function updateCostImportIdleState() {
+  const { channel, file } = getCostImportSelection()
+  if (file && channel) {
+    setCostImportStateText(`已选择 ${formatChannel(channel)} / ${file.name}，请先预检`, 'text-gray-400')
+    return
+  }
+  if (file) {
+    setCostImportStateText(`已选择文件 ${file.name}，请补充通道`, 'text-gray-400')
+    return
+  }
+  setCostImportStateText('请选择通道并上传文件后预检', 'text-gray-400')
+}
+
+function handleCostImportSourceChange() {
+  costImportPreviewToken = ''
+  costImportLastResult = null
+  clearCostImportPanels()
+  syncCostImportButtons(false)
+  updateCostImportIdleState()
+}
+
+function resetCostImportState(clearFile = false) {
+  costImportPreviewToken = ''
+  costImportLastResult = null
+  if (clearFile) {
+    const fileInput = document.getElementById('ci-file')
+    if (fileInput) {
+      fileInput.value = ''
+    }
+  }
+  clearCostImportPanels()
+  syncCostImportButtons(false)
+  updateCostImportIdleState()
+}
+
+function renderCostImportResult(result, mode) {
+  costImportLastResult = result
+
+  const summary = result.summary || {}
+  const applyResult = result.applyResult || {}
+  const summaryEl = document.getElementById('cost-import-summary')
+  const resultEl = document.getElementById('cost-import-result')
+  const summaryItems = [
+    ['总行数', summary.totalRows ?? 0],
+    ['有效行数', summary.effectiveRows ?? 0],
+    ['有效金额', formatMoney(summary.validAmount ?? 0)],
+    ['可写入', summary.writableRows ?? 0],
+    ['可写入金额', formatMoney(summary.writableAmount ?? 0)],
+    ['未匹配', summary.unmatchedRows ?? 0],
+    ['冲突', summary.conflictRows ?? 0],
+    ['无效', summary.invalidRows ?? 0],
+    ['文件重复行', summary.duplicateRowCount ?? 0],
+  ]
+
+  if (mode === 'apply') {
+    summaryItems.unshift(['写入跳过', applyResult.skippedRows ?? 0])
+    summaryItems.unshift(['成功更新', applyResult.updatedRows ?? 0])
+    summaryItems.unshift(['覆盖旧值', applyResult.overwrittenRows ?? 0])
+  }
+
+  summaryEl.innerHTML = `
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+      ${summaryItems.map(([label, value]) => `
+        <div class="rounded-lg border border-slate-700 bg-slate-950/50 px-3 py-3">
+          <div class="text-xs text-gray-400">${esc(label)}</div>
+          <div class="text-lg font-semibold mt-1">${esc(value)}</div>
+        </div>
+      `).join('')}
+    </div>
+    <div class="mt-3 text-sm text-gray-400">
+      文件：${esc(result.fileName || '-')}，
+      通道：${esc(formatChannel(result.channel))}，
+      识别列：task_id = ${esc(result.recognizedColumns?.taskId || '-')},
+      金额 = ${esc(result.recognizedColumns?.amount || '-')},
+      重复 task_id 数 = ${esc(summary.duplicateTaskIdCount ?? 0)}
+    </div>
+  `
+  summaryEl.style.display = 'block'
+
+  const rows = Array.isArray(result.detailRows) ? result.detailRows : []
+  resultEl.innerHTML = rows.length > 0
+    ? `
+      <div class="rounded-lg border border-slate-700">
+        <div class="px-4 py-3 border-b border-slate-700 text-sm text-gray-300">
+          ${mode === 'apply' ? '导入结果明细' : '预检结果明细'}
+        </div>
+        <div class="table-wrap" style="max-height: 420px; overflow: auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>行号</th>
+                <th>task_id</th>
+                <th>原始金额</th>
+                <th>识别金额</th>
+                <th>原费用</th>
+                <th>状态</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((row) => {
+                const statusMeta = COST_IMPORT_STATUS_META[row.status] || {
+                  label: row.status || '-',
+                  className: 'text-gray-400',
+                }
+
+                return `
+                  <tr>
+                    <td>${esc(row.rowNumber ?? '-')}</td>
+                    <td>${esc(row.taskId || '-')}</td>
+                    <td>${esc(row.amountRaw || '-')}</td>
+                    <td>${formatMoney(row.amount)}</td>
+                    <td>${formatMoney(row.existingCost)}</td>
+                    <td class="${statusMeta.className}">${esc(statusMeta.label)}</td>
+                    <td>${esc(row.reason || '-')}</td>
+                  </tr>
+                `
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `
+    : '<div class="text-sm text-gray-400">暂无可展示的导入明细。</div>'
+  resultEl.style.display = 'block'
+
+  if (mode === 'apply') {
+    setCostImportStateText(`导入完成：更新 ${applyResult.updatedRows ?? 0} 条，覆盖 ${applyResult.overwrittenRows ?? 0} 条`, 'text-green-400')
+  } else {
+    setCostImportStateText(`预检完成：可写入 ${summary.writableRows ?? 0} 条，请确认后导入`, 'text-sky-400')
+  }
+
+  syncCostImportButtons(false)
+}
+
+async function previewCostImport() {
+  const { channel, file } = getCostImportSelection()
+  if (!channel) {
+    alert('请选择通道')
+    return
+  }
+  if (!file) {
+    alert('请选择要导入的 Excel 或 CSV 文件')
+    return
+  }
+
+  costImportPreviewToken = ''
+  costImportLastResult = null
+  clearCostImportPanels()
+
+  const previewBtn = document.getElementById('ci-preview-btn')
+  const originalLabel = previewBtn?.textContent || '预检'
+
+  try {
+    if (previewBtn) {
+      previewBtn.disabled = true
+      previewBtn.textContent = '预检中...'
+    }
+    syncCostImportButtons(true)
+    setCostImportStateText('正在解析文件并执行预检...', 'text-sky-400')
+
+    const formData = new FormData()
+    formData.append('channel', channel)
+    formData.append('file', file)
+
+    const result = await apiUpload('/cost-import/preview', formData)
+    costImportPreviewToken = result.previewToken || ''
+    renderCostImportResult(result, 'preview')
+  } catch (error) {
+    console.error(error)
+    costImportPreviewToken = ''
+    costImportLastResult = null
+    clearCostImportPanels()
+    setCostImportStateText(error.message || '费用导入预检失败', 'text-red-400')
+    syncCostImportButtons(false)
+    alert(error.message || '费用导入预检失败')
+  } finally {
+    if (previewBtn) {
+      previewBtn.textContent = originalLabel
+    }
+    syncCostImportButtons(false)
+  }
+}
+
+async function applyCostImport() {
+  if (!costImportPreviewToken) {
+    alert('请先完成预检')
+    return
+  }
+
+  const writableRows = Number(costImportLastResult?.summary?.writableRows) || 0
+  if (!writableRows) {
+    alert('当前预检结果没有可写入的记录')
+    return
+  }
+
+  if (!window.confirm(`确认导入 ${writableRows} 条费用记录吗？已有费用会被覆盖。`)) {
+    return
+  }
+
+  const applyBtn = document.getElementById('ci-apply-btn')
+  const originalLabel = applyBtn?.textContent || '确认导入'
+
+  try {
+    if (applyBtn) {
+      applyBtn.disabled = true
+      applyBtn.textContent = '导入中...'
+    }
+    syncCostImportButtons(true)
+    setCostImportStateText('正在写入费用...', 'text-yellow-400')
+
+    const result = await apiJson('/cost-import/apply', {
+      importToken: costImportPreviewToken,
+    })
+
+    costImportPreviewToken = ''
+    renderCostImportResult(result, 'apply')
+    await Promise.allSettled([
+      refreshAll(),
+      loadTasks(currentTaskPage),
+    ])
+  } catch (error) {
+    console.error(error)
+    setCostImportStateText(error.message || '费用导入失败', 'text-red-400')
+    syncCostImportButtons(false)
+    alert(error.message || '费用导入失败')
+  } finally {
+    if (applyBtn) {
+      applyBtn.textContent = originalLabel
+    }
+    syncCostImportButtons(false)
+  }
+}
+
 function buildTaskQueryParams(options = {}) {
   const { includePagination = true } = options
   const params = new URLSearchParams()
+  const channel = document.getElementById('f-channel').value
   const model = document.getElementById('f-model').value
+  const taskId = document.getElementById('f-task-id').value.trim()
   const status = document.getElementById('f-status').value
   const userId = document.getElementById('f-user').value
   const from = document.getElementById('f-from').value
@@ -840,7 +1196,9 @@ function buildTaskQueryParams(options = {}) {
     params.set('page', currentTaskPage)
     params.set('pageSize', 50)
   }
+  if (channel) params.set('channel', channel)
   if (model) params.set('model', model)
+  if (taskId) params.set('taskId', taskId)
   if (status) params.set('status', status)
   if (userId) params.set('userId', userId)
   if (from) params.set('dateFrom', buildShanghaiDateBoundary(from, false))
@@ -874,8 +1232,7 @@ async function loadTasks(page) {
         <td>${renderClipCell(task.engine_task_id || '-', 180)}</td>
         <td>${renderClipCell(task.upstream_url || '-', 260)}</td>
         <td>${renderClipCell(task.error_message || '-', 240)}</td>
-        <td>${formatCredits(task.credit_spent)}</td>
-        <td>${formatMoney(task.credit_cost)}</td>
+        <td>${formatMoney(task.estimated_cost)}</td>
       </tr>
     `).join('')
 
@@ -996,8 +1353,7 @@ async function loadUsers() {
         <td>${user.generated_count}</td>
         <td class="status-succeeded">${user.succeeded}</td>
         <td class="status-failed">${user.failed}</td>
-        <td>${formatCredits(user.credit_spent)}</td>
-        <td>${formatMoney(user.credit_cost)}</td>
+        <td>${formatMoney(user.estimated_cost)}</td>
         <td><button class="btn btn-secondary text-xs" data-user-ids="${escAttr(encodeURIComponent(user.user_ids_key || ''))}" data-user-name="${escAttr(encodeURIComponent(user.user_name || ''))}" onclick="showUserDetail(decodeURIComponent(this.dataset.userIds), decodeURIComponent(this.dataset.userName))">查看明细</button></td>
       </tr>
     `).join('')
@@ -1042,8 +1398,7 @@ async function showUserDetail(userId, userName) {
         <td>${renderClipCell(task.engine_task_id || '-', 180)}</td>
         <td>${renderClipCell(task.upstream_url || '-', 260)}</td>
         <td>${renderClipCell(task.error_message || '-', 240)}</td>
-        <td>${formatCredits(task.credit_spent)}</td>
-        <td>${formatMoney(task.credit_cost)}</td>
+        <td>${formatMoney(task.estimated_cost)}</td>
       </tr>
     `).join('')
   } catch (error) {
