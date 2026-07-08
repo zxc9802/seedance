@@ -34,11 +34,11 @@
 }
 
 .pricing-info-panel {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 10px);
+  position: fixed;
+  left: 50%;
+  top: 62px;
   z-index: 30;
-  width: min(640px, calc(100vw - 32px));
+  width: min(860px, calc(100vw - 48px));
   padding: 14px;
   border: 1px solid var(--border-light);
   border-radius: var(--radius-md);
@@ -46,7 +46,7 @@
   box-shadow: var(--shadow-lg);
   opacity: 0;
   visibility: hidden;
-  transform: translateY(-4px);
+  transform: translateX(-50%) translateY(-4px);
   transition: opacity var(--transition-fast), transform var(--transition-fast), visibility var(--transition-fast);
 }
 
@@ -54,7 +54,7 @@
 .pricing-info:focus-within .pricing-info-panel {
   opacity: 1;
   visibility: visible;
-  transform: translateY(0);
+  transform: translateX(-50%) translateY(0);
 }
 
 .pricing-info-title {
@@ -217,8 +217,8 @@
   }
 
   .pricing-info-panel {
-    left: 0;
-    right: auto;
+    left: 50%;
+    top: 110px;
   }
 
   .pricing-info-grid {

@@ -44,6 +44,7 @@ test('main model selector only shows the approved provider entries', async () =>
 
 test('public header exposes the current credit pricing explanation', async () => {
   const headerSource = await fs.readFile(path.resolve('src/components/Header.jsx'), 'utf8')
+  const headerStyle = await fs.readFile(path.resolve('src/components/Header.css'), 'utf8')
   const pricingIndex = headerSource.indexOf('pricing-info')
   const adminIndex = headerSource.indexOf('{showAdminEntry ?')
 
@@ -53,6 +54,7 @@ test('public header exposes the current credit pricing explanation', async () =>
   assert.match(headerSource, /seedance2\.0[\s\S]*文生视频[\s\S]*480P: 2积分\/秒[\s\S]*720P: 4积分\/秒[\s\S]*1080P: 10积分\/秒/)
   assert.match(headerSource, /seedance2\.0 fast[\s\S]*文生视频[\s\S]*480P: 1积分\/秒[\s\S]*720P: 3积分\/秒/)
   assert.match(headerSource, /nanobanana企业稳定版[\s\S]*3\.5积分\/张/)
+  assert.match(headerStyle, /\.pricing-info-panel\s*\{[\s\S]*position: fixed;[\s\S]*left: 50%;[\s\S]*translateX\(-50%\)/)
 })
 
 test('happyhorse exposes an open reference-image video provider locked to 720P', async () => {
