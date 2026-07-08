@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import {
+  calculateImageCreditCharge,
   calculateVideoCreditCharge,
   extractCreditUserInfo,
   shouldChargeCreditsForProvider,
@@ -84,6 +85,18 @@ test('4K credit charge uses the configured text and reference rates', () => {
   assert.equal(referenceCharge.amount, 204)
 })
 
+test('nanobanana2 image credit charge bills each generated image', () => {
+  assert.deepEqual(calculateImageCreditCharge({
+    providerId: 'gemini-image-aggregation',
+    sampleCount: 3,
+  }), {
+    category: 'image',
+    rate: 2.412,
+    imageCount: 3,
+    amount: 7.24,
+  })
+})
+
 test('credit user identity can be read from production session or dev fallback', () => {
   assert.deepEqual(extractCreditUserInfo({
     user: {
@@ -120,9 +133,10 @@ test('admin recharge amount keeps one decimal or two decimal precision without n
   assert.throws(() => normalizeCreditAmount('abc'), /must be greater than 0/)
 })
 
-test('credit billing only applies to the seedance1 provider', () => {
+test('credit billing only applies to configured providers', () => {
   assert.equal(shouldChargeCreditsForProvider('veo'), true)
   assert.equal(shouldChargeCreditsForProvider('seedance1'), true)
+  assert.equal(shouldChargeCreditsForProvider('gemini-image-aggregation'), true)
   assert.equal(shouldChargeCreditsForProvider('ark'), false)
   assert.equal(shouldChargeCreditsForProvider('wan1'), false)
   assert.equal(shouldChargeCreditsForProvider('veo31fast'), false)

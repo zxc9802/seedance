@@ -1158,6 +1158,7 @@ app.post('/api/image/aggregation/generate', async (req, res) => {
   const body = req.body || {}
   const mediaSummary = parseUsageMediaSummaryHeader(req)
   const upstreamBody = normalizeAggregationImageGenerateBody(body)
+  const requestedSampleCount = Math.max(1, Math.trunc(Number(upstreamBody.n ?? body.sampleCount) || 1))
 
   await proxyJsonWithBody(req, res, `${imageAggregationApiBaseUrl}/openApi/generate`, upstreamBody, buildImageAggregationHeaders(), ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) return
@@ -1171,7 +1172,7 @@ app.post('/api/image/aggregation/generate', async (req, res) => {
       prompt: upstreamBody.prompt || null,
       aspectRatio: upstreamBody.payload?.params?.scale || null,
       resolution: upstreamBody.payload?.params?.resolution || null,
-      sampleCount: 1,
+      sampleCount: requestedSampleCount,
       requestParams: attachUsageMediaSummary({
         modelId: upstreamBody.modelId || null,
         abilityType: 'IMAGE',

@@ -14,7 +14,9 @@ const REFERENCE_VIDEO_RATES = Object.freeze({
   '4k': 25.5,
 })
 
-const CREDIT_BILLED_PROVIDERS = new Set(['veo', 'seedance1'])
+const NANOBANANA2_IMAGE_RATE = 2.412
+const IMAGE_CREDIT_BILLED_PROVIDERS = new Set(['gemini-image-aggregation'])
+const CREDIT_BILLED_PROVIDERS = new Set(['veo', 'seedance1', ...IMAGE_CREDIT_BILLED_PROVIDERS])
 export const CREDITS_PER_CNY = 5
 export const SITE_CREDIT_ACCOUNT_ID = '__site_shared_credits__'
 
@@ -27,6 +29,10 @@ const SITE_CREDIT_ACCOUNT = Object.freeze({
 
 export function shouldChargeCreditsForProvider(providerId) {
   return CREDIT_BILLED_PROVIDERS.has(String(providerId || '').trim().toLowerCase())
+}
+
+function shouldChargeImageCreditsForProvider(providerId) {
+  return IMAGE_CREDIT_BILLED_PROVIDERS.has(String(providerId || '').trim().toLowerCase())
 }
 
 export function getCreditBalanceAccountId() {
@@ -104,6 +110,25 @@ export function calculateVideoCreditCharge(log) {
     billableSeconds,
     amount,
   }
+}
+
+export function calculateImageCreditCharge(log) {
+  const imageCount = Math.max(1, Math.trunc(Number(log?.sampleCount ?? log?.sample_count) || 1))
+  const amount = Number((NANOBANANA2_IMAGE_RATE * imageCount).toFixed(2))
+
+  return {
+    category: 'image',
+    rate: NANOBANANA2_IMAGE_RATE,
+    imageCount,
+    amount,
+  }
+}
+
+function formatCreditConsumeNote(charge) {
+  if (charge.category === 'image') {
+    return `图片生成 ${charge.imageCount}张`
+  }
+  return `${charge.category === 'reference' ? '参考素材生成' : '文生视频'} ${charge.resolution} ${charge.billableSeconds}秒`
 }
 
 export async function getUserCreditBalance(userId) {
@@ -248,20 +273,24 @@ export async function deductUserCreditsForSucceededUsageLog(usageLogId) {
       return { skipped: true, reason: 'already_deducted' }
     }
 
-    const estimatedCost = Number(log.estimated_cost)
-    if (!Number.isFinite(estimatedCost) || estimatedCost <= 0) {
-      await client.query('COMMIT')
-      return null
-    }
-
-    const charge = {
-      ...calculateVideoCreditCharge({
-        resolution: log.resolution,
-        duration: log.duration,
-        sampleCount: log.sample_count,
-        requestParams: log.request_params,
-      }),
-      amount: Number(estimatedCost.toFixed(2)),
+    let charge
+    if (shouldChargeImageCreditsForProvider(log.provider_id)) {
+      charge = calculateImageCreditCharge(log)
+    } else {
+      const estimatedCost = Number(log.estimated_cost)
+      if (!Number.isFinite(estimatedCost) || estimatedCost <= 0) {
+        await client.query('COMMIT')
+        return null
+      }
+      charge = {
+        ...calculateVideoCreditCharge({
+          resolution: log.resolution,
+          duration: log.duration,
+          sampleCount: log.sample_count,
+          requestParams: log.request_params,
+        }),
+        amount: Number(estimatedCost.toFixed(2)),
+      }
     }
     const account = await upsertCreditAccount(client, SITE_CREDIT_ACCOUNT)
     const nextBalance = Number((Number(account.balance) - charge.amount).toFixed(2))
@@ -284,7 +313,7 @@ export async function deductUserCreditsForSucceededUsageLog(usageLogId) {
         -charge.amount,
         nextBalance,
         usageLogId,
-        `${charge.category === 'reference' ? '参考素材生成' : '文生视频'} ${charge.resolution} ${charge.billableSeconds}秒`,
+        formatCreditConsumeNote(charge),
       ],
     )
     await client.query('COMMIT')
