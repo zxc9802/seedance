@@ -183,15 +183,31 @@ test('seedance2 reference modes support the configured 1080p rate', () => {
   assert.equal(referenceCharge.amount, 87.5)
 })
 
-test('nanobanana2 image credit charge bills each generated image', () => {
+test('nanobanana2 image credit charge bills 1K images at the high rate', () => {
   assert.deepEqual(calculateImageCreditCharge({
     providerId: 'gemini-image-aggregation',
+    resolution: '1K',
     sampleCount: 3,
   }), {
     category: 'image',
+    resolution: '1k',
     rate: 3.5,
     imageCount: 3,
     amount: 10.5,
+  })
+})
+
+test('nanobanana2 image credit charge bills 512 images at the low rate', () => {
+  assert.deepEqual(calculateImageCreditCharge({
+    providerId: 'gemini-image-aggregation',
+    resolution: '512',
+    sampleCount: 4,
+  }), {
+    category: 'image',
+    resolution: '512',
+    rate: 2,
+    imageCount: 4,
+    amount: 8,
   })
 })
 

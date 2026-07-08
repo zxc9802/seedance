@@ -12,7 +12,10 @@ const REFERENCE_VIDEO_RATES = Object.freeze({
   '1080p': 17.5,
 })
 
-const NANOBANANA2_IMAGE_RATE = 3.5
+const NANOBANANA2_IMAGE_RATES = Object.freeze({
+  '512': 2,
+  '1k': 3.5,
+})
 const IMAGE_CREDIT_BILLED_PROVIDERS = new Set(['gemini-image-aggregation'])
 const CREDIT_BILLED_PROVIDERS = new Set(['seedance1', ...IMAGE_CREDIT_BILLED_PROVIDERS])
 const SEEDANCE1_FAST_MODELS = new Set(['doubao-seedance-2-0-fast-260128'])
@@ -107,6 +110,12 @@ export function normalizeCreditResolution(value) {
   return '720p'
 }
 
+function normalizeImageCreditResolution(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized.includes('512')) return '512'
+  return '1k'
+}
+
 export function calculateVideoCreditCharge(log) {
   const resolution = normalizeCreditResolution(log?.resolution || log?.requestParams?.requestedParams?.resolution)
   const duration = Math.max(0, Number(log?.duration ?? log?.requestParams?.requestedParams?.duration) || 0)
@@ -135,12 +144,15 @@ export function calculateVideoCreditCharge(log) {
 }
 
 export function calculateImageCreditCharge(log) {
+  const resolution = normalizeImageCreditResolution(log?.resolution || log?.requestParams?.requestedParams?.resolution)
+  const rate = NANOBANANA2_IMAGE_RATES[resolution] || NANOBANANA2_IMAGE_RATES['1k']
   const imageCount = Math.max(1, Math.trunc(Number(log?.sampleCount ?? log?.sample_count) || 1))
-  const amount = Number((NANOBANANA2_IMAGE_RATE * imageCount).toFixed(2))
+  const amount = Number((rate * imageCount).toFixed(2))
 
   return {
     category: 'image',
-    rate: NANOBANANA2_IMAGE_RATE,
+    resolution,
+    rate,
     imageCount,
     amount,
   }
