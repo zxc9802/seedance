@@ -12,7 +12,7 @@ import { promisify } from 'node:util'
 import { createServer as createViteServer, loadEnv } from 'vite'
 import { getPool, initDatabase, closePool } from './db/postgres.js'
 import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
-import { assertSufficientCredits, calculateVideoCreditCharge, shouldChargeCreditsForProvider } from './db/credits.js'
+import { assertSufficientCredits, calculateVideoCreditCharge, normalizeCreditProviderId, shouldChargeCreditsForProvider } from './db/credits.js'
 import adminRouter from './admin/api.js'
 import { startCreditHubSyncLoop } from './admin/creditHub.js'
 import creditAgentRouter from './credit/agentApi.js'
@@ -479,8 +479,9 @@ app.post('/api/veo/generate', async (req, res) => {
   const requestedParams = extractRequestedVideoParams(body)
   const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
   const providerId = body.providerId || 'veo'
-  const creditCharge = await prepareVideoCreditCharge(req, res, providerId, requestedParams, usageRequestParams)
-  if (shouldChargeCreditsForProvider(providerId) && !creditCharge) return
+  const creditProviderId = normalizeCreditProviderId(providerId)
+  const creditCharge = await prepareVideoCreditCharge(req, res, creditProviderId, requestedParams, usageRequestParams)
+  if (shouldChargeCreditsForProvider(creditProviderId) && !creditCharge) return
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
@@ -491,7 +492,7 @@ app.post('/api/veo/generate', async (req, res) => {
     insertChargedUsageLog({
       session: req.videoSiteSession,
       channel: 'aggregation',
-      providerId,
+      providerId: creditProviderId,
       model: requestedParams.model || null,
       generationMode: body.mode || 't2v',
       prompt: body.prompt || null,

@@ -26,7 +26,7 @@ const BASE_PROVIDERS = {
     ],
     aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {
-      default: ['480p', '720p', '1080p', '4K'],
+      default: ['480p', '720p', '1080p'],
       'doubao-seedance-2-0-fast-260128': ['480p', '720p'],
     },
     durations: [4, 5, 6, 8, 10, 12, 15],

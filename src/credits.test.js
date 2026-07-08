@@ -5,13 +5,16 @@ import {
   calculateImageCreditCharge,
   calculateVideoCreditCharge,
   extractCreditUserInfo,
+  normalizeCreditProviderId,
   shouldChargeCreditsForProvider,
   shouldDeductCreditsForUsageUpdate,
   normalizeCreditAmount,
 } from '../db/credits.js'
 
-test('text-to-video credit charge uses the base resolution rate per generated second', () => {
+test('seedance2 text-to-video credit charge uses the enterprise stable rates', () => {
   const charge = calculateVideoCreditCharge({
+    providerId: 'seedance1',
+    model: 'doubao-seedance-2-0-260128',
     resolution: '1080P',
     duration: 8,
     sampleCount: 2,
@@ -26,9 +29,9 @@ test('text-to-video credit charge uses the base resolution rate per generated se
   assert.deepEqual(charge, {
     category: 'text',
     resolution: '1080p',
-    rate: 7.6,
+    rate: 10,
     billableSeconds: 16,
-    amount: 121.6,
+    amount: 160,
   })
 })
 
@@ -72,7 +75,7 @@ test('seedance2 fast model on seedance1 channel uses its own 480p and 720p rates
       },
     },
   })
-  const fast480InputVideoCharge = calculateVideoCreditCharge({
+  const fast480ImageReferenceCharge = calculateVideoCreditCharge({
     providerId: 'seedance1',
     model: 'doubao-seedance-2-0-fast-260128',
     resolution: '480p',
@@ -80,8 +83,8 @@ test('seedance2 fast model on seedance1 channel uses its own 480p and 720p rates
     sampleCount: 1,
     requestParams: {
       mediaSummary: {
-        images: { count: 0 },
-        videos: { count: 1, durationSeconds: 3 },
+        images: { count: 1 },
+        videos: { count: 0 },
       },
     },
   })
@@ -102,42 +105,44 @@ test('seedance2 fast model on seedance1 channel uses its own 480p and 720p rates
   assert.deepEqual(standardCharge, {
     category: 'text',
     resolution: '720p',
-    rate: 3.05,
+    rate: 4,
     billableSeconds: 5,
-    amount: 15.25,
+    amount: 20,
   })
   assert.deepEqual(fast480TextCharge, {
     category: 'text',
     resolution: '480p',
-    rate: 2,
+    rate: 1,
     billableSeconds: 5,
-    amount: 10,
+    amount: 5,
   })
   assert.deepEqual(fast720TextCharge, {
     category: 'text',
     resolution: '720p',
-    rate: 4.05,
+    rate: 3,
     billableSeconds: 5,
-    amount: 20.25,
+    amount: 15,
   })
-  assert.deepEqual(fast480InputVideoCharge, {
+  assert.deepEqual(fast480ImageReferenceCharge, {
     category: 'reference',
     resolution: '480p',
-    rate: 1.2,
-    billableSeconds: 8,
-    amount: 9.6,
+    rate: 2.5,
+    billableSeconds: 5,
+    amount: 12.5,
   })
   assert.deepEqual(fast720InputVideoCharge, {
     category: 'reference',
     resolution: '720p',
-    rate: 2.5,
+    rate: 5.5,
     billableSeconds: 8,
-    amount: 20,
+    amount: 44,
   })
 })
 
-test('reference credit charge uses reference rates and includes reference video length', () => {
+test('seedance2 reference modes use enterprise stable rates and include reference video length', () => {
   const charge = calculateVideoCreditCharge({
+    providerId: 'seedance1',
+    model: 'doubao-seedance-2-0-260128',
     resolution: '720p',
     duration: 6,
     sampleCount: 1,
@@ -152,41 +157,30 @@ test('reference credit charge uses reference rates and includes reference video 
   assert.deepEqual(charge, {
     category: 'reference',
     resolution: '720p',
-    rate: 5,
+    rate: 7,
     billableSeconds: 10,
-    amount: 50,
+    amount: 70,
   })
 })
 
-test('4K credit charge uses the configured text and reference rates', () => {
-  const textCharge = calculateVideoCreditCharge({
-    resolution: '4K',
-    duration: 5,
-    sampleCount: 1,
-    requestParams: {
-      mediaSummary: {
-        images: { count: 0 },
-        videos: { count: 0 },
-      },
-    },
-  })
+test('seedance2 reference modes support the configured 1080p rate', () => {
   const referenceCharge = calculateVideoCreditCharge({
-    resolution: '4K',
+    providerId: 'seedance1',
+    model: 'doubao-seedance-2-0-260128',
+    resolution: '1080p',
     duration: 5,
     sampleCount: 1,
     requestParams: {
       mediaSummary: {
         images: { count: 1 },
-        videos: { count: 1, durationSeconds: 3 },
+        videos: { count: 0 },
       },
     },
   })
 
-  assert.equal(textCharge.rate, 16)
-  assert.equal(textCharge.amount, 80)
-  assert.equal(referenceCharge.rate, 25.5)
-  assert.equal(referenceCharge.billableSeconds, 8)
-  assert.equal(referenceCharge.amount, 204)
+  assert.equal(referenceCharge.rate, 17.5)
+  assert.equal(referenceCharge.billableSeconds, 5)
+  assert.equal(referenceCharge.amount, 87.5)
 })
 
 test('nanobanana2 image credit charge bills each generated image', () => {
@@ -195,9 +189,9 @@ test('nanobanana2 image credit charge bills each generated image', () => {
     sampleCount: 3,
   }), {
     category: 'image',
-    rate: 2.412,
+    rate: 3.5,
     imageCount: 3,
-    amount: 7.24,
+    amount: 10.5,
   })
 })
 
@@ -238,7 +232,8 @@ test('admin recharge amount keeps one decimal or two decimal precision without n
 })
 
 test('credit billing only applies to configured providers', () => {
-  assert.equal(shouldChargeCreditsForProvider('veo'), true)
+  assert.equal(normalizeCreditProviderId('veo'), 'seedance1')
+  assert.equal(shouldChargeCreditsForProvider('veo'), false)
   assert.equal(shouldChargeCreditsForProvider('seedance1'), true)
   assert.equal(shouldChargeCreditsForProvider('gemini-image-aggregation'), true)
   assert.equal(shouldChargeCreditsForProvider('ark'), false)

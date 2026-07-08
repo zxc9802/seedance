@@ -1,30 +1,28 @@
 import { getPool } from './postgres.js'
 
 const TEXT_VIDEO_RATES = Object.freeze({
-  '480p': 1.5,
-  '720p': 3.05,
-  '1080p': 7.6,
-  '4k': 16,
+  '480p': 2,
+  '720p': 4,
+  '1080p': 10,
 })
 
 const REFERENCE_VIDEO_RATES = Object.freeze({
-  '480p': 2.5,
-  '720p': 5,
-  '1080p': 12.5,
-  '4k': 25.5,
+  '480p': 3.5,
+  '720p': 7,
+  '1080p': 17.5,
 })
 
-const NANOBANANA2_IMAGE_RATE = 2.412
+const NANOBANANA2_IMAGE_RATE = 3.5
 const IMAGE_CREDIT_BILLED_PROVIDERS = new Set(['gemini-image-aggregation'])
-const CREDIT_BILLED_PROVIDERS = new Set(['veo', 'seedance1', ...IMAGE_CREDIT_BILLED_PROVIDERS])
+const CREDIT_BILLED_PROVIDERS = new Set(['seedance1', ...IMAGE_CREDIT_BILLED_PROVIDERS])
 const SEEDANCE1_FAST_MODELS = new Set(['doubao-seedance-2-0-fast-260128'])
 const SEEDANCE1_FAST_TEXT_VIDEO_RATES = Object.freeze({
-  '480p': 2,
-  '720p': 4.05,
+  '480p': 1,
+  '720p': 3,
 })
-const SEEDANCE1_FAST_INPUT_VIDEO_RATES = Object.freeze({
-  '480p': 1.2,
-  '720p': 2.5,
+const SEEDANCE1_FAST_REFERENCE_VIDEO_RATES = Object.freeze({
+  '480p': 2.5,
+  '720p': 5.5,
 })
 export const CREDITS_PER_CNY = 5
 export const SITE_CREDIT_ACCOUNT_ID = '__site_shared_credits__'
@@ -38,6 +36,12 @@ const SITE_CREDIT_ACCOUNT = Object.freeze({
 
 export function shouldChargeCreditsForProvider(providerId) {
   return CREDIT_BILLED_PROVIDERS.has(String(providerId || '').trim().toLowerCase())
+}
+
+export function normalizeCreditProviderId(providerId) {
+  const normalized = String(providerId || '').trim().toLowerCase()
+  if (normalized === 'veo') return 'seedance1'
+  return normalized
 }
 
 function shouldChargeImageCreditsForProvider(providerId) {
@@ -114,7 +118,7 @@ export function calculateVideoCreditCharge(log) {
   const referenceVideoSeconds = Math.max(0, Number(mediaSummary?.videos?.durationSeconds) || 0)
   const category = imageCount + videoCount > 0 ? 'reference' : 'text'
   const rates = category === 'reference' ? REFERENCE_VIDEO_RATES : TEXT_VIDEO_RATES
-  const fastRates = videoCount > 0 ? SEEDANCE1_FAST_INPUT_VIDEO_RATES : SEEDANCE1_FAST_TEXT_VIDEO_RATES
+  const fastRates = category === 'reference' ? SEEDANCE1_FAST_REFERENCE_VIDEO_RATES : SEEDANCE1_FAST_TEXT_VIDEO_RATES
   const rate = isSeedance1FastModel(log)
     ? (fastRates[resolution] || fastRates['720p'])
     : (rates[resolution] || rates['720p'])

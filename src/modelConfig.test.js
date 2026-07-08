@@ -18,12 +18,12 @@ async function loadProviders() {
   return module.PROVIDERS
 }
 
-test('Seedance 1 exposes 480p through 4K resolution options while defaulting to 720p', async () => {
+test('Seedance enterprise stable exposes priced resolution options while defaulting to 720p', async () => {
   const providers = await loadProviders()
 
   assert.equal(providers.veo.selectorLabel, 'seedance企业稳定版')
   assert.equal(providers.veo.name, 'seedance企业稳定版')
-  assert.deepEqual(providers.veo.resolutions.default, ['480p', '720p', '1080p', '4K'])
+  assert.deepEqual(providers.veo.resolutions.default, ['480p', '720p', '1080p'])
   assert.equal(providers.veo.defaults.resolution, '720p')
   assert.equal(providers.veo.defaults.imageMaterialType, 'role')
 })
