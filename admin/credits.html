@@ -231,7 +231,7 @@ function renderUsage(rows) {
       <td>${Number(row.imageCount || 0)}</td>
       <td>${Number(row.videoCount || 0)}</td>
       <td>${esc(row.status || '-')}</td>
-      <td>${fmtCredit(row.estimated_cost)}</td>
+      <td>${fmtCredit(row.credit_spent)}</td>
       <td>${esc(row.engine_task_id || '-')}</td>
     </tr>
   `).join('')

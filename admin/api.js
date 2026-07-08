@@ -1269,10 +1269,11 @@ router.get('/credits/usage', async (req, res) => {
 
   try {
     const result = await db.query(`
-      SELECT *
-      FROM video_usage_logs
+      SELECT logs.*, COALESCE(credit_usage.credit_spent, 0)::float AS credit_spent
+      FROM video_usage_logs logs
+      LEFT JOIN (${CREDIT_USAGE_SUMMARY_SQL}) credit_usage ON credit_usage.usage_log_id = logs.id
       ${where}
-      ORDER BY created_at DESC
+      ORDER BY logs.created_at DESC
       LIMIT 300
     `, params)
     res.json(result.rows.map(enhanceUsageLog))

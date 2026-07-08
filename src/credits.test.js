@@ -154,6 +154,19 @@ test('credit center recharge form targets site balance instead of an employee ac
   assert.doesNotMatch(html, /id="r-nickname"/)
 })
 
+test('credit center generation detail shows actual deducted credits only', async () => {
+  const html = await readFile(new URL('../admin/credits.html', import.meta.url), 'utf8')
+  const apiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
+  const usageRouteStart = apiSource.indexOf("router.get('/credits/usage'")
+  const usageRouteEnd = apiSource.indexOf("router.get('/pricing'", usageRouteStart)
+  const usageRouteSource = apiSource.slice(usageRouteStart, usageRouteEnd)
+
+  assert.match(html, /fmtCredit\(row\.credit_spent\)/)
+  assert.doesNotMatch(html, /fmtCredit\(row\.estimated_cost\)/)
+  assert.match(usageRouteSource, /LEFT JOIN \(\$\{CREDIT_USAGE_SUMMARY_SQL\}\) credit_usage/)
+  assert.match(usageRouteSource, /COALESCE\(credit_usage\.credit_spent, 0\)::float AS credit_spent/)
+})
+
 test('credit cost converts five credits into one yuan', async () => {
   const credits = await import('../db/credits.js')
 
