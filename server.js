@@ -14,6 +14,8 @@ import { getPool, initDatabase, closePool } from './db/postgres.js'
 import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
 import { assertSufficientCredits, calculateVideoCreditCharge, shouldChargeCreditsForProvider } from './db/credits.js'
 import adminRouter from './admin/api.js'
+import { startCreditHubSyncLoop } from './admin/creditHub.js'
+import creditAgentRouter from './credit/agentApi.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -3170,12 +3172,16 @@ cleanupExpiredUploads().catch((error) => {
 })
 
 // Admin dashboard
+app.use('/api/credit-agent', creditAgentRouter)
 app.use('/api/admin', requireAdminApiAccess, adminRouter)
 app.get('/admin', requireAdminPageAccess, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'index.html'))
 })
 app.get(adminCreditsPath, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'credits.html'))
+})
+app.get('/admin/credit-hub', (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin', 'credit-hub.html'))
 })
 
 const httpServer = createHttpServer(app)
@@ -3210,6 +3216,7 @@ httpServer.listen(port, async () => {
   console.log(`[server] ${mode} listening on http://localhost:${port}`)
   await initDatabase()
   startUsageStatusMaintenanceLoop()
+  startCreditHubSyncLoop()
 })
 
 async function proxyJson(req, res, url, extraHeaders = {}, onResponse = null) {
@@ -6668,7 +6675,10 @@ function shouldBypassSso(req) {
   if (requestPath === '/api/health') return true
   if (requestPath === adminCreditsPath) return true
   if (requestPath === '/admin/credit-center') return true
+  if (requestPath === '/admin/credit-hub') return true
   if (requestPath.startsWith('/api/admin/credits/')) return true
+  if (requestPath.startsWith('/api/admin/credit-hub/')) return true
+  if (requestPath.startsWith('/api/credit-agent/')) return true
   if (requestPath.startsWith('/temp-assets/')) return true
   if (!isProduction && (
     requestPath.startsWith('/@vite')
@@ -7021,7 +7031,7 @@ function isAdminRoleValue(value) {
 }
 
 function requireAdminApiAccess(req, res, next) {
-  if (req.path.startsWith('/credits/')) {
+  if (req.path.startsWith('/credits/') || req.path.startsWith('/credit-hub/')) {
     next()
     return
   }

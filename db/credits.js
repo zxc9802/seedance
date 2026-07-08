@@ -121,24 +121,47 @@ export async function getSiteCreditBalance() {
   return getUserCreditBalance(getCreditBalanceAccountId())
 }
 
-export async function rechargeSiteCredits({ amount, note, actor }) {
+export async function rechargeSiteCredits({ amount, note, actor, requestId }) {
   return rechargeUserCredits({
     ...SITE_CREDIT_ACCOUNT,
     amount,
     note,
     actor,
+    requestId,
   })
 }
 
-export async function rechargeUserCredits({ userId, email, nickname, group, amount, note, actor }) {
+export async function rechargeUserCredits({ userId, email, nickname, group, amount, note, actor, requestId }) {
   const db = getPool()
   if (!db) throw new Error('Database not available')
   if (!userId) throw new Error('userId is required')
   const normalizedAmount = normalizeCreditAmount(amount)
+  const normalizedRequestId = String(requestId || '').trim() || null
   const client = await db.connect()
 
   try {
     await client.query('BEGIN')
+    if (normalizedRequestId) {
+      const existing = await client.query(
+        `SELECT id, amount, balance_after
+         FROM user_credit_transactions
+         WHERE type = 'recharge' AND request_id = $1
+         LIMIT 1`,
+        [normalizedRequestId],
+      )
+      const transaction = existing.rows[0]
+      if (transaction) {
+        await client.query('COMMIT')
+        return {
+          userId,
+          balance: Number(transaction.balance_after || 0),
+          amount: Math.abs(Number(transaction.amount || 0)),
+          transactionId: transaction.id,
+          duplicate: true,
+        }
+      }
+    }
+
     const account = await upsertCreditAccount(client, { userId, email, nickname, group })
     const nextBalance = Number(account.balance) + normalizedAmount
     await client.query(
@@ -148,16 +171,42 @@ export async function rechargeUserCredits({ userId, email, nickname, group, amou
        WHERE user_id = $1`,
       [userId, nextBalance, email || null, nickname || null, group || null],
     )
-    await client.query(
+    const transactionResult = await client.query(
       `INSERT INTO user_credit_transactions (
-        user_id, user_email, user_nickname, user_group, type, amount, balance_after, note, created_by
-      ) VALUES ($1,$2,$3,$4,'recharge',$5,$6,$7,$8)`,
-      [userId, email || null, nickname || null, group || null, normalizedAmount, nextBalance, note || null, actor || 'admin'],
+        user_id, user_email, user_nickname, user_group, type, amount, balance_after, note, created_by, request_id
+      ) VALUES ($1,$2,$3,$4,'recharge',$5,$6,$7,$8,$9)
+      RETURNING id`,
+      [userId, email || null, nickname || null, group || null, normalizedAmount, nextBalance, note || null, actor || 'admin', normalizedRequestId],
     )
     await client.query('COMMIT')
-    return { userId, balance: nextBalance, amount: normalizedAmount }
+    return {
+      userId,
+      balance: nextBalance,
+      amount: normalizedAmount,
+      transactionId: transactionResult.rows[0]?.id || null,
+      duplicate: false,
+    }
   } catch (error) {
     await client.query('ROLLBACK')
+    if (normalizedRequestId && error?.code === '23505') {
+      const existing = await db.query(
+        `SELECT id, amount, balance_after
+         FROM user_credit_transactions
+         WHERE type = 'recharge' AND request_id = $1
+         LIMIT 1`,
+        [normalizedRequestId],
+      )
+      const transaction = existing.rows[0]
+      if (transaction) {
+        return {
+          userId,
+          balance: Number(transaction.balance_after || 0),
+          amount: Math.abs(Number(transaction.amount || 0)),
+          transactionId: transaction.id,
+          duplicate: true,
+        }
+      }
+    }
     throw error
   } finally {
     client.release()

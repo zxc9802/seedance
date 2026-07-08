@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多服务器积分中心</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #0f1724;
+    color: #e5edf4;
+  }
+  .card {
+    background: #182434;
+    border: 1px solid #2e4056;
+    border-radius: 8px;
+  }
+  .field {
+    background: #101927;
+    border: 1px solid #354a63;
+    color: #e5edf4;
+    border-radius: 6px;
+    padding: 8px 10px;
+    width: 100%;
+  }
+  .field:focus {
+    border-color: #4f9cf9;
+    outline: none;
+  }
+  .btn {
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+    padding: 8px 12px;
+  }
+  .btn-primary { background: #2f80ed; color: #fff; }
+  .btn-secondary { background: #2b3b4f; color: #e5edf4; }
+  .btn-warning { background: #b7791f; color: #fff; }
+  .btn-ghost { background: transparent; border: 1px solid #40566f; color: #cbd5e1; }
+  .btn:disabled { cursor: not-allowed; opacity: .55; }
+  table {
+    border-collapse: collapse;
+    min-width: 1180px;
+    width: 100%;
+  }
+  th, td {
+    border-bottom: 1px solid #2b3b4f;
+    font-size: 13px;
+    padding: 10px;
+    text-align: left;
+    white-space: nowrap;
+  }
+  th { color: #94a3b8; font-weight: 600; }
+  tr.active td { background: #20344a; }
+  .table-wrap { overflow-x: auto; }
+  .pill {
+    border-radius: 999px;
+    display: inline-flex;
+    font-size: 12px;
+    gap: 6px;
+    padding: 3px 8px;
+  }
+  .pill-online { background: rgba(34, 197, 94, .16); color: #86efac; }
+  .pill-offline { background: rgba(248, 113, 113, .16); color: #fca5a5; }
+  .pill-disabled { background: rgba(148, 163, 184, .16); color: #cbd5e1; }
+  .muted { color: #94a3b8; }
+</style>
+</head>
+<body>
+<div id="login" class="card max-w-sm mx-auto mt-28 p-6" style="display:none">
+  <h1 class="text-2xl font-bold mb-4">多服务器积分中心</h1>
+  <input id="pwd" type="password" placeholder="管理员密码" class="field mb-3" onkeydown="if(event.key==='Enter')login()">
+  <button class="btn btn-primary w-full" onclick="login()">登录</button>
+</div>
+
+<div id="app" class="max-w-[1600px] mx-auto px-5 py-6" style="display:none">
+  <div class="flex flex-wrap items-center justify-between gap-3 mb-5">
+    <div>
+      <h1 class="text-3xl font-bold">多服务器积分中心</h1>
+      <p class="muted mt-1">集中查看多个 seedance 实例余额、消耗、今日消耗，并远程充值</p>
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-secondary" onclick="syncAll()">同步全部</button>
+      <button class="btn btn-primary" onclick="loadInstances()">刷新</button>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-2 xl:grid-cols-5 gap-4 mb-5">
+    <div class="card p-4"><div class="muted text-sm">项目数</div><div id="stat-count" class="text-3xl font-bold mt-2">0</div></div>
+    <div class="card p-4"><div class="muted text-sm">总余额</div><div id="stat-balance" class="text-3xl font-bold text-sky-300 mt-2">0.00</div></div>
+    <div class="card p-4"><div class="muted text-sm">累计消耗</div><div id="stat-consumed" class="text-3xl font-bold text-amber-300 mt-2">0.00</div></div>
+    <div class="card p-4"><div class="muted text-sm">今日消耗</div><div id="stat-today" class="text-3xl font-bold text-emerald-300 mt-2">0.00</div></div>
+    <div class="card p-4"><div class="muted text-sm">总生成次数</div><div id="stat-generations" class="text-3xl font-bold mt-2">0</div></div>
+  </div>
+
+  <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4 mb-5">
+    <div class="card p-4">
+      <div class="flex items-center justify-between gap-3 mb-3">
+        <h2 class="text-lg font-bold">项目列表</h2>
+        <input id="search" class="field max-w-xs" placeholder="搜索项目/URL" oninput="renderInstances()">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>项目</th>
+              <th>基础 URL</th>
+              <th>余额</th>
+              <th>累计消耗</th>
+              <th>今日消耗</th>
+              <th>总生成</th>
+              <th>最近扣费</th>
+              <th>最近同步</th>
+              <th>同步状态</th>
+              <th>Token</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="instances-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="space-y-4">
+      <div class="card p-4">
+        <div class="flex items-center justify-between mb-3">
+          <h2 id="form-title" class="text-lg font-bold">新增项目</h2>
+          <button class="btn btn-ghost" onclick="resetForm()">清空</button>
+        </div>
+        <div class="grid gap-3">
+          <label class="text-sm muted">项目名<input id="f-name" class="field mt-1" placeholder="seedance-上海"></label>
+          <label class="text-sm muted">基础 URL<input id="f-url" class="field mt-1" placeholder="https://seedance.example.com"></label>
+          <label class="text-sm muted">Agent Token<input id="f-token" class="field mt-1" type="password" placeholder="编辑时留空则不修改"></label>
+          <label class="text-sm muted">备注<textarea id="f-note" class="field mt-1" rows="3"></textarea></label>
+          <label class="inline-flex items-center gap-2 text-sm"><input id="f-enabled" type="checkbox" checked> 启用同步</label>
+          <button class="btn btn-primary" onclick="saveInstance()">保存项目</button>
+          <div id="form-state" class="text-sm muted"></div>
+        </div>
+      </div>
+
+      <div class="card p-4">
+        <h2 class="text-lg font-bold mb-1">远程充值</h2>
+        <p id="recharge-target" class="muted text-sm mb-3">请选择一个项目</p>
+        <div class="grid gap-3">
+          <label class="text-sm muted">充值积分<input id="r-amount" type="number" min="0.01" step="0.01" class="field mt-1"></label>
+          <label class="text-sm muted">备注<textarea id="r-note" rows="3" class="field mt-1"></textarea></label>
+          <button id="recharge-btn" class="btn btn-warning" onclick="rechargeSelected()" disabled>确认充值</button>
+          <div id="recharge-state" class="text-sm muted"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 gap-4">
+    <div class="card p-4">
+      <h2 id="tx-title" class="text-lg font-bold mb-3">服务器流水</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>用户</th>
+              <th>类型</th>
+              <th>变动积分</th>
+              <th>折合费用</th>
+              <th>变动后余额</th>
+              <th>备注</th>
+              <th>requestId</th>
+              <th>usageLog</th>
+            </tr>
+          </thead>
+          <tbody id="tx-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card p-4">
+      <h2 id="actions-title" class="text-lg font-bold mb-3">中心充值记录</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>类型</th>
+              <th>积分</th>
+              <th>状态</th>
+              <th>操作人</th>
+              <th>备注</th>
+              <th>requestId</th>
+              <th>错误</th>
+            </tr>
+          </thead>
+          <tbody id="actions-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const INSTANCE_ENDPOINT = '/api/admin/credit-hub/instances'
+let TOKEN = localStorage.getItem('admin_token') || ''
+let instances = []
+let selectedId = ''
+let editingId = ''
+
+function hubRequest(path, opts = {}) {
+  return fetch(`/api/admin/credit-hub${path}`, {
+    ...opts,
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      ...(opts.headers || {}),
+    },
+  }).then(async (response) => {
+    const payload = await response.json().catch(() => ({}))
+    if (response.status === 401) {
+      showLogin()
+      throw new Error('Unauthorized')
+    }
+    if (!response.ok) throw new Error(payload.error || '请求失败')
+    return payload
+  })
+}
+
+function showLogin() {
+  document.getElementById('login').style.display = 'block'
+  document.getElementById('app').style.display = 'none'
+}
+
+function showApp() {
+  document.getElementById('login').style.display = 'none'
+  document.getElementById('app').style.display = 'block'
+}
+
+function login() {
+  TOKEN = document.getElementById('pwd').value.trim()
+  localStorage.setItem('admin_token', TOKEN)
+  loadInstances().then(showApp).catch(() => alert('密码错误'))
+}
+
+async function loadInstances() {
+  const payload = await fetch(INSTANCE_ENDPOINT, {
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  }).then(async (response) => {
+    const data = await response.json().catch(() => ({}))
+    if (response.status === 401) {
+      showLogin()
+      throw new Error('Unauthorized')
+    }
+    if (!response.ok) throw new Error(data.error || '请求失败')
+    return data
+  })
+  instances = Array.isArray(payload.items) ? payload.items : []
+  if (selectedId && !instances.some((item) => item.id === selectedId)) selectedId = ''
+  if (!selectedId && instances.length) selectedId = instances[0].id
+  renderStats()
+  renderInstances()
+  await loadSelectedDetails()
+}
+
+function renderStats() {
+  const totals = instances.reduce((acc, item) => {
+    const snapshot = item.snapshot || {}
+    acc.balance += Number(snapshot.balance || 0)
+    acc.consumed += Number(snapshot.totalConsumed || 0)
+    acc.today += Number(snapshot.todayConsumed || 0)
+    acc.generations += Number(snapshot.totalGenerations || 0)
+    return acc
+  }, { balance: 0, consumed: 0, today: 0, generations: 0 })
+  document.getElementById('stat-count').textContent = instances.length
+  document.getElementById('stat-balance').textContent = fmtCredit(totals.balance)
+  document.getElementById('stat-consumed').textContent = fmtCredit(totals.consumed)
+  document.getElementById('stat-today').textContent = fmtCredit(totals.today)
+  document.getElementById('stat-generations').textContent = totals.generations
+}
+
+function renderInstances() {
+  const keyword = document.getElementById('search').value.trim().toLowerCase()
+  const rows = instances.filter((item) => {
+    const text = `${item.name || ''} ${item.baseUrl || ''} ${item.note || ''}`.toLowerCase()
+    return !keyword || text.includes(keyword)
+  })
+  document.getElementById('instances-tbody').innerHTML = rows.map((item) => {
+    const snapshot = item.snapshot || {}
+    const status = item.enabled === false ? 'disabled' : (item.lastSyncStatus || snapshot.status || 'unknown')
+    const isActive = item.id === selectedId
+    return `
+      <tr class="${isActive ? 'active' : ''}" onclick="selectInstance('${escAttr(item.id)}')">
+        <td>
+          <div class="font-semibold">${esc(item.name)}</div>
+          <div class="muted text-xs">${esc(item.note || '')}</div>
+        </td>
+        <td><a class="text-sky-300" href="${escAttr(item.baseUrl)}" target="_blank">${esc(item.baseUrl)}</a></td>
+        <td>${fmtCredit(snapshot.balance)}</td>
+        <td>${fmtCredit(snapshot.totalConsumed)}</td>
+        <td>${fmtCredit(snapshot.todayConsumed)}</td>
+        <td>${Number(snapshot.totalGenerations || 0)}</td>
+        <td>${fmtTime(snapshot.lastTransactionAt)}</td>
+        <td>${fmtTime(item.lastSyncedAt)}</td>
+        <td>${statusPill(status, item.lastSyncError || snapshot.errorMessage)}</td>
+        <td>${esc(item.tokenHint || '-')}</td>
+        <td>
+          <button class="btn btn-ghost" onclick="event.stopPropagation(); syncOne('${escAttr(item.id)}')">同步</button>
+          <button class="btn btn-ghost" onclick="event.stopPropagation(); editInstance('${escAttr(item.id)}')">编辑</button>
+        </td>
+      </tr>
+    `
+  }).join('') || `<tr><td colspan="11" class="muted">还没有添加项目</td></tr>`
+}
+
+function statusPill(status, error) {
+  if (status === 'online') return '<span class="pill pill-online">在线</span>'
+  if (status === 'disabled') return '<span class="pill pill-disabled">已禁用</span>'
+  const label = status === 'offline' ? '离线' : '未同步'
+  const title = error ? ` title="${escAttr(error)}"` : ''
+  return `<span class="pill pill-offline"${title}>${label}</span>`
+}
+
+async function selectInstance(id) {
+  selectedId = id
+  renderInstances()
+  updateRechargeTarget()
+  await loadSelectedDetails()
+}
+
+function updateRechargeTarget() {
+  const item = instances.find((row) => row.id === selectedId)
+  document.getElementById('recharge-target').textContent = item ? `目标：${item.name} (${item.baseUrl})` : '请选择一个项目'
+  document.getElementById('recharge-btn').disabled = !item
+}
+
+function resetForm() {
+  editingId = ''
+  document.getElementById('form-title').textContent = '新增项目'
+  document.getElementById('f-name').value = ''
+  document.getElementById('f-url').value = ''
+  document.getElementById('f-token').value = ''
+  document.getElementById('f-token').placeholder = 'Agent Token'
+  document.getElementById('f-note').value = ''
+  document.getElementById('f-enabled').checked = true
+  document.getElementById('form-state').textContent = ''
+}
+
+function editInstance(id) {
+  const item = instances.find((row) => row.id === id)
+  if (!item) return
+  editingId = id
+  document.getElementById('form-title').textContent = `编辑项目：${item.name}`
+  document.getElementById('f-name').value = item.name || ''
+  document.getElementById('f-url').value = item.baseUrl || ''
+  document.getElementById('f-token').value = ''
+  document.getElementById('f-token').placeholder = item.tokenHint ? `${item.tokenHint}，留空不修改` : '留空不修改'
+  document.getElementById('f-note').value = item.note || ''
+  document.getElementById('f-enabled').checked = item.enabled !== false
+  document.getElementById('form-state').textContent = ''
+}
+
+async function saveInstance() {
+  const body = {
+    name: document.getElementById('f-name').value.trim(),
+    baseUrl: document.getElementById('f-url').value.trim(),
+    token: document.getElementById('f-token').value.trim(),
+    note: document.getElementById('f-note').value.trim(),
+    enabled: document.getElementById('f-enabled').checked,
+  }
+  if (!body.name || !body.baseUrl || (!editingId && !body.token)) {
+    alert('请填写项目名、基础 URL 和 Agent Token')
+    return
+  }
+  document.getElementById('form-state').textContent = '正在保存...'
+  try {
+    await hubRequest(editingId ? `/instances/${editingId}` : '/instances', {
+      method: editingId ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    document.getElementById('form-state').textContent = '保存成功'
+    resetForm()
+    await loadInstances()
+  } catch (error) {
+    document.getElementById('form-state').textContent = error.message
+    alert(error.message)
+  }
+}
+
+async function syncOne(id) {
+  try {
+    await hubRequest(`/instances/${id}/sync`, { method: 'POST' })
+    await loadInstances()
+  } catch (error) {
+    alert(error.message)
+    await loadInstances().catch(() => {})
+  }
+}
+
+async function syncAll() {
+  const targets = instances.filter((item) => item.enabled !== false)
+  for (const item of targets) {
+    await hubRequest(`/instances/${item.id}/sync`, { method: 'POST' }).catch(() => null)
+  }
+  await loadInstances()
+}
+
+async function rechargeSelected() {
+  if (!selectedId) return
+  const body = {
+    amount: document.getElementById('r-amount').value,
+    note: document.getElementById('r-note').value.trim(),
+  }
+  if (!body.amount) {
+    alert('请填写充值积分')
+    return
+  }
+  document.getElementById('recharge-state').textContent = '正在充值...'
+  try {
+    const payload = await hubRequest(`/instances/${selectedId}/recharge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    document.getElementById('recharge-state').textContent = `充值成功，余额 ${fmtCredit(payload.recharge?.balance)}`
+    document.getElementById('r-amount').value = ''
+    await loadInstances()
+  } catch (error) {
+    document.getElementById('recharge-state').textContent = error.message
+    alert(error.message)
+    await loadSelectedDetails().catch(() => {})
+  }
+}
+
+async function loadSelectedDetails() {
+  updateRechargeTarget()
+  const item = instances.find((row) => row.id === selectedId)
+  if (!item) {
+    document.getElementById('tx-title').textContent = '服务器流水'
+    document.getElementById('actions-title').textContent = '中心充值记录'
+    document.getElementById('tx-tbody').innerHTML = `<tr><td colspan="9" class="muted">请选择项目</td></tr>`
+    document.getElementById('actions-tbody').innerHTML = `<tr><td colspan="8" class="muted">请选择项目</td></tr>`
+    return
+  }
+  document.getElementById('tx-title').textContent = `服务器流水：${item.name}`
+  document.getElementById('actions-title').textContent = `中心充值记录：${item.name}`
+  const [transactions, actions] = await Promise.all([
+    hubRequest(`/instances/${selectedId}/transactions?limit=100`).catch((error) => ({ error: error.message, items: [] })),
+    hubRequest(`/instances/${selectedId}/actions?limit=50`).catch((error) => ({ error: error.message, items: [] })),
+  ])
+  renderTransactions(transactions.items || [], transactions.error)
+  renderActions(actions.items || [], actions.error)
+}
+
+function renderTransactions(rows, error) {
+  if (error) {
+    document.getElementById('tx-tbody').innerHTML = `<tr><td colspan="9" class="text-red-300">${esc(error)}</td></tr>`
+    return
+  }
+  document.getElementById('tx-tbody').innerHTML = rows.map((tx) => {
+    const amount = Number(tx.amount || 0)
+    return `
+      <tr>
+        <td>${fmtTime(tx.created_at)}</td>
+        <td>${esc(tx.user_nickname || tx.user_email || tx.user_id || '-')}</td>
+        <td>${tx.type === 'recharge' ? '充值' : '消耗'}</td>
+        <td class="${amount < 0 ? 'text-amber-300' : 'text-emerald-300'}">${fmtCredit(amount)}</td>
+        <td>${fmtCny(Math.abs(amount) / 5)}</td>
+        <td>${fmtCredit(tx.balance_after)}</td>
+        <td>${esc(tx.note || '')}</td>
+        <td>${esc(tx.request_id || '')}</td>
+        <td>${esc(tx.usage_log_id || '')}</td>
+      </tr>
+    `
+  }).join('') || `<tr><td colspan="9" class="muted">暂无流水</td></tr>`
+}
+
+function renderActions(rows, error) {
+  if (error) {
+    document.getElementById('actions-tbody').innerHTML = `<tr><td colspan="8" class="text-red-300">${esc(error)}</td></tr>`
+    return
+  }
+  document.getElementById('actions-tbody').innerHTML = rows.map((action) => `
+    <tr>
+      <td>${fmtTime(action.created_at)}</td>
+      <td>${action.type === 'recharge' ? '充值' : esc(action.type)}</td>
+      <td>${fmtCredit(action.amount)}</td>
+      <td>${esc(formatActionStatus(action.status))}</td>
+      <td>${esc(action.created_by || '')}</td>
+      <td>${esc(action.note || '')}</td>
+      <td>${esc(action.request_id || '')}</td>
+      <td>${esc(action.error_message || '')}</td>
+    </tr>
+  `).join('') || `<tr><td colspan="8" class="muted">暂无中心操作记录</td></tr>`
+}
+
+function formatActionStatus(status) {
+  if (status === 'success') return '成功'
+  if (status === 'failed') return '失败'
+  if (status === 'pending') return '处理中'
+  return status || ''
+}
+
+function fmtCredit(value) {
+  const num = Number(value || 0)
+  return Number.isFinite(num) ? `${num.toFixed(2)} 积分` : '0.00 积分'
+}
+
+function fmtCny(value) {
+  const num = Number(value || 0)
+  return Number.isFinite(num) ? `¥${num.toFixed(2)}` : '¥0.00'
+}
+
+function fmtTime(value) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function esc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function escAttr(value) {
+  return esc(value)
+}
+
+if (TOKEN) {
+  loadInstances().then(showApp).catch(showLogin)
+} else {
+  showLogin()
+}
+</script>
+</body>
+</html>

@@ -6,6 +6,7 @@ import { getPool } from '../db/postgres.js'
 import { convertCreditsToCny, getCreditBalanceAccountId, rechargeSiteCredits } from '../db/credits.js'
 import { syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
+import creditHubRouter from './creditHub.js'
 import { buildUsageChannelSql, formatUsageChannelLabel, resolveUsageChannel } from './usageChannel.js'
 
 const router = express.Router()
@@ -712,6 +713,8 @@ router.use((req, res, next) => {
   }
   res.status(401).json({ error: 'Unauthorized' })
 })
+
+router.use('/credit-hub', creditHubRouter)
 
 router.get('/overview', async (req, res) => {
   const db = getPool()
