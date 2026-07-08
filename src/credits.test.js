@@ -53,6 +53,37 @@ test('reference credit charge uses reference rates and includes reference video 
   })
 })
 
+test('4K credit charge uses the configured text and reference rates', () => {
+  const textCharge = calculateVideoCreditCharge({
+    resolution: '4K',
+    duration: 5,
+    sampleCount: 1,
+    requestParams: {
+      mediaSummary: {
+        images: { count: 0 },
+        videos: { count: 0 },
+      },
+    },
+  })
+  const referenceCharge = calculateVideoCreditCharge({
+    resolution: '4K',
+    duration: 5,
+    sampleCount: 1,
+    requestParams: {
+      mediaSummary: {
+        images: { count: 1 },
+        videos: { count: 1, durationSeconds: 3 },
+      },
+    },
+  })
+
+  assert.equal(textCharge.rate, 16)
+  assert.equal(textCharge.amount, 80)
+  assert.equal(referenceCharge.rate, 25.5)
+  assert.equal(referenceCharge.billableSeconds, 8)
+  assert.equal(referenceCharge.amount, 204)
+})
+
 test('credit user identity can be read from production session or dev fallback', () => {
   assert.deepEqual(extractCreditUserInfo({
     user: {
