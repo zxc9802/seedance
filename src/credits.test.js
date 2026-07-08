@@ -283,6 +283,13 @@ test('credit center recharge form targets site balance instead of an employee ac
   assert.doesNotMatch(html, /id="r-nickname"/)
 })
 
+test('credit center recharge route defines the admin actor helper it uses', async () => {
+  const apiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
+
+  assert.match(apiSource, /function getAdminActor\(req\)/)
+  assert.match(apiSource, /actor: getAdminActor\(req\)/)
+})
+
 test('credit center generation detail shows actual deducted credits only', async () => {
   const html = await readFile(new URL('../admin/credits.html', import.meta.url), 'utf8')
   const apiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')

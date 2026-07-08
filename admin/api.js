@@ -8,6 +8,11 @@ const router = express.Router()
 const ADMIN_USAGE_CHANNEL = 'qiya'
 const ADMIN_USAGE_CHANNEL_LABEL = '起芽'
 
+function getAdminActor(req) {
+  const user = req.videoSiteSession?.user || {}
+  return user.id || user.userId || user.account || user.email || user.nickname || user.name || 'admin'
+}
+
 function asArray(value) {
   return Array.isArray(value) ? value : []
 }
