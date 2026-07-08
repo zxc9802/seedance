@@ -57,6 +57,25 @@ test('main admin shows shared credit balance and converted credit fees', async (
   assert.match(apiSource, /creditCost/)
 })
 
+test('main admin removes cost import, channel splitting, task id search, and success rate', async () => {
+  const apiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
+  const adminSource = await readFile(new URL('../admin/index.html', import.meta.url), 'utf8')
+  const whereStart = apiSource.indexOf('function buildUsageLogWhereClause')
+  const whereEnd = apiSource.indexOf('function parseUsageDayRange', whereStart)
+  const whereSource = apiSource.slice(whereStart, whereEnd)
+
+  assert.doesNotMatch(adminSource, /费用导入/)
+  assert.doesNotMatch(adminSource, /ci-channel|ci-file|cost-import/)
+  assert.doesNotMatch(adminSource, /id="f-channel"|id="f-task-id"/)
+  assert.doesNotMatch(adminSource, /成功率|id="s-rate"/)
+  assert.match(adminSource, /const CHANNEL_LABEL = '起芽'/)
+  assert.doesNotMatch(adminSource, /CHANNEL_LABELS/)
+  assert.doesNotMatch(adminSource, /api\('\/by-channel'\)/)
+  assert.doesNotMatch(apiSource, /cost-import/)
+  assert.doesNotMatch(apiSource, /buildCostImportPreview|parseCostImportFile|multer/)
+  assert.doesNotMatch(whereSource, /taskId|engineTaskId|engine_task_id ILIKE|query\.channel|USAGE_CHANNEL_SQL =/)
+})
+
 test('admin Excel export puts consumed credits before converted fee', async () => {
   const apiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
 

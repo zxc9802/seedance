@@ -1,31 +1,12 @@
-import crypto from 'node:crypto'
 import ExcelJS from 'exceljs'
 import express from 'express'
-import multer from 'multer'
 import { getPool } from '../db/postgres.js'
 import { convertCreditsToCny, getCreditBalanceAccountId, rechargeSiteCredits } from '../db/credits.js'
-import { syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
-import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
 import creditHubRouter from './creditHub.js'
-import { buildUsageChannelSql, formatUsageChannelLabel, resolveUsageChannel } from './usageChannel.js'
 
 const router = express.Router()
-const costImportUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 10 * 1024 * 1024,
-  },
-  fileFilter: (_, file, callback) => {
-    if (/\.(xlsx|xls|csv)$/i.test(file?.originalname || '')) {
-      callback(null, true)
-      return
-    }
-    callback(new Error('仅支持上传 .xlsx / .xls / .csv 文件'))
-  },
-})
-const COST_IMPORT_PREVIEW_TTL_MS = 30 * 60 * 1000
-const COST_IMPORT_APPLY_BATCH_SIZE = 500
-const costImportPreviewCache = new Map()
+const ADMIN_USAGE_CHANNEL = 'qiya'
+const ADMIN_USAGE_CHANNEL_LABEL = '起芽'
 
 function asArray(value) {
   return Array.isArray(value) ? value : []
@@ -182,17 +163,15 @@ function enhanceUsageLog(log) {
 
   const mediaCounts = extractMediaCounts(log)
   const mediaSizes = extractMediaSizes(log)
-  const rawChannel = log?.channel || null
-  const statsChannel = resolveUsageChannel(rawChannel, log?.provider_id, log?.upstream_url) || rawChannel
   const creditSpent = normalizeCreditSpent(log?.credit_spent)
 
   return {
     ...log,
     credit_spent: creditSpent,
     credit_cost: convertCreditsToCny(creditSpent),
-    rawChannel,
-    statsChannel,
-    channel: statsChannel,
+    rawChannel: log?.channel || null,
+    statsChannel: ADMIN_USAGE_CHANNEL,
+    channel: ADMIN_USAGE_CHANNEL,
     promptText,
     imageCount: mediaCounts.images,
     videoCount: mediaCounts.videos,
@@ -243,7 +222,6 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
   { header: '\u8d39\u7528', width: 14, align: 'right', type: 'amount', value: (log) => safeExcelAmount(log.credit_cost) },
 ])
 
-const USAGE_CHANNEL_SQL = buildUsageChannelSql()
 const CREDIT_USAGE_WHERE_SQL = `(provider_id = 'veo' OR provider_id = 'seedance1')`
 const CREDIT_USAGE_SUMMARY_SQL = `
   SELECT usage_log_id, COALESCE(SUM(-amount), 0)::float AS credit_spent
@@ -263,8 +241,8 @@ function emptyCreditSiteSummary() {
   }
 }
 
-function formatChannelLabel(channel, providerId = null, upstreamUrl = null) {
-  return formatUsageChannelLabel(channel, providerId, upstreamUrl)
+function formatChannelLabel() {
+  return ADMIN_USAGE_CHANNEL_LABEL
 }
 
 function formatStatusLabel(status) {
@@ -458,165 +436,14 @@ async function buildUsageWorkbook(logs, sheetName) {
   return workbook.xlsx.writeBuffer()
 }
 
-function createBadRequest(message) {
-  const error = new Error(message)
-  error.statusCode = 400
-  return error
-}
-
-function getCostImportErrorStatus(error) {
-  if (error?.statusCode) return error.statusCode
-  if (error?.name === 'MulterError' || error?.code === 'LIMIT_FILE_SIZE') return 400
-  if (typeof error?.code === 'string') return 500
-  return 400
-}
-
-function normalizeImportChannel(value) {
-  const channel = String(value ?? '').trim()
-  if (!channel) {
-    throw createBadRequest('请选择要导入的通道')
-  }
-  return channel
-}
-
-function cleanupExpiredCostImportPreviews() {
-  const now = Date.now()
-  for (const [token, entry] of costImportPreviewCache.entries()) {
-    if (!entry || entry.expiresAt <= now) {
-      costImportPreviewCache.delete(token)
-    }
-  }
-}
-
-function createCostImportPreviewToken(payload) {
-  cleanupExpiredCostImportPreviews()
-  const token = crypto.randomUUID()
-  costImportPreviewCache.set(token, {
-    ...payload,
-    expiresAt: Date.now() + COST_IMPORT_PREVIEW_TTL_MS,
-  })
-  return token
-}
-
-function readCostImportPreviewToken(token) {
-  cleanupExpiredCostImportPreviews()
-  const entry = costImportPreviewCache.get(token)
-  if (!entry) {
-    throw createBadRequest('预检令牌不存在或已过期，请重新预检')
-  }
-  return entry
-}
-
-function deleteCostImportPreviewToken(token) {
-  if (!token) return
-  costImportPreviewCache.delete(token)
-}
-
-function runCostImportUpload(req, res) {
-  return new Promise((resolve, reject) => {
-    costImportUpload.single('file')(req, res, (error) => {
-      if (error) {
-        reject(error)
-        return
-      }
-      resolve()
-    })
-  })
-}
-
-function queueCostImportBackupSync(logIds, meta = {}) {
-  const uniqueIds = [...new Set((Array.isArray(logIds) ? logIds : [logIds]).filter(Boolean))]
-  if (uniqueIds.length === 0) return
-
-  setImmediate(() => {
-    syncUsageLogBackupByIds(uniqueIds).catch((error) => {
-      console.error('[cost-import] Lark backup sync failed:', {
-        ...meta,
-        count: uniqueIds.length,
-        error: error.message,
-      })
-    })
-  })
-}
-
-async function applyCostImportActions(client, actions) {
-  const appliedTargetIds = new Set()
-
-  for (let index = 0; index < actions.length; index += COST_IMPORT_APPLY_BATCH_SIZE) {
-    const batch = actions.slice(index, index + COST_IMPORT_APPLY_BATCH_SIZE)
-    const targetIds = batch.map((action) => action.targetId)
-    const amounts = batch.map((action) => String(action.amount))
-
-    const result = await client.query(
-      `
-        WITH input AS (
-          SELECT *
-          FROM unnest($1::uuid[], $2::numeric[]) AS item(target_id, amount)
-        )
-        UPDATE video_usage_logs AS logs
-        SET estimated_cost = input.amount,
-            updated_at = NOW()
-        FROM input
-        WHERE logs.id = input.target_id
-        RETURNING logs.id
-      `,
-      [targetIds, amounts]
-    )
-
-    result.rows.forEach((row) => {
-      if (row?.id) {
-        appliedTargetIds.add(row.id)
-      }
-    })
-  }
-
-  return appliedTargetIds
-}
-
-function getAdminActor(req) {
-  const user = req.videoSiteSession?.user || {}
-  return (
-    user.id
-    || user.userId
-    || user.account
-    || user.email
-    || user.nickname
-    || user.name
-    || 'admin'
-  )
-}
-
-function buildCostImportResponse(preview, extra = {}) {
-  return {
-    channel: extra.channel,
-    fileName: preview.fileName,
-    sheetName: preview.sheetName,
-    recognizedColumns: preview.recognizedColumns,
-    summary: preview.summary,
-    duplicateTaskIds: preview.duplicateTaskIds,
-    detailRows: extra.detailRows ?? preview.detailRows,
-    previewToken: extra.previewToken || null,
-    ...extra.meta,
-  }
-}
-
 function buildUsageLogWhereClause(query = {}) {
   const conditions = ['1=1']
   const params = []
   let paramIdx = 1
-  const taskId = String(query.taskId ?? query.engineTaskId ?? '').trim()
 
   if (query.userId) {
     conditions.push(`user_id = $${paramIdx++}`)
     params.push(query.userId)
-  }
-  if (taskId) {
-    conditions.push(`engine_task_id ILIKE $${paramIdx++}`)
-    params.push(`%${taskId}%`)
-  }
-  if (query.channel) {
-    conditions.push(`${USAGE_CHANNEL_SQL} = $${paramIdx++}`)
-    params.push(query.channel)
   }
   if (query.model) {
     conditions.push(`model ILIKE $${paramIdx++}`)
@@ -812,13 +639,13 @@ router.get('/by-model', async (req, res) => {
     const result = await db.query(`
       SELECT
         COALESCE(model, 'unknown') AS model,
-        ${USAGE_CHANNEL_SQL} AS channel,
+        '${ADMIN_USAGE_CHANNEL}' AS channel,
         COUNT(*)::int AS requests,
         COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
         COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
       FROM video_usage_logs
       ${rangeFilter.whereClause}
-      GROUP BY model, ${USAGE_CHANNEL_SQL}
+      GROUP BY model
       ORDER BY requests DESC
     `, rangeFilter.params)
 
@@ -866,32 +693,6 @@ router.get('/by-user', async (req, res) => {
       ORDER BY requests DESC
       LIMIT $${paramIdx}
     `, [...params, limit])
-
-    res.json(result.rows)
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-router.get('/by-channel', async (req, res) => {
-  const db = getPool()
-  if (!db) return res.json([])
-
-  const days = parseUsageDayRange(req.query.days)
-  const rangeFilter = buildUsageDayRangeFilter(days)
-
-  try {
-    const result = await db.query(`
-      SELECT
-        ${USAGE_CHANNEL_SQL} AS channel,
-        COUNT(*)::int AS requests,
-        COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
-        COALESCE(SUM(estimated_cost), 0)::float AS estimated_cost
-      FROM video_usage_logs
-      ${rangeFilter.whereClause}
-      GROUP BY ${USAGE_CHANNEL_SQL}
-      ORDER BY requests DESC
-    `, rangeFilter.params)
 
     res.json(result.rows)
   } catch (err) {
@@ -961,175 +762,6 @@ router.get('/tasks/export', async (req, res) => {
     res.send(Buffer.from(buffer))
   } catch (err) {
     res.status(500).json({ error: err.message })
-  }
-})
-
-router.post('/cost-import/preview', async (req, res) => {
-  const db = getPool()
-  if (!db) {
-    return res.status(503).json({ error: 'Database not available' })
-  }
-
-  try {
-    await runCostImportUpload(req, res)
-
-    const channel = normalizeImportChannel(req.body?.channel)
-    if (!req.file) {
-      throw createBadRequest('请上传待导入的 Excel 或 CSV 文件')
-    }
-
-    const parsedFile = parseCostImportFile(req.file)
-    const preview = await buildCostImportPreview({
-      db,
-      channel,
-      parsedFile,
-    })
-    const previewToken = createCostImportPreviewToken({
-      channel,
-      parsedFile,
-      createdBy: getAdminActor(req),
-    })
-
-    console.info('[cost-import][preview]', {
-      actor: getAdminActor(req),
-      channel,
-      fileName: parsedFile.fileName,
-      ...preview.summary,
-    })
-
-    res.json(buildCostImportResponse(preview, {
-      channel,
-      previewToken,
-    }))
-  } catch (err) {
-    const status = getCostImportErrorStatus(err)
-    res.status(status).json({ error: err.message || '费用导入预检失败' })
-  }
-})
-
-router.post('/cost-import/apply', async (req, res) => {
-  const db = getPool()
-  if (!db) {
-    return res.status(503).json({ error: 'Database not available' })
-  }
-
-  let previewToken = ''
-
-  try {
-    await runCostImportUpload(req, res)
-
-    previewToken = String(req.body?.importToken || '').trim()
-    const actor = getAdminActor(req)
-
-    let channel = ''
-    let parsedFile = null
-
-    if (previewToken) {
-      const cachedPreview = readCostImportPreviewToken(previewToken)
-      channel = cachedPreview.channel
-      parsedFile = cachedPreview.parsedFile
-    } else {
-      channel = normalizeImportChannel(req.body?.channel)
-      if (!req.file) {
-        throw createBadRequest('请先上传文件预检，或提交有效的预检令牌')
-      }
-      parsedFile = parseCostImportFile(req.file)
-    }
-
-    const preview = await buildCostImportPreview({
-      db,
-      channel,
-      parsedFile,
-    })
-
-    let updatedRows = 0
-    let overwrittenRows = 0
-    const appliedRowNumbers = new Set()
-    const updatedUsageLogIds = []
-    const applyStartedAt = Date.now()
-
-    if (preview.actions.length > 0) {
-      const client = await db.connect()
-      try {
-        await client.query('BEGIN')
-        const appliedTargetIds = await applyCostImportActions(client, preview.actions)
-        updatedRows = appliedTargetIds.size
-
-        for (const action of preview.actions) {
-          if (appliedTargetIds.has(action.targetId)) {
-            appliedRowNumbers.add(action.rowNumber)
-            updatedUsageLogIds.push(action.targetId)
-            if (action.existingCost !== null) {
-              overwrittenRows += 1
-            }
-          }
-        }
-        await client.query('COMMIT')
-      } catch (error) {
-        await client.query('ROLLBACK')
-        throw error
-      } finally {
-        client.release()
-      }
-    }
-
-    queueCostImportBackupSync(updatedUsageLogIds, {
-      actor,
-      channel,
-      fileName: parsedFile.fileName,
-    })
-
-    const actionByRowNumber = new Map(preview.actions.map((action) => [action.rowNumber, action]))
-    const appliedDetailRows = preview.detailRows.map((row) => {
-      if (row.status !== 'writable') {
-        return row
-      }
-
-      const action = actionByRowNumber.get(row.rowNumber)
-      if (!action || !appliedRowNumbers.has(row.rowNumber)) {
-        return {
-          ...row,
-          status: 'skipped',
-          reason: '写入时未找到目标记录，请重新预检后再导入',
-        }
-      }
-
-      return {
-        ...row,
-        status: action.existingCost === null ? 'applied' : 'overwritten',
-        reason: action.existingCost === null ? '已写入费用' : '已覆盖原有费用',
-      }
-    })
-
-    deleteCostImportPreviewToken(previewToken)
-
-    console.info('[cost-import][apply]', {
-      actor,
-      channel,
-      fileName: parsedFile.fileName,
-      updatedRows,
-      overwrittenRows,
-      durationMs: Date.now() - applyStartedAt,
-      invalidRows: preview.summary.invalidRows,
-      unmatchedRows: preview.summary.unmatchedRows,
-      conflictRows: preview.summary.conflictRows,
-      duplicateRowCount: preview.summary.duplicateRowCount,
-    })
-
-    res.json(buildCostImportResponse(preview, {
-      channel,
-      detailRows: appliedDetailRows,
-      meta: {
-        applyResult: {
-          updatedRows,
-          overwrittenRows,
-          skippedRows: preview.actions.length - updatedRows,
-        },
-      },
-    }))
-  } catch (err) {
-    const status = getCostImportErrorStatus(err)
-    res.status(status).json({ error: err.message || '费用导入失败' })
   }
 })
 
