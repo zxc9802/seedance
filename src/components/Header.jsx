@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { Film, History, Loader2, Save, ShieldCheck } from 'lucide-react'
+import { CircleDollarSign, Film, History, Loader2, Save, ShieldCheck } from 'lucide-react'
 import GenerationHistory from './GenerationHistory'
 import './Header.css'
 
@@ -40,6 +40,32 @@ export default function Header({
       </div>
 
       <div className="header-actions">
+        <div className="pricing-info">
+          <button className="header-action-btn pricing-info-trigger" type="button">
+            <CircleDollarSign size={14} />
+            <span>价格说明</span>
+          </button>
+          <div className="pricing-info-panel" role="tooltip">
+            <div className="pricing-info-title">积分价格说明</div>
+            <div className="pricing-info-grid">
+              <section>
+                <h3>seedance企业稳定版 seedance2.0</h3>
+                <p>文生视频: 480P: 2积分/秒, 720P: 4积分/秒, 1080P: 10积分/秒</p>
+                <p>图生视频/融合参考/首尾帧: 480P: 3.5积分/秒, 720P: 7积分/秒, 1080P: 17.5积分/秒</p>
+              </section>
+              <section>
+                <h3>seedance企业稳定版 seedance2.0 fast</h3>
+                <p>文生视频: 480P: 1积分/秒, 720P: 3积分/秒</p>
+                <p>图生视频/融合参考/首尾帧: 480P: 2.5积分/秒, 720P: 5.5积分/秒</p>
+              </section>
+              <section>
+                <h3>nanobanana企业稳定版</h3>
+                <p>图片生成: 3.5积分/张</p>
+              </section>
+            </div>
+          </div>
+        </div>
+
         {showAdminEntry ? (
           <button className="header-action-btn admin-entry-btn" onClick={onOpenAdmin}>
             <ShieldCheck size={14} />
