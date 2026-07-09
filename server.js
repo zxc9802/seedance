@@ -67,7 +67,6 @@ const adminUserIdAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_IDS)
 const adminUserAccountAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_ACCOUNTS)
 const adminUserEmailAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_EMAILS)
 const adminUserNameAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_NAMES)
-const adminCreditsPath = normalizeAdminCreditsPath(process.env.ADMIN_CREDITS_PATH || '/admin/credit-center')
 const hasExplicitAdminAllowlist = [
   adminUserIdAllowlist,
   adminUserAccountAllowlist,
@@ -199,7 +198,6 @@ app.get('/api/health', (_, res) => {
     uploadTtlMinutes,
     publicBaseUrl: publicBaseUrl || null,
     requireMainAppSso,
-    adminCreditsPath: adminCreditsPath,
   })
 })
 
@@ -3180,9 +3178,6 @@ app.use('/api/credit-agent', creditAgentRouter)
 app.use('/api/admin', requireAdminApiAccess, adminRouter)
 app.get('/admin', requireAdminPageAccess, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'index.html'))
-})
-app.get(adminCreditsPath, (req, res) => {
-  res.sendFile(path.join(__dirname, 'admin', 'credits.html'))
 })
 app.get('/admin/credit-hub', (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'credit-hub.html'))
@@ -6677,10 +6672,7 @@ function shouldBypassSso(req) {
   const requestPath = resolveRequestPath(req)
   if (!requireMainAppSso) return true
   if (requestPath === '/api/health') return true
-  if (requestPath === adminCreditsPath) return true
-  if (requestPath === '/admin/credit-center') return true
   if (requestPath === '/admin/credit-hub') return true
-  if (requestPath.startsWith('/api/admin/credits/')) return true
   if (requestPath.startsWith('/api/admin/credit-hub/')) return true
   if (requestPath.startsWith('/api/credit-agent/')) return true
   if (requestPath.startsWith('/temp-assets/')) return true
@@ -6922,12 +6914,6 @@ function parseIdentityAllowlist(value) {
   )
 }
 
-function normalizeAdminCreditsPath(value) {
-  const normalized = String(value || '').trim()
-  if (!normalized || normalized === '/') return '/admin/credit-center'
-  return normalized.startsWith('/') ? normalized : `/${normalized}`
-}
-
 function normalizeIdentityValue(value) {
   if (value == null) return ''
   return String(value).trim().toLowerCase()
@@ -7035,7 +7021,7 @@ function isAdminRoleValue(value) {
 }
 
 function requireAdminApiAccess(req, res, next) {
-  if (req.path.startsWith('/credits/') || req.path.startsWith('/credit-hub/')) {
+  if (req.path.startsWith('/credit-hub/')) {
     next()
     return
   }

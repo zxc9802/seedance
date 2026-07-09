@@ -1,17 +1,12 @@
 import ExcelJS from 'exceljs'
 import express from 'express'
 import { getPool } from '../db/postgres.js'
-import { convertCreditsToCny, getCreditBalanceAccountId, rechargeSiteCredits } from '../db/credits.js'
+import { convertCreditsToCny, getCreditBalanceAccountId } from '../db/credits.js'
 import creditHubRouter from './creditHub.js'
 
 const router = express.Router()
 const ADMIN_USAGE_CHANNEL = 'qiya'
 const ADMIN_USAGE_CHANNEL_LABEL = '起芽'
-
-function getAdminActor(req) {
-  const user = req.videoSiteSession?.user || {}
-  return user.id || user.userId || user.account || user.email || user.nickname || user.name || 'admin'
-}
 
 function asArray(value) {
   return Array.isArray(value) ? value : []
@@ -227,24 +222,12 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
   { header: '\u8d39\u7528', width: 14, align: 'right', type: 'amount', value: (log) => safeExcelAmount(log.credit_cost) },
 ])
 
-const CREDIT_USAGE_WHERE_SQL = `(provider_id = 'veo' OR provider_id = 'seedance1')`
 const CREDIT_USAGE_SUMMARY_SQL = `
   SELECT usage_log_id, COALESCE(SUM(-amount), 0)::float AS credit_spent
   FROM user_credit_transactions
   WHERE type = 'consume' AND usage_log_id IS NOT NULL
   GROUP BY usage_log_id
 `
-
-function emptyCreditSiteSummary() {
-  return {
-    balance: 0,
-    userCount: 0,
-    generationCount: 0,
-    outputCount: 0,
-    generatedSeconds: 0,
-    consumedCredits: 0,
-  }
-}
 
 function formatChannelLabel() {
   return ADMIN_USAGE_CHANNEL_LABEL
@@ -765,155 +748,6 @@ router.get('/tasks/export', async (req, res) => {
     res.setHeader('Content-Type', EXCEL_CONTENT_TYPE)
     res.setHeader('Content-Disposition', `attachment; filename="usage_${exportDate}.xlsx"`)
     res.send(Buffer.from(buffer))
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-router.get('/credits/site', async (req, res) => {
-  const db = getPool()
-  if (!db) return res.json(emptyCreditSiteSummary())
-
-  try {
-    const [accountResult, usageResult, transactionResult] = await Promise.all([
-      db.query(
-        `SELECT COALESCE(balance, 0)::float AS balance
-         FROM user_credit_accounts
-         WHERE user_id = $1`,
-        [getCreditBalanceAccountId()],
-      ),
-      db.query(`
-        SELECT
-          COUNT(DISTINCT user_id)::int AS user_count,
-          COUNT(*)::int AS generation_count,
-          COALESCE(SUM(GREATEST(COALESCE(sample_count, 1), 1)), 0)::int AS output_count,
-          COALESCE(SUM(duration * GREATEST(COALESCE(sample_count, 1), 1)), 0)::float AS generated_seconds
-        FROM video_usage_logs
-        WHERE ${CREDIT_USAGE_WHERE_SQL}
-      `),
-      db.query(`
-        SELECT COALESCE(SUM(-amount), 0)::float AS consumed_credits
-        FROM user_credit_transactions
-        WHERE type = 'consume'
-      `),
-    ])
-
-    res.json({
-      balance: Number(accountResult.rows[0]?.balance || 0),
-      userCount: Number(usageResult.rows[0]?.user_count || 0),
-      generationCount: Number(usageResult.rows[0]?.generation_count || 0),
-      outputCount: Number(usageResult.rows[0]?.output_count || 0),
-      generatedSeconds: Number(usageResult.rows[0]?.generated_seconds || 0),
-      consumedCredits: Number(transactionResult.rows[0]?.consumed_credits || 0),
-    })
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-router.get('/credits/users', async (req, res) => {
-  const db = getPool()
-  if (!db) return res.json([])
-
-  try {
-    const result = await db.query(`
-      WITH usage_stats AS (
-        SELECT
-          user_id,
-          (array_agg(user_email ORDER BY created_at DESC) FILTER (WHERE user_email IS NOT NULL AND user_email <> ''))[1] AS user_email,
-          (array_agg(user_nickname ORDER BY created_at DESC) FILTER (WHERE user_nickname IS NOT NULL AND user_nickname <> ''))[1] AS user_nickname,
-          (array_agg(user_group ORDER BY created_at DESC) FILTER (WHERE user_group IS NOT NULL AND user_group <> ''))[1] AS user_group,
-          COUNT(*)::int AS generation_count,
-          COALESCE(SUM(GREATEST(COALESCE(sample_count, 1), 1)), 0)::int AS output_count,
-          COALESCE(SUM(duration * GREATEST(COALESCE(sample_count, 1), 1)), 0)::float AS generated_seconds,
-          MAX(created_at) AS last_generated_at
-        FROM video_usage_logs
-        WHERE ${CREDIT_USAGE_WHERE_SQL}
-        GROUP BY user_id
-      ),
-      transaction_stats AS (
-        SELECT
-          user_id,
-          COALESCE(SUM(-amount), 0)::float AS consumed_credits
-        FROM user_credit_transactions
-        WHERE type = 'consume'
-        GROUP BY user_id
-      )
-      SELECT
-        usage_stats.user_id,
-        usage_stats.user_email,
-        usage_stats.user_nickname,
-        usage_stats.user_group,
-        COALESCE(usage_stats.generation_count, 0)::int AS generation_count,
-        COALESCE(usage_stats.output_count, 0)::int AS output_count,
-        COALESCE(usage_stats.generated_seconds, 0)::float AS generated_seconds,
-        COALESCE(transaction_stats.consumed_credits, 0)::float AS consumed_credits,
-        usage_stats.last_generated_at
-      FROM usage_stats
-      LEFT JOIN transaction_stats ON transaction_stats.user_id = usage_stats.user_id
-      ORDER BY last_generated_at DESC NULLS LAST, user_id
-      LIMIT 300
-    `)
-    res.json(result.rows)
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-router.post('/credits/recharge', async (req, res) => {
-  const { amount, note } = req.body || {}
-  try {
-    const result = await rechargeSiteCredits({
-      amount,
-      note: note ? String(note).trim() : null,
-      actor: getAdminActor(req),
-    })
-    res.json({ success: true, ...result })
-  } catch (err) {
-    res.status(400).json({ error: err.message || '充值失败' })
-  }
-})
-
-router.get('/credits/transactions', async (req, res) => {
-  const db = getPool()
-  if (!db) return res.json([])
-  const userId = String(req.query.userId || '').trim()
-  const params = []
-  const where = userId ? 'WHERE user_id = $1' : ''
-  if (userId) params.push(userId)
-
-  try {
-    const result = await db.query(`
-      SELECT *
-      FROM user_credit_transactions
-      ${where}
-      ORDER BY created_at DESC
-      LIMIT 200
-    `, params)
-    res.json(result.rows)
-  } catch (err) {
-    res.status(500).json({ error: err.message })
-  }
-})
-
-router.get('/credits/usage', async (req, res) => {
-  const db = getPool()
-  if (!db) return res.json([])
-  const userId = String(req.query.userId || '').trim()
-  const params = []
-  const where = userId ? `WHERE ${CREDIT_USAGE_WHERE_SQL} AND user_id = $1` : `WHERE ${CREDIT_USAGE_WHERE_SQL}`
-  if (userId) params.push(userId)
-
-  try {
-    const result = await db.query(`
-      SELECT logs.*, COALESCE(credit_usage.credit_spent, 0)::float AS credit_spent
-      FROM video_usage_logs logs
-      LEFT JOIN (${CREDIT_USAGE_SUMMARY_SQL}) credit_usage ON credit_usage.usage_log_id = logs.id
-      ${where}
-      ORDER BY logs.created_at DESC
-      LIMIT 300
-    `, params)
-    res.json(result.rows.map(enhanceUsageLog))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

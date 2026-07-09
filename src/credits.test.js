@@ -273,34 +273,12 @@ test('credit balance account is shared across all employees', async () => {
   assert.equal(credits.getCreditBalanceAccountId({ userId: 'employee-b' }), credits.SITE_CREDIT_ACCOUNT_ID)
 })
 
-test('credit center recharge form targets site balance instead of an employee account', async () => {
-  const html = await readFile(new URL('../admin/credits.html', import.meta.url), 'utf8')
-
-  assert.match(html, /站点余额/)
-  assert.doesNotMatch(html, /用户 ID/)
-  assert.doesNotMatch(html, /id="r-user-id"/)
-  assert.doesNotMatch(html, /id="r-email"/)
-  assert.doesNotMatch(html, /id="r-nickname"/)
-})
-
-test('credit center recharge route defines the admin actor helper it uses', async () => {
+test('legacy single-site credit recharge center API is removed from master', async () => {
   const apiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
 
-  assert.match(apiSource, /function getAdminActor\(req\)/)
-  assert.match(apiSource, /actor: getAdminActor\(req\)/)
-})
-
-test('credit center generation detail shows actual deducted credits only', async () => {
-  const html = await readFile(new URL('../admin/credits.html', import.meta.url), 'utf8')
-  const apiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
-  const usageRouteStart = apiSource.indexOf("router.get('/credits/usage'")
-  const usageRouteEnd = apiSource.indexOf("router.get('/pricing'", usageRouteStart)
-  const usageRouteSource = apiSource.slice(usageRouteStart, usageRouteEnd)
-
-  assert.match(html, /fmtCredit\(row\.credit_spent\)/)
-  assert.doesNotMatch(html, /fmtCredit\(row\.estimated_cost\)/)
-  assert.match(usageRouteSource, /LEFT JOIN \(\$\{CREDIT_USAGE_SUMMARY_SQL\}\) credit_usage/)
-  assert.match(usageRouteSource, /COALESCE\(credit_usage\.credit_spent, 0\)::float AS credit_spent/)
+  assert.doesNotMatch(apiSource, /router\.(get|post)\('\/credits\//)
+  assert.doesNotMatch(apiSource, /rechargeSiteCredits/)
+  assert.doesNotMatch(apiSource, /function getAdminActor\(req\)/)
 })
 
 test('credit cost converts five credits into one yuan', async () => {
