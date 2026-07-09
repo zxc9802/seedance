@@ -198,6 +198,9 @@ async function fetchAgentJson(instance, path, options = {}) {
     })
     const payload = await response.json().catch(async () => ({ error: await response.text().catch(() => '') }))
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw createHttpError(502, '商家服务器 Agent Token 未授权，请检查该商家的 CREDIT_AGENT_TOKEN 是否和总部填写一致')
+      }
       throw createHttpError(response.status, payload?.error || `Agent request failed with HTTP ${response.status}`)
     }
     return payload

@@ -55,3 +55,13 @@ test('credit hub stores remote tokens encrypted, avoids duplicate server URLs, a
   assert.match(hubSource, /baseUrl already exists/)
   assert.doesNotMatch(hubSource, /res\.json\([^)]*token_ciphertext/)
 })
+
+test('remote agent auth failures do not force the hub admin login screen', async () => {
+  const hubSource = await readFile(new URL('../admin/creditHub.js', import.meta.url), 'utf8')
+  const hubPage = await readFile(new URL('../admin/credit-hub.html', import.meta.url), 'utf8')
+
+  assert.match(hubSource, /response\.status === 401 \|\| response\.status === 403/)
+  assert.match(hubSource, /商家服务器 Agent Token 未授权/)
+  assert.doesNotMatch(hubSource, /res\.status\(error\.statusCode \|\| 502\)[\s\S]*Agent Token 未授权/)
+  assert.match(hubPage, /if \(response\.status === 401\)[\s\S]*showLogin\(\)/)
+})
