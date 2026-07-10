@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs'
 import express from 'express'
 import { getPool } from '../db/postgres.js'
+import creditHubRouter from './creditHub.js'
 
 const router = express.Router()
 const ADMIN_USAGE_CHANNEL = 'qiya'
@@ -446,6 +447,8 @@ router.use((req, res, next) => {
   }
   res.status(401).json({ error: 'Unauthorized' })
 })
+
+router.use('/credit-hub', creditHubRouter)
 
 router.get('/overview', async (req, res) => {
   const db = getPool()
