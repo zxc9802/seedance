@@ -20,9 +20,9 @@ test('credit hub admin page and APIs are password-only hidden surfaces', async (
   const adminApiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
   const hubPage = await readFile(new URL('../admin/credit-hub.html', import.meta.url), 'utf8')
 
-  assert.match(serverSource, /CREDIT_CENTER_MODE/)
-  assert.match(serverSource, /creditCenterMode === 'hub' \? 'credit-hub\.html' : 'credits\.html'/)
-  assert.match(serverSource, /app\.get\('\/admin\/site-credit-center'/)
+  assert.match(serverSource, /app\.get\(adminCreditCenterPath/)
+  assert.doesNotMatch(serverSource, /creditCenterMode === 'hub' \? 'credit-hub\.html' : 'credits\.html'/)
+  assert.doesNotMatch(serverSource, /app\.get\('\/admin\/site-credit-center'/)
   assert.match(serverSource, /app\.get\('\/admin\/credit-hub'/)
   assert.match(serverSource, /requestPath === '\/admin\/credit-hub'/)
   assert.match(serverSource, /requestPath\.startsWith\('\/api\/admin\/credit-hub\/'\)/)

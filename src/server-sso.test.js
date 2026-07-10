@@ -42,14 +42,17 @@ test('/api/session rejects stale child-site cookies before returning a user', as
   assert.doesNotMatch(routeSource, /const session = req\.videoSiteSession \|\| resolveLocalDevSession\(\)/)
 })
 
-test('hidden credit center bypasses SSO using the original request url', async () => {
+test('multi-merchant credit hub bypasses SSO while legacy single-site credit API stays removed', async () => {
   const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
   const bypassStart = serverSource.indexOf('function shouldBypassSso(req)')
   const bypassEnd = serverSource.indexOf('function isHtmlDocumentRequest(req)', bypassStart)
   const bypassSource = serverSource.slice(bypassStart, bypassEnd)
 
   assert.match(bypassSource, /resolveRequestPath\(req\)/)
-  assert.match(bypassSource, /requestPath === adminCreditsPath/)
-  assert.match(bypassSource, /requestPath\.startsWith\('\/api\/admin\/credits\/'\)/)
-  assert.match(serverSource, /adminCreditsPath: adminCreditsPath/)
+  assert.match(bypassSource, /requestPath === adminCreditCenterPath/)
+  assert.match(bypassSource, /requestPath === '\/admin\/credit-hub'/)
+  assert.match(bypassSource, /requestPath\.startsWith\('\/api\/admin\/credit-hub\/'\)/)
+  assert.match(bypassSource, /requestPath\.startsWith\('\/api\/credit-agent\/'\)/)
+  assert.doesNotMatch(bypassSource, /requestPath\.startsWith\('\/api\/admin\/credits\/'\)/)
+  assert.doesNotMatch(serverSource, /app\.get\('\/admin\/site-credit-center'/)
 })

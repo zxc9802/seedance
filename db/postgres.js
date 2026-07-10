@@ -126,11 +126,6 @@ export async function initDatabase() {
     await db.query(`ALTER TABLE user_credit_transactions ADD COLUMN IF NOT EXISTS request_id TEXT`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_transactions_request_id ON user_credit_transactions(request_id)`)
     await db.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_unique_consume_usage
-      ON user_credit_transactions(usage_log_id)
-      WHERE type = 'consume' AND usage_log_id IS NOT NULL
-    `)
-    await db.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_transactions_unique_recharge_request
       ON user_credit_transactions(request_id)
       WHERE type = 'recharge' AND request_id IS NOT NULL
