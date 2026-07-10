@@ -12,10 +12,7 @@ import { promisify } from 'node:util'
 import { createServer as createViteServer, loadEnv } from 'vite'
 import { getPool, initDatabase, closePool } from './db/postgres.js'
 import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
-import { assertSufficientCredits, calculateVideoCreditCharge, normalizeCreditProviderId, shouldChargeCreditsForProvider } from './db/credits.js'
 import adminRouter from './admin/api.js'
-import { startCreditHubSyncLoop } from './admin/creditHub.js'
-import creditAgentRouter from './credit/agentApi.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -477,9 +474,6 @@ app.post('/api/veo/generate', async (req, res) => {
   const requestedParams = extractRequestedVideoParams(body)
   const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
   const providerId = body.providerId || 'veo'
-  const creditProviderId = normalizeCreditProviderId(providerId)
-  const creditCharge = await prepareVideoCreditCharge(req, res, creditProviderId, requestedParams, usageRequestParams)
-  if (shouldChargeCreditsForProvider(creditProviderId) && !creditCharge) return
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
@@ -487,10 +481,10 @@ app.post('/api/veo/generate', async (req, res) => {
   }, ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) return
     const taskId = extractAggregationTaskId(payload)
-    insertChargedUsageLog({
+    insertUsageLog({
       session: req.videoSiteSession,
       channel: 'aggregation',
-      providerId: creditProviderId,
+      providerId,
       model: requestedParams.model || null,
       generationMode: body.mode || 't2v',
       prompt: body.prompt || null,
@@ -505,7 +499,7 @@ app.post('/api/veo/generate', async (req, res) => {
       upstreamUrl: url,
       status: taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
       errorMessage: taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
-    }, creditCharge).catch(() => {})
+    }).catch(() => {})
   })
 })
 
@@ -2628,51 +2622,6 @@ function extractRequestedVideoParams(requestBody) {
   }
 }
 
-async function prepareVideoCreditCharge(req, res, providerId, requestedParams, requestParams) {
-  if (!shouldChargeCreditsForProvider(providerId)) return null
-
-  const charge = calculateVideoCreditCharge({
-    providerId,
-    model: requestedParams.model,
-    resolution: requestedParams.resolution,
-    duration: requestedParams.duration,
-    sampleCount: requestedParams.sampleCount || 1,
-    requestParams,
-  })
-
-  if (charge.amount <= 0) return charge
-
-  try {
-    const creditStatus = await assertSufficientCredits(req.videoSiteSession, charge)
-    if (!creditStatus.ok) {
-      res.status(402).json({
-        success: false,
-        code: 'INSUFFICIENT_CREDITS',
-        message: `积分不足，本次需要 ${charge.amount} 积分，当前余额 ${creditStatus.balance || 0} 积分。`,
-        requiredCredits: charge.amount,
-        balance: creditStatus.balance || 0,
-      })
-      return null
-    }
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message || '积分校验失败',
-    })
-    return null
-  }
-
-  return charge
-}
-
-function insertChargedUsageLog(options, charge) {
-  return insertUsageLog({
-    ...options,
-    unitPrice: charge?.rate ?? null,
-    estimatedCost: charge?.amount ?? null,
-  })
-}
-
 function resolveUsageMediaSummary(requestParams, headerSummary) {
   if (headerSummary) {
     return headerSummary
@@ -3174,13 +3123,9 @@ cleanupExpiredUploads().catch((error) => {
 })
 
 // Admin dashboard
-app.use('/api/credit-agent', creditAgentRouter)
 app.use('/api/admin', requireAdminApiAccess, adminRouter)
 app.get('/admin', requireAdminPageAccess, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'index.html'))
-})
-app.get('/admin/credit-hub', (req, res) => {
-  res.sendFile(path.join(__dirname, 'admin', 'credit-hub.html'))
 })
 
 const httpServer = createHttpServer(app)
@@ -3215,7 +3160,6 @@ httpServer.listen(port, async () => {
   console.log(`[server] ${mode} listening on http://localhost:${port}`)
   await initDatabase()
   startUsageStatusMaintenanceLoop()
-  startCreditHubSyncLoop()
 })
 
 async function proxyJson(req, res, url, extraHeaders = {}, onResponse = null) {
@@ -6672,9 +6616,6 @@ function shouldBypassSso(req) {
   const requestPath = resolveRequestPath(req)
   if (!requireMainAppSso) return true
   if (requestPath === '/api/health') return true
-  if (requestPath === '/admin/credit-hub') return true
-  if (requestPath.startsWith('/api/admin/credit-hub/')) return true
-  if (requestPath.startsWith('/api/credit-agent/')) return true
   if (requestPath.startsWith('/temp-assets/')) return true
   if (!isProduction && (
     requestPath.startsWith('/@vite')
@@ -7021,11 +6962,6 @@ function isAdminRoleValue(value) {
 }
 
 function requireAdminApiAccess(req, res, next) {
-  if (req.path.startsWith('/credit-hub/')) {
-    next()
-    return
-  }
-
   if (!requireMainAppSso) {
     next()
     return

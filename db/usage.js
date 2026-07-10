@@ -1,5 +1,4 @@
 import { getPool } from './postgres.js'
-import { deductUserCreditsForSucceededUsageLog, shouldDeductCreditsForUsageUpdate } from './credits.js'
 import { scheduleUsageLogBackupSyncById, syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 
 function extractDevUserInfo() {
@@ -155,13 +154,6 @@ export async function updateUsageLogByTaskId(engineTaskId, updates) {
     )
     if (result.rows.length > 0) {
       const updatedIds = result.rows.map((row) => row.id)
-      if (shouldDeductCreditsForUsageUpdate(updates)) {
-        updatedIds.forEach((id) => {
-          deductUserCreditsForSucceededUsageLog(id).catch((error) => {
-            console.error('[credits] success deduction failed:', error.message)
-          })
-        })
-      }
       syncUsageLogBackupByIds(updatedIds).catch(() => {})
     }
   } catch (err) {

@@ -186,12 +186,9 @@
   </div>
 
   <div id="tab-overview">
-    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 mb-6">
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
       <div class="card"><div class="text-sm text-gray-400 mb-1" id="s-range-label">今日请求</div><div class="stat-value text-blue-400" id="s-today">-</div></div>
       <div class="card"><div class="text-sm text-gray-400 mb-1">总请求数</div><div class="stat-value text-white" id="s-total">-</div></div>
-      <div class="card"><div class="text-sm text-gray-400 mb-1">剩余积分</div><div class="stat-value text-sky-400" id="s-credit-balance">-</div></div>
-      <div class="card"><div class="text-sm text-gray-400 mb-1">消耗积分</div><div class="stat-value text-amber-300" id="s-credit-consumed">-</div></div>
-      <div class="card"><div class="text-sm text-gray-400 mb-1">费用</div><div class="stat-value text-yellow-400" id="s-cost">-</div></div>
       <div class="card"><div class="text-sm text-gray-400 mb-1">活跃用户</div><div class="stat-value text-purple-400" id="s-users">-</div></div>
     </div>
     <div class="grid grid-cols-1 gap-4 mb-6">
@@ -261,8 +258,6 @@
             <th>engine_task_id</th>
             <th>upstream_url</th>
             <th>错误信息</th>
-            <th>消耗积分</th>
-            <th>费用</th>
           </tr>
         </thead>
         <tbody id="task-tbody"></tbody>
@@ -309,8 +304,6 @@
             <th>生成数量</th>
             <th>成功</th>
             <th>失败</th>
-            <th>消耗积分</th>
-            <th>费用</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -340,8 +333,6 @@
               <th>engine_task_id</th>
               <th>upstream_url</th>
               <th>错误信息</th>
-              <th>消耗积分</th>
-              <th>费用</th>
             </tr>
           </thead>
           <tbody id="user-detail-tbody"></tbody>
@@ -490,9 +481,6 @@ async function refreshAll() {
     document.getElementById('s-range-label').textContent = getOverviewRangeLabel(selectedRange)
     document.getElementById('s-today').textContent = overview.rangeRequests ?? overview.todayRequests ?? 0
     document.getElementById('s-total').textContent = overview.totalRequests ?? 0
-    document.getElementById('s-credit-balance').textContent = formatCredits(overview.creditBalance)
-    document.getElementById('s-credit-consumed').textContent = formatCredits(overview.creditConsumed)
-    document.getElementById('s-cost').textContent = formatMoney(overview.creditCost ?? overview.totalCost)
     document.getElementById('s-users').textContent = overview.activeUsers ?? 0
 
     renderTrendChart(trend)
@@ -602,18 +590,6 @@ function formatStatus(status) {
   return STATUS_LABELS[status] || status || '-'
 }
 
-function formatMoney(value) {
-  if (value === null || value === undefined || value === '') return '-'
-  const amount = Number(value)
-  return Number.isFinite(amount) ? `¥${amount.toFixed(2)}` : '-'
-}
-
-function formatCredits(value) {
-  if (value === null || value === undefined || value === '') return '-'
-  const amount = Number(value)
-  return Number.isFinite(amount) ? amount.toFixed(2) : '-'
-}
-
 function formatDurationLabel(value) {
   if (value === null || value === undefined || value === '') return '-'
   const duration = Number(value)
@@ -652,8 +628,6 @@ function mergeUsersByName(rows = []) {
         succeeded: 0,
         failed: 0,
         estimated_cost: 0,
-        credit_spent: 0,
-        credit_cost: 0,
       })
     }
 
@@ -673,8 +647,6 @@ function mergeUsersByName(rows = []) {
     target.succeeded += Number(user.succeeded) || 0
     target.failed += Number(user.failed) || 0
     target.estimated_cost += Number(user.estimated_cost) || 0
-    target.credit_spent += Number(user.credit_spent) || 0
-    target.credit_cost += Number(user.credit_cost) || 0
   })
 
   return [...grouped.values()]
@@ -692,13 +664,10 @@ function mergeUsersByName(rows = []) {
         succeeded: user.succeeded,
         failed: user.failed,
         estimated_cost: user.estimated_cost,
-        credit_spent: user.credit_spent,
-        credit_cost: user.credit_cost,
       }
     })
     .sort((left, right) => {
       if (right.requests !== left.requests) return right.requests - left.requests
-      if (right.credit_spent !== left.credit_spent) return right.credit_spent - left.credit_spent
       return String(left.user_name).localeCompare(String(right.user_name), 'zh-CN')
     })
 }
@@ -874,8 +843,6 @@ async function loadTasks(page) {
         <td>${renderClipCell(task.engine_task_id || '-', 180)}</td>
         <td>${renderClipCell(task.upstream_url || '-', 260)}</td>
         <td>${renderClipCell(task.error_message || '-', 240)}</td>
-        <td>${formatCredits(task.credit_spent)}</td>
-        <td>${formatMoney(task.credit_cost)}</td>
       </tr>
     `).join('')
 
@@ -996,8 +963,6 @@ async function loadUsers() {
         <td>${user.generated_count}</td>
         <td class="status-succeeded">${user.succeeded}</td>
         <td class="status-failed">${user.failed}</td>
-        <td>${formatCredits(user.credit_spent)}</td>
-        <td>${formatMoney(user.credit_cost)}</td>
         <td><button class="btn btn-secondary text-xs" data-user-ids="${escAttr(encodeURIComponent(user.user_ids_key || ''))}" data-user-name="${escAttr(encodeURIComponent(user.user_name || ''))}" onclick="showUserDetail(decodeURIComponent(this.dataset.userIds), decodeURIComponent(this.dataset.userName))">查看明细</button></td>
       </tr>
     `).join('')
@@ -1042,8 +1007,6 @@ async function showUserDetail(userId, userName) {
         <td>${renderClipCell(task.engine_task_id || '-', 180)}</td>
         <td>${renderClipCell(task.upstream_url || '-', 260)}</td>
         <td>${renderClipCell(task.error_message || '-', 240)}</td>
-        <td>${formatCredits(task.credit_spent)}</td>
-        <td>${formatMoney(task.credit_cost)}</td>
       </tr>
     `).join('')
   } catch (error) {
