@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>多商家积分中心</title>
+<title>多服务器积分中心</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <style>
   body {
@@ -69,7 +69,7 @@
 </head>
 <body>
 <div id="login" class="card max-w-sm mx-auto mt-28 p-6" style="display:none">
-  <h1 class="text-2xl font-bold mb-4">多商家积分中心</h1>
+  <h1 class="text-2xl font-bold mb-4">多服务器积分中心</h1>
   <input id="pwd" type="password" placeholder="管理员密码" class="field mb-3" onkeydown="if(event.key==='Enter')login()">
   <button class="btn btn-primary w-full" onclick="login()">登录</button>
 </div>
@@ -77,8 +77,8 @@
 <div id="app" class="max-w-[1600px] mx-auto px-5 py-6" style="display:none">
   <div class="flex flex-wrap items-center justify-between gap-3 mb-5">
     <div>
-      <h1 class="text-3xl font-bold">多商家积分中心</h1>
-      <p class="muted mt-1">集中查看多个商家服务器余额、消耗、今日消耗，并远程充值</p>
+      <h1 class="text-3xl font-bold">多服务器积分中心</h1>
+      <p class="muted mt-1">集中查看多个 seedance 实例余额、消耗、今日消耗，并远程充值</p>
     </div>
     <div class="flex gap-2">
       <button class="btn btn-secondary" onclick="syncAll()">同步全部</button>
@@ -87,7 +87,7 @@
   </div>
 
   <div class="grid grid-cols-2 xl:grid-cols-5 gap-4 mb-5">
-    <div class="card p-4"><div class="muted text-sm">商家数</div><div id="stat-count" class="text-3xl font-bold mt-2">0</div></div>
+    <div class="card p-4"><div class="muted text-sm">项目数</div><div id="stat-count" class="text-3xl font-bold mt-2">0</div></div>
     <div class="card p-4"><div class="muted text-sm">总余额</div><div id="stat-balance" class="text-3xl font-bold text-sky-300 mt-2">0.00</div></div>
     <div class="card p-4"><div class="muted text-sm">累计消耗</div><div id="stat-consumed" class="text-3xl font-bold text-amber-300 mt-2">0.00</div></div>
     <div class="card p-4"><div class="muted text-sm">今日消耗</div><div id="stat-today" class="text-3xl font-bold text-emerald-300 mt-2">0.00</div></div>
@@ -97,15 +97,15 @@
   <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-4 mb-5">
     <div class="card p-4">
       <div class="flex items-center justify-between gap-3 mb-3">
-        <h2 class="text-lg font-bold">商家列表</h2>
-        <input id="search" class="field max-w-xs" placeholder="搜索商家/服务器 URL/备注" oninput="renderInstances()">
+        <h2 class="text-lg font-bold">项目列表</h2>
+        <input id="search" class="field max-w-xs" placeholder="搜索项目/URL" oninput="renderInstances()">
       </div>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>商家</th>
-              <th>服务器 URL</th>
+              <th>项目</th>
+              <th>基础 URL</th>
               <th>余额</th>
               <th>累计消耗</th>
               <th>今日消耗</th>
@@ -125,23 +125,23 @@
     <div class="space-y-4">
       <div class="card p-4">
         <div class="flex items-center justify-between mb-3">
-          <h2 id="form-title" class="text-lg font-bold">新增商家</h2>
+          <h2 id="form-title" class="text-lg font-bold">新增项目</h2>
           <button class="btn btn-ghost" onclick="resetForm()">清空</button>
         </div>
         <div class="grid gap-3">
-          <label class="text-sm muted">商家名称<input id="f-name" class="field mt-1" placeholder="seedance-上海"></label>
-          <label class="text-sm muted">服务器 URL<input id="f-url" class="field mt-1" placeholder="https://seedance.example.com"></label>
+          <label class="text-sm muted">项目名<input id="f-name" class="field mt-1" placeholder="seedance-上海"></label>
+          <label class="text-sm muted">基础 URL<input id="f-url" class="field mt-1" placeholder="https://seedance.example.com"></label>
           <label class="text-sm muted">Agent Token<input id="f-token" class="field mt-1" type="password" placeholder="编辑时留空则不修改"></label>
           <label class="text-sm muted">备注<textarea id="f-note" class="field mt-1" rows="3"></textarea></label>
           <label class="inline-flex items-center gap-2 text-sm"><input id="f-enabled" type="checkbox" checked> 启用同步</label>
-          <button class="btn btn-primary" onclick="saveInstance()">保存商家</button>
+          <button class="btn btn-primary" onclick="saveInstance()">保存项目</button>
           <div id="form-state" class="text-sm muted"></div>
         </div>
       </div>
 
       <div class="card p-4">
         <h2 class="text-lg font-bold mb-1">远程充值</h2>
-        <p id="recharge-target" class="muted text-sm mb-3">请选择一个商家</p>
+        <p id="recharge-target" class="muted text-sm mb-3">请选择一个项目</p>
         <div class="grid gap-3">
           <label class="text-sm muted">充值积分<input id="r-amount" type="number" min="0.01" step="0.01" class="field mt-1"></label>
           <label class="text-sm muted">备注<textarea id="r-note" rows="3" class="field mt-1"></textarea></label>
@@ -306,7 +306,7 @@ function renderInstances() {
         </td>
       </tr>
     `
-  }).join('') || `<tr><td colspan="11" class="muted">还没有添加商家</td></tr>`
+  }).join('') || `<tr><td colspan="11" class="muted">还没有添加项目</td></tr>`
 }
 
 function statusPill(status, error) {
@@ -326,13 +326,13 @@ async function selectInstance(id) {
 
 function updateRechargeTarget() {
   const item = instances.find((row) => row.id === selectedId)
-  document.getElementById('recharge-target').textContent = item ? `目标：${item.name} (${item.baseUrl})` : '请选择一个商家'
+  document.getElementById('recharge-target').textContent = item ? `目标：${item.name} (${item.baseUrl})` : '请选择一个项目'
   document.getElementById('recharge-btn').disabled = !item
 }
 
 function resetForm() {
   editingId = ''
-  document.getElementById('form-title').textContent = '新增商家'
+  document.getElementById('form-title').textContent = '新增项目'
   document.getElementById('f-name').value = ''
   document.getElementById('f-url').value = ''
   document.getElementById('f-token').value = ''
@@ -346,7 +346,7 @@ function editInstance(id) {
   const item = instances.find((row) => row.id === id)
   if (!item) return
   editingId = id
-  document.getElementById('form-title').textContent = `编辑商家：${item.name}`
+  document.getElementById('form-title').textContent = `编辑项目：${item.name}`
   document.getElementById('f-name').value = item.name || ''
   document.getElementById('f-url').value = item.baseUrl || ''
   document.getElementById('f-token').value = ''
@@ -365,7 +365,7 @@ async function saveInstance() {
     enabled: document.getElementById('f-enabled').checked,
   }
   if (!body.name || !body.baseUrl || (!editingId && !body.token)) {
-    alert('请填写商家名称、服务器 URL 和 Agent Token')
+    alert('请填写项目名、基础 URL 和 Agent Token')
     return
   }
   document.getElementById('form-state').textContent = '正在保存...'
@@ -435,8 +435,8 @@ async function loadSelectedDetails() {
   if (!item) {
     document.getElementById('tx-title').textContent = '服务器流水'
     document.getElementById('actions-title').textContent = '中心充值记录'
-    document.getElementById('tx-tbody').innerHTML = `<tr><td colspan="9" class="muted">请选择商家</td></tr>`
-    document.getElementById('actions-tbody').innerHTML = `<tr><td colspan="8" class="muted">请选择商家</td></tr>`
+    document.getElementById('tx-tbody').innerHTML = `<tr><td colspan="9" class="muted">请选择项目</td></tr>`
+    document.getElementById('actions-tbody').innerHTML = `<tr><td colspan="8" class="muted">请选择项目</td></tr>`
     return
   }
   document.getElementById('tx-title').textContent = `服务器流水：${item.name}`

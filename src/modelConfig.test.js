@@ -42,6 +42,26 @@ test('main model selector only shows the approved provider entries', async () =>
   assert.equal(MODEL_TYPES.copywriting, undefined)
 })
 
+test('public header exposes the current credit pricing explanation', async () => {
+  const headerSource = await fs.readFile(path.resolve('src/components/Header.jsx'), 'utf8')
+  const headerStyle = await fs.readFile(path.resolve('src/components/Header.css'), 'utf8')
+  const pricingIndex = headerSource.indexOf('pricing-info')
+  const adminIndex = headerSource.indexOf('{showAdminEntry ?')
+
+  assert.ok(pricingIndex > 0)
+  assert.ok(pricingIndex < adminIndex)
+  assert.match(headerSource, /价格说明/)
+  assert.match(headerSource, /<table className="pricing-table">/)
+  assert.match(headerSource, /rowSpan=\{3\}[\s\S]*文生视频[\s\S]*480P[\s\S]*2积分\/秒[\s\S]*720P[\s\S]*4积分\/秒[\s\S]*1080P[\s\S]*10积分\/秒/)
+  assert.match(headerSource, /rowSpan=\{2\}[\s\S]*文生视频[\s\S]*480P[\s\S]*1积分\/秒[\s\S]*720P[\s\S]*3积分\/秒/)
+  assert.match(headerSource, /nanobanana企业稳定版[\s\S]*rowSpan=\{2\}[\s\S]*图片生成[\s\S]*512[\s\S]*2积分\/张[\s\S]*1K[\s\S]*3\.5积分\/张/)
+  assert.match(headerStyle, /\.pricing-table\s*\{[\s\S]*width: min\(720px, 100%\);[\s\S]*margin: 0 auto;/)
+  assert.match(headerStyle, /\.pricing-table th,\s*\.pricing-table td\s*\{[\s\S]*text-align: center;/)
+  assert.match(headerStyle, /\.pricing-type-cell\s*\{[\s\S]*vertical-align: middle;[\s\S]*text-align: center;/)
+  assert.match(headerStyle, /\.pricing-info-panel\s*\{[\s\S]*position: fixed;[\s\S]*left: calc\(50% \+ 260px\);[\s\S]*width: min\(760px, calc\(100vw - 48px\)\);/)
+  assert.match(headerStyle, /\.pricing-info-panel\s*\{[\s\S]*z-index: 80;[\s\S]*translateX\(-50%\)/)
+})
+
 test('happyhorse exposes an open reference-image video provider locked to 720P', async () => {
   const { MODEL_TYPES, PROVIDERS, PROVIDER_ORDER } = await loadModelConfig()
   const provider = PROVIDERS.happyhorse

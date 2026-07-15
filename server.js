@@ -12,6 +12,7 @@ import { promisify } from 'node:util'
 import { createServer as createViteServer, loadEnv } from 'vite'
 import { getPool, initDatabase, closePool } from './db/postgres.js'
 import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
+import { assertSufficientCredits, calculateVideoCreditCharge, normalizeCreditProviderId, shouldChargeCreditsForProvider } from './db/credits.js'
 import adminRouter from './admin/api.js'
 import { startCreditHubSyncLoop } from './admin/creditHub.js'
 import creditAgentRouter from './credit/agentApi.js'
@@ -66,7 +67,6 @@ const adminUserIdAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_IDS)
 const adminUserAccountAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_ACCOUNTS)
 const adminUserEmailAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_EMAILS)
 const adminUserNameAllowlist = parseIdentityAllowlist(process.env.ADMIN_USER_NAMES)
-const adminCreditCenterPath = normalizeAdminCreditCenterPath(process.env.ADMIN_CREDITS_PATH || '/admin/credit-center')
 const hasExplicitAdminAllowlist = [
   adminUserIdAllowlist,
   adminUserAccountAllowlist,
@@ -477,6 +477,9 @@ app.post('/api/veo/generate', async (req, res) => {
   const requestedParams = extractRequestedVideoParams(body)
   const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
   const providerId = body.providerId || 'veo'
+  const creditProviderId = normalizeCreditProviderId(providerId)
+  const creditCharge = await prepareVideoCreditCharge(req, res, creditProviderId, requestedParams, usageRequestParams)
+  if (shouldChargeCreditsForProvider(creditProviderId) && !creditCharge) return
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
@@ -484,10 +487,10 @@ app.post('/api/veo/generate', async (req, res) => {
   }, ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) return
     const taskId = extractAggregationTaskId(payload)
-    insertUsageLog({
+    insertChargedUsageLog({
       session: req.videoSiteSession,
       channel: 'aggregation',
-      providerId,
+      providerId: creditProviderId,
       model: requestedParams.model || null,
       generationMode: body.mode || 't2v',
       prompt: body.prompt || null,
@@ -502,7 +505,7 @@ app.post('/api/veo/generate', async (req, res) => {
       upstreamUrl: url,
       status: taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
       errorMessage: taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
-    }).catch(() => {})
+    }, creditCharge).catch(() => {})
   })
 })
 
@@ -2625,6 +2628,51 @@ function extractRequestedVideoParams(requestBody) {
   }
 }
 
+async function prepareVideoCreditCharge(req, res, providerId, requestedParams, requestParams) {
+  if (!shouldChargeCreditsForProvider(providerId)) return null
+
+  const charge = calculateVideoCreditCharge({
+    providerId,
+    model: requestedParams.model,
+    resolution: requestedParams.resolution,
+    duration: requestedParams.duration,
+    sampleCount: requestedParams.sampleCount || 1,
+    requestParams,
+  })
+
+  if (charge.amount <= 0) return charge
+
+  try {
+    const creditStatus = await assertSufficientCredits(req.videoSiteSession, charge)
+    if (!creditStatus.ok) {
+      res.status(402).json({
+        success: false,
+        code: 'INSUFFICIENT_CREDITS',
+        message: `积分不足，本次需要 ${charge.amount} 积分，当前余额 ${creditStatus.balance || 0} 积分。`,
+        requiredCredits: charge.amount,
+        balance: creditStatus.balance || 0,
+      })
+      return null
+    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message || '积分校验失败',
+    })
+    return null
+  }
+
+  return charge
+}
+
+function insertChargedUsageLog(options, charge) {
+  return insertUsageLog({
+    ...options,
+    unitPrice: charge?.rate ?? null,
+    estimatedCost: charge?.amount ?? null,
+  })
+}
+
 function resolveUsageMediaSummary(requestParams, headerSummary) {
   if (headerSummary) {
     return headerSummary
@@ -3130,9 +3178,6 @@ app.use('/api/credit-agent', creditAgentRouter)
 app.use('/api/admin', requireAdminApiAccess, adminRouter)
 app.get('/admin', requireAdminPageAccess, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'index.html'))
-})
-app.get(adminCreditCenterPath, (req, res) => {
-  res.sendFile(path.join(__dirname, 'admin', 'credit-hub.html'))
 })
 app.get('/admin/credit-hub', (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'credit-hub.html'))
@@ -6575,12 +6620,6 @@ function normalizeMainAppEntryPath(value) {
   return trimmed
 }
 
-function normalizeAdminCreditCenterPath(value) {
-  const normalized = String(value || '').trim()
-  if (!normalized || normalized === '/') return '/admin/credit-center'
-  return normalized.startsWith('/') ? normalized : `/${normalized}`
-}
-
 function readBooleanEnv(value, fallbackValue) {
   if (!value) return fallbackValue
   return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
@@ -6633,7 +6672,6 @@ function shouldBypassSso(req) {
   const requestPath = resolveRequestPath(req)
   if (!requireMainAppSso) return true
   if (requestPath === '/api/health') return true
-  if (requestPath === adminCreditCenterPath) return true
   if (requestPath === '/admin/credit-hub') return true
   if (requestPath.startsWith('/api/admin/credit-hub/')) return true
   if (requestPath.startsWith('/api/credit-agent/')) return true

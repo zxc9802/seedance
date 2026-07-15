@@ -166,22 +166,6 @@ async function readInstanceForRemote(db, id) {
   return result.rows[0] || null
 }
 
-async function assertUniqueBaseUrl(db, baseUrl, ignoreId = null) {
-  const params = [baseUrl]
-  let ignoreClause = ''
-  if (ignoreId) {
-    params.push(ignoreId)
-    ignoreClause = 'AND id <> $2::uuid'
-  }
-  const result = await db.query(
-    `SELECT id FROM credit_hub_instances WHERE base_url = $1 ${ignoreClause} LIMIT 1`,
-    params,
-  )
-  if (result.rows.length > 0) {
-    throw createHttpError(409, 'baseUrl already exists')
-  }
-}
-
 async function fetchAgentJson(instance, path, options = {}) {
   const token = decryptHubToken(instance.token_ciphertext)
   const controller = new AbortController()
@@ -198,9 +182,6 @@ async function fetchAgentJson(instance, path, options = {}) {
     })
     const payload = await response.json().catch(async () => ({ error: await response.text().catch(() => '') }))
     if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        throw createHttpError(502, '商家服务器 Agent Token 未授权，请检查该商家的 CREDIT_AGENT_TOKEN 是否和总部填写一致')
-      }
       throw createHttpError(response.status, payload?.error || `Agent request failed with HTTP ${response.status}`)
     }
     return payload
@@ -336,7 +317,6 @@ router.post('/instances', async (req, res) => {
     const name = normalizeInstanceName(req.body?.name)
     const baseUrl = normalizeBaseUrl(req.body?.baseUrl)
     const token = String(req.body?.token || '').trim()
-    await assertUniqueBaseUrl(db, baseUrl)
     const result = await db.query(
       `INSERT INTO credit_hub_instances (name, base_url, token_ciphertext, token_hint, enabled, note, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,NOW())
@@ -364,7 +344,6 @@ router.put('/instances/:id', async (req, res) => {
     const name = normalizeInstanceName(req.body?.name)
     const baseUrl = normalizeBaseUrl(req.body?.baseUrl)
     const token = String(req.body?.token || '').trim()
-    await assertUniqueBaseUrl(db, baseUrl, req.params.id)
     const values = [
       req.params.id,
       name,

@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { Film, History, Loader2, Save, ShieldCheck } from 'lucide-react'
+import { CircleDollarSign, Film, History, Loader2, Save, ShieldCheck } from 'lucide-react'
 import GenerationHistory from './GenerationHistory'
 import './Header.css'
 
@@ -40,6 +40,116 @@ export default function Header({
       </div>
 
       <div className="header-actions">
+        <div className="pricing-info">
+          <button className="header-action-btn pricing-info-trigger" type="button">
+            <CircleDollarSign size={14} />
+            <span>价格说明</span>
+          </button>
+          <div className="pricing-info-panel" role="tooltip">
+            <div className="pricing-info-title">
+              <span>积分价格说明</span>
+              <span className="pricing-info-rate">5积分 = 1元</span>
+            </div>
+            <div className="pricing-info-grid">
+              <section>
+                <h3>seedance企业稳定版 seedance2.0</h3>
+                <table className="pricing-table">
+                  <thead>
+                    <tr>
+                      <th>类型</th>
+                      <th>分辨率</th>
+                      <th>积分</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td className="pricing-type-cell" rowSpan={3}>文生视频</td>
+                      <td>480P</td>
+                      <td>2积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td>720P</td>
+                      <td>4积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td>1080P</td>
+                      <td>10积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td className="pricing-type-cell" rowSpan={3}>图生视频 / 融合参考 / 首尾帧</td>
+                      <td>480P</td>
+                      <td>3.5积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td>720P</td>
+                      <td>7积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td>1080P</td>
+                      <td>17.5积分/秒</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </section>
+              <section>
+                <h3>seedance企业稳定版 seedance2.0 fast</h3>
+                <table className="pricing-table">
+                  <thead>
+                    <tr>
+                      <th>类型</th>
+                      <th>分辨率</th>
+                      <th>积分</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td className="pricing-type-cell" rowSpan={2}>文生视频</td>
+                      <td>480P</td>
+                      <td>1积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td>720P</td>
+                      <td>3积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td className="pricing-type-cell" rowSpan={2}>图生视频 / 融合参考 / 首尾帧</td>
+                      <td>480P</td>
+                      <td>2.5积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td>720P</td>
+                      <td>5.5积分/秒</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </section>
+              <section>
+                <h3>nanobanana企业稳定版</h3>
+                <table className="pricing-table">
+                  <thead>
+                    <tr>
+                      <th>类型</th>
+                      <th>分辨率</th>
+                      <th>积分</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td className="pricing-type-cell" rowSpan={2}>图片生成</td>
+                      <td>512</td>
+                      <td>2积分/张</td>
+                    </tr>
+                    <tr>
+                      <td>1K</td>
+                      <td>3.5积分/张</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </section>
+            </div>
+          </div>
+        </div>
+
         {showAdminEntry ? (
           <button className="header-action-btn admin-entry-btn" onClick={onOpenAdmin}>
             <ShieldCheck size={14} />
