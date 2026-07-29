@@ -68,6 +68,25 @@ export async function initDatabase() {
     await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS lark_backup_record_id TEXT`)
     await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS lark_backup_synced_at TIMESTAMPTZ`)
     await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS lark_backup_error TEXT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS app_id TEXT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS request_id TEXT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS input_tokens BIGINT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS cached_input_tokens BIGINT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS output_tokens BIGINT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS reasoning_tokens BIGINT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS total_tokens BIGINT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS usage_source TEXT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS billing_audience TEXT NOT NULL DEFAULT 'external'`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS upstream_cost_usd NUMERIC(18,8)`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS upstream_cost_cny NUMERIC(18,8)`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS group_multiplier NUMERIC(10,4)`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS sale_multiplier NUMERIC(10,4)`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS sale_price_cny NUMERIC(18,8)`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS cost_credits BIGINT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS charged_credits BIGINT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS billing_unit TEXT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS billable_units NUMERIC(18,4)`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS price_version TEXT`)
 
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_user_id ON video_usage_logs(user_id)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_channel ON video_usage_logs(channel)`)
@@ -76,6 +95,12 @@ export async function initDatabase() {
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_created_at ON video_usage_logs(created_at)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_engine_task_id ON video_usage_logs(engine_task_id)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_lark_backup_record_id ON video_usage_logs(lark_backup_record_id)`)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_app_created_at ON video_usage_logs(app_id, created_at)`)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_source_app_created_at ON video_usage_logs(usage_source, app_id, created_at)`)
+    await db.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_logs_channel_app_request_id
+      ON video_usage_logs(channel, app_id, request_id)
+    `)
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS model_pricing (
