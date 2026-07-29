@@ -459,6 +459,14 @@
       border-bottom: 1px solid var(--line);
     }
 
+    .panel-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
     .panel-title {
       margin: 0;
       font-size: 15px;
@@ -681,6 +689,50 @@
 
     .key-preview {
       color: #aab5ad;
+      font-size: 11px;
+    }
+
+    .generated-key-card {
+      display: grid;
+      gap: 11px;
+      margin: 18px 18px 0;
+      padding: 16px;
+      border: 1px solid rgba(203, 255, 99, 0.32);
+      border-radius: 12px;
+      background: var(--accent-soft);
+    }
+
+    .generated-key-card[hidden] {
+      display: none;
+    }
+
+    .generated-key-title {
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .generated-key-note {
+      color: #aab5ad;
+      font-size: 11px;
+      line-height: 1.6;
+    }
+
+    .generated-key-value {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+
+    .generated-key-value code {
+      min-width: 0;
+      flex: 1;
+      overflow-wrap: anywhere;
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      color: var(--text);
+      background: #090c0a;
       font-size: 11px;
     }
 
@@ -1154,9 +1206,23 @@
         <div class="panel-head">
           <div>
             <h2 class="panel-title">API 客户端</h2>
-            <div class="panel-kicker">密钥来自环境变量，仅展示不可还原的掩码</div>
+            <div class="panel-kicker">新密钥仅显示一次，后台只保存不可还原的哈希</div>
           </div>
-          <span id="client-count" class="updated">0 个客户端</span>
+          <div class="panel-actions">
+            <span id="client-count" class="updated">0 个客户端</span>
+            <button id="generate-api-key-button" class="button primary" type="button" onclick="generateApiKey()">
+              生成 API Key
+            </button>
+          </div>
+        </div>
+        <div id="generated-key-card" class="generated-key-card" hidden>
+          <div id="generated-key-title" class="generated-key-title">API Key 已生成</div>
+          <div class="generated-key-note">请立即复制并安全发送给客户端。关闭后将无法再次查看完整密钥。</div>
+          <div class="generated-key-value">
+            <code id="generated-key-value"></code>
+            <button id="copy-generated-key-button" class="button" type="button" onclick="copyGeneratedApiKey()">复制</button>
+            <button class="button" type="button" onclick="dismissGeneratedApiKey()">关闭</button>
+          </div>
         </div>
         <div class="table-scroll">
           <table>
@@ -1398,7 +1464,7 @@
       const notices = []
       if (!data.databaseAvailable) notices.push('数据库未连接：价格和客户端配置可查看，但调用统计暂不可用。')
       if (data.configError) notices.push(`API Key 配置错误：${data.configError}`)
-      if (!data.clients?.length) notices.push('尚未配置中转 API Key，请在环境变量中设置 SEEDANCE_RELAY_API_KEY 或 SEEDANCE_RELAY_API_KEYS_JSON。')
+      if (!data.clients?.length) notices.push('尚未配置中转 API Key，请点击“生成 API Key”创建客户端密钥。')
       showNotice(notices.join(' '))
 
       renderPricing(data.pricing || [])
@@ -1571,6 +1637,70 @@
   }'`
       document.getElementById('api-endpoint').textContent = endpoint
       document.getElementById('curl-example').textContent = example
+    }
+
+    async function generateApiKey() {
+      const name = window.prompt('请输入这个 API Key 的客户端名称', '新客户端')
+      if (name === null) return
+      const normalizedName = name.trim()
+      if (!normalizedName) {
+        showNotice('请输入客户端名称')
+        return
+      }
+
+      const button = document.getElementById('generate-api-key-button')
+      button.disabled = true
+      button.textContent = '生成中…'
+      try {
+        const response = await fetch('/api/admin/relay/api-keys', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ name: normalizedName }),
+        })
+        const payload = await response.json().catch(() => ({}))
+        if (response.status === 401) {
+          throw Object.assign(new Error('管理员密码已失效，请重新登录'), { unauthorized: true })
+        }
+        if (!response.ok) {
+          throw new Error(payload.error || 'API Key 生成失败')
+        }
+
+        document.getElementById('generated-key-title').textContent = `${payload.client?.name || normalizedName} 的 API Key 已生成`
+        document.getElementById('generated-key-value').textContent = payload.apiKey || ''
+        document.getElementById('generated-key-card').hidden = false
+        await loadDashboard()
+      } catch (error) {
+        if (error.unauthorized) {
+          logout()
+          showLogin(error.message)
+        } else {
+          showNotice(error.message)
+        }
+      } finally {
+        button.disabled = false
+        button.textContent = '生成 API Key'
+      }
+    }
+
+    async function copyGeneratedApiKey() {
+      const button = document.getElementById('copy-generated-key-button')
+      try {
+        await navigator.clipboard.writeText(document.getElementById('generated-key-value').textContent)
+        button.textContent = '已复制'
+      } catch {
+        button.textContent = '复制失败'
+      }
+      setTimeout(() => {
+        button.textContent = '复制'
+      }, 1500)
+    }
+
+    function dismissGeneratedApiKey() {
+      document.getElementById('generated-key-value').textContent = ''
+      document.getElementById('generated-key-card').hidden = true
     }
 
     async function copyExample() {

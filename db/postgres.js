@@ -103,6 +103,18 @@ export async function initDatabase() {
     `)
 
     await db.query(`
+      CREATE TABLE IF NOT EXISTS relay_api_keys (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        app_id      TEXT NOT NULL UNIQUE,
+        name        TEXT NOT NULL,
+        key_hash    TEXT NOT NULL UNIQUE,
+        key_preview TEXT NOT NULL,
+        enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `)
+
+    await db.query(`
       CREATE TABLE IF NOT EXISTS model_pricing (
         id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         channel     TEXT NOT NULL,

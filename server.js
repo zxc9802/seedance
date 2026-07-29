@@ -16,7 +16,7 @@ import adminRouter from './admin/api.js'
 import { startCreditHubSyncLoop } from './admin/creditHub.js'
 import creditAgentRouter from './credit/agentApi.js'
 import { createSeedanceRelayRouter } from './relay/api.js'
-import { createApiKeyAuthenticator } from './relay/apiKeys.js'
+import { createApiKeyAuthenticator, findStoredRelayApiKey } from './relay/apiKeys.js'
 import { createPostgresRelayRepository } from './relay/postgresRepository.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -322,7 +322,9 @@ async function querySeedanceRelayUpstream(taskId) {
 }
 
 const seedanceRelayRouter = createSeedanceRelayRouter({
-  authenticate: createApiKeyAuthenticator(process.env),
+  authenticate: createApiKeyAuthenticator(process.env, {
+    findApiKey: (apiKey) => findStoredRelayApiKey(getPool(), apiKey),
+  }),
   repository: createPostgresRelayRepository(),
   provider: {
     submit: submitSeedanceRelayUpstream,

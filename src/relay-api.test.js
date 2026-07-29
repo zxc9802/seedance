@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import express from 'express'
-import { createApiKeyAuthenticator } from '../relay/apiKeys.js'
+import {
+  createApiKeyAuthenticator,
+  createStoredRelayApiKey,
+  findStoredRelayApiKey,
+} from '../relay/apiKeys.js'
 import { createSeedanceRelayRouter } from '../relay/api.js'
 
 function createMemoryRepository() {
@@ -148,6 +152,54 @@ const VALID_REQUEST = {
   aspect_ratio: '9:16',
   duration: 5,
 }
+
+test('generated relay API keys are stored as hashes and authenticate immediately', async () => {
+  const rows = []
+  const db = {
+    async query(sql, params) {
+      if (sql.includes('INSERT INTO relay_api_keys')) {
+        const row = {
+          app_id: params[0],
+          name: params[1],
+          key_hash: params[2],
+          key_preview: params[3],
+          enabled: true,
+          created_at: new Date().toISOString(),
+        }
+        rows.push(row)
+        return { rows: [row] }
+      }
+      if (sql.includes('FROM relay_api_keys') && sql.includes('key_hash = $1')) {
+        return {
+          rows: rows
+            .filter((row) => row.enabled && row.key_hash === params[0])
+            .map((row) => ({ app_id: row.app_id, name: row.name })),
+        }
+      }
+      throw new Error(`Unexpected query: ${sql}`)
+    },
+  }
+
+  const created = await createStoredRelayApiKey(db, { name: 'Client C' })
+  assert.match(created.apiKey, /^sk-seedance-[A-Za-z0-9_-]{32,}$/)
+  assert.equal(created.client.name, 'Client C')
+  assert.equal(rows[0].key_hash.length, 64)
+  assert.equal(JSON.stringify(rows).includes(created.apiKey), false)
+
+  const authenticate = createApiKeyAuthenticator({}, {
+    findApiKey: (apiKey) => findStoredRelayApiKey(db, apiKey),
+  })
+  const result = await authenticate({
+    get: () => `Bearer ${created.apiKey}`,
+  })
+  assert.deepEqual(result, {
+    ok: true,
+    apiKey: {
+      id: created.client.appId,
+      name: 'Client C',
+    },
+  })
+})
 
 test('production server mounts the API-key relay before browser SSO middleware', async () => {
   const serverSource = await readFile(new URL('../server.js', import.meta.url), 'utf8')

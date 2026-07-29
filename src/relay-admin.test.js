@@ -22,13 +22,19 @@ test('relay admin uses its own password gate instead of the video workbench SSO'
 
 test('relay admin overview exposes masked clients, pricing, trends and recent tasks', async () => {
   const adminApiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
+  const databaseSource = await readFile(new URL('../db/postgres.js', import.meta.url), 'utf8')
+  const pageSource = await readFile(new URL('../admin/relay.html', import.meta.url), 'utf8')
   const relayApiSource = await readFile(new URL('../relay/api.js', import.meta.url), 'utf8')
 
   assert.match(adminApiSource, /parseConfiguredApiKeys/)
   assert.match(adminApiSource, /maskRelayApiKey/)
+  assert.match(adminApiSource, /router\.post\('\/relay\/api-keys'/)
   assert.match(adminApiSource, /databaseAvailable/)
   assert.match(adminApiSource, /recent/)
   assert.match(adminApiSource, /trend/)
   assert.match(adminApiSource, /pricing/)
+  assert.match(databaseSource, /CREATE TABLE IF NOT EXISTS relay_api_keys/)
+  assert.match(pageSource, /生成 API Key/)
+  assert.match(pageSource, /generateApiKey/)
   assert.match(relayApiSource, /export function getSeedanceRelayPricing/)
 })

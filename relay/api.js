@@ -272,9 +272,9 @@ export function createSeedanceRelayRouter({
 }) {
   const router = express.Router()
 
-  router.use((req, res, next) => {
+  router.use(async (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store')
-    const authResult = authenticate(req)
+    const authResult = await authenticate(req)
     if (!authResult?.ok) {
       sendError(
         res,

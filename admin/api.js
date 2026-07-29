@@ -4,7 +4,12 @@ import express from 'express'
 import multer from 'multer'
 import { getPool } from '../db/postgres.js'
 import { getSeedanceRelayPricing } from '../relay/api.js'
-import { parseConfiguredApiKeys } from '../relay/apiKeys.js'
+import {
+  createStoredRelayApiKey,
+  listStoredRelayApiKeys,
+  maskRelayApiKey,
+  parseConfiguredApiKeys,
+} from '../relay/apiKeys.js'
 import { syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
 import creditHubRouter from './creditHub.js'
@@ -28,13 +33,6 @@ const COST_IMPORT_PREVIEW_TTL_MS = 30 * 60 * 1000
 const COST_IMPORT_APPLY_BATCH_SIZE = 500
 const costImportPreviewCache = new Map()
 
-function maskRelayApiKey(value) {
-  const key = String(value || '').trim()
-  if (!key) return ''
-  if (key.length <= 8) return `${key.slice(0, 2)}••••${key.slice(-2)}`
-  return `${key.slice(0, 5)}••••••••${key.slice(-4)}`
-}
-
 function getRelayClientConfig(env = process.env) {
   try {
     return {
@@ -51,6 +49,14 @@ function getRelayClientConfig(env = process.env) {
       configError: error.message || 'Relay API key configuration is invalid',
     }
   }
+}
+
+function mergeRelayClients(...groups) {
+  const clients = new Map()
+  groups.flat().forEach((client) => {
+    if (client?.appId) clients.set(client.appId, client)
+  })
+  return [...clients.values()]
 }
 
 function emptyRelaySummary() {
@@ -752,10 +758,31 @@ router.get('/overview', async (req, res) => {
   }
 })
 
+router.post('/relay/api-keys', async (req, res) => {
+  const db = getPool()
+  if (!db) {
+    res.status(503).json({ error: '数据库未连接，无法创建 API Key' })
+    return
+  }
+
+  try {
+    const created = await createStoredRelayApiKey(db, {
+      name: req.body?.name,
+    })
+    res.status(201).json(created)
+  } catch (error) {
+    if (error.code === 'INVALID_RELAY_CLIENT_NAME') {
+      res.status(400).json({ error: error.message })
+      return
+    }
+    res.status(500).json({ error: error.message || 'API Key 生成失败' })
+  }
+})
+
 router.get('/relay/overview', async (req, res) => {
   const db = getPool()
   const pricing = getSeedanceRelayPricing()
-  const { clients, configError } = getRelayClientConfig()
+  const { clients: configuredClients, configError } = getRelayClientConfig()
   const generatedAt = new Date().toISOString()
 
   if (!db) {
@@ -764,11 +791,11 @@ router.get('/relay/overview', async (req, res) => {
       configError,
       generatedAt,
       summary: emptyRelaySummary(),
-      apps: clients.map((client) => ({
+      apps: configuredClients.map((client) => ({
         ...client,
         ...emptyRelaySummary(),
       })),
-      clients,
+      clients: configuredClients,
       pricing,
       trend: [],
       recent: [],
@@ -782,6 +809,8 @@ router.get('/relay/overview', async (req, res) => {
   const whereClause = conditions.join(' AND ')
 
   try {
+    const storedClients = await listStoredRelayApiKeys(db)
+    const clients = mergeRelayClients(configuredClients, storedClients)
     const [result, recentResult, trendResult] = await Promise.all([
       db.query(
         `SELECT
