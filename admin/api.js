@@ -3,6 +3,8 @@ import ExcelJS from 'exceljs'
 import express from 'express'
 import multer from 'multer'
 import { getPool } from '../db/postgres.js'
+import { getSeedanceRelayPricing } from '../relay/api.js'
+import { parseConfiguredApiKeys } from '../relay/apiKeys.js'
 import { syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 import { buildCostImportPreview, parseCostImportFile } from './costImport.js'
 import creditHubRouter from './creditHub.js'
@@ -25,6 +27,43 @@ const costImportUpload = multer({
 const COST_IMPORT_PREVIEW_TTL_MS = 30 * 60 * 1000
 const COST_IMPORT_APPLY_BATCH_SIZE = 500
 const costImportPreviewCache = new Map()
+
+function maskRelayApiKey(value) {
+  const key = String(value || '').trim()
+  if (!key) return ''
+  if (key.length <= 8) return `${key.slice(0, 2)}••••${key.slice(-2)}`
+  return `${key.slice(0, 5)}••••••••${key.slice(-4)}`
+}
+
+function getRelayClientConfig(env = process.env) {
+  try {
+    return {
+      clients: parseConfiguredApiKeys(env).map((entry) => ({
+        appId: entry.id,
+        name: entry.name,
+        keyPreview: maskRelayApiKey(entry.apiKey),
+      })),
+      configError: null,
+    }
+  } catch (error) {
+    return {
+      clients: [],
+      configError: error.message || 'Relay API key configuration is invalid',
+    }
+  }
+}
+
+function emptyRelaySummary() {
+  return {
+    requests: 0,
+    succeeded: 0,
+    failed: 0,
+    pending: 0,
+    upstreamCostCny: 0,
+    salePriceCny: 0,
+    grossMarginCny: 0,
+  }
+}
 
 function asArray(value) {
   return Array.isArray(value) ? value : []
@@ -710,6 +749,186 @@ router.get('/overview', async (req, res) => {
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+router.get('/relay/overview', async (req, res) => {
+  const db = getPool()
+  const pricing = getSeedanceRelayPricing()
+  const { clients, configError } = getRelayClientConfig()
+  const generatedAt = new Date().toISOString()
+
+  if (!db) {
+    return res.json({
+      databaseAvailable: false,
+      configError,
+      generatedAt,
+      summary: emptyRelaySummary(),
+      apps: clients.map((client) => ({
+        ...client,
+        ...emptyRelaySummary(),
+      })),
+      clients,
+      pricing,
+      trend: [],
+      recent: [],
+    })
+  }
+
+  const days = parseUsageDayRange(req.query.days)
+  const conditions = [`usage_source = 'seedance_relay'`]
+  const params = []
+  appendUsageDateWindowClause(req.query, conditions, params, 1, days)
+  const whereClause = conditions.join(' AND ')
+
+  try {
+    const [result, recentResult, trendResult] = await Promise.all([
+      db.query(
+        `SELECT
+           app_id,
+           COUNT(*)::int AS requests,
+           COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+           COUNT(*) FILTER (WHERE status IN ('failed', 'cancelled'))::int AS failed,
+           COUNT(*) FILTER (WHERE status NOT IN ('succeeded', 'failed', 'cancelled'))::int AS pending,
+           COALESCE(SUM(upstream_cost_cny) FILTER (WHERE status = 'succeeded'), 0)::float AS upstream_cost_cny,
+           COALESCE(SUM(sale_price_cny) FILTER (WHERE status = 'succeeded'), 0)::float AS sale_price_cny
+         FROM video_usage_logs
+         WHERE ${whereClause}
+         GROUP BY app_id
+         ORDER BY sale_price_cny DESC, requests DESC`,
+        params,
+      ),
+      db.query(
+        `SELECT
+           id,
+           app_id,
+           request_id,
+           engine_task_id,
+           model,
+           generation_mode,
+           resolution,
+           duration,
+           status,
+           upstream_cost_cny::float,
+           sale_price_cny::float,
+           error_message,
+           created_at,
+           updated_at
+         FROM video_usage_logs
+         WHERE ${whereClause}
+         ORDER BY created_at DESC
+         LIMIT 50`,
+        params,
+      ),
+      db.query(
+        `SELECT
+           TO_CHAR(created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD') AS date,
+           COUNT(*)::int AS requests,
+           COUNT(*) FILTER (WHERE status = 'succeeded')::int AS succeeded,
+           COALESCE(SUM(upstream_cost_cny) FILTER (WHERE status = 'succeeded'), 0)::float AS upstream_cost_cny,
+           COALESCE(SUM(sale_price_cny) FILTER (WHERE status = 'succeeded'), 0)::float AS sale_price_cny
+         FROM video_usage_logs
+         WHERE ${whereClause}
+         GROUP BY TO_CHAR(created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD')
+         ORDER BY date ASC`,
+        params,
+      ),
+    ])
+
+    const clientById = new Map(clients.map((client) => [client.appId, client]))
+    const apps = result.rows.map((row) => {
+      const upstreamCostCny = Number(row.upstream_cost_cny || 0)
+      const salePriceCny = Number(row.sale_price_cny || 0)
+      const configuredClient = clientById.get(row.app_id)
+      return {
+        appId: row.app_id,
+        name: configuredClient?.name || row.app_id,
+        keyPreview: configuredClient?.keyPreview || '',
+        requests: Number(row.requests || 0),
+        succeeded: Number(row.succeeded || 0),
+        failed: Number(row.failed || 0),
+        pending: Number(row.pending || 0),
+        upstreamCostCny,
+        salePriceCny,
+        grossMarginCny: Number((salePriceCny - upstreamCostCny).toFixed(8)),
+      }
+    })
+    const summary = apps.reduce((total, app) => ({
+      requests: total.requests + app.requests,
+      succeeded: total.succeeded + app.succeeded,
+      failed: total.failed + app.failed,
+      pending: total.pending + app.pending,
+      upstreamCostCny: total.upstreamCostCny + app.upstreamCostCny,
+      salePriceCny: total.salePriceCny + app.salePriceCny,
+      grossMarginCny: total.grossMarginCny + app.grossMarginCny,
+    }), {
+      requests: 0,
+      succeeded: 0,
+      failed: 0,
+      pending: 0,
+      upstreamCostCny: 0,
+      salePriceCny: 0,
+      grossMarginCny: 0,
+    })
+
+    const knownAppIds = new Set(apps.map((app) => app.appId))
+    clients.forEach((client) => {
+      if (!knownAppIds.has(client.appId)) {
+        apps.push({
+          ...client,
+          ...emptyRelaySummary(),
+        })
+      }
+    })
+
+    const recent = recentResult.rows.map((row) => {
+      const upstreamCostCny = Number(row.upstream_cost_cny || 0)
+      const salePriceCny = Number(row.sale_price_cny || 0)
+      return {
+        id: row.id,
+        appId: row.app_id,
+        requestId: row.request_id,
+        engineTaskId: row.engine_task_id,
+        model: row.model,
+        mode: row.generation_mode,
+        resolution: row.resolution,
+        duration: Number(row.duration || 0),
+        status: row.status,
+        upstreamCostCny,
+        salePriceCny,
+        grossMarginCny: Number((salePriceCny - upstreamCostCny).toFixed(8)),
+        errorMessage: row.error_message,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }
+    })
+
+    const trend = trendResult.rows.map((row) => {
+      const upstreamCostCny = Number(row.upstream_cost_cny || 0)
+      const salePriceCny = Number(row.sale_price_cny || 0)
+      return {
+        date: row.date,
+        requests: Number(row.requests || 0),
+        succeeded: Number(row.succeeded || 0),
+        upstreamCostCny,
+        salePriceCny,
+        grossMarginCny: Number((salePriceCny - upstreamCostCny).toFixed(8)),
+      }
+    })
+
+    res.json({
+      databaseAvailable: true,
+      configError,
+      generatedAt,
+      summary,
+      apps,
+      clients,
+      pricing,
+      trend,
+      recent,
+    })
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Failed to load relay overview' })
   }
 })
 

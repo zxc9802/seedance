@@ -15,6 +15,9 @@ import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
 import adminRouter from './admin/api.js'
 import { startCreditHubSyncLoop } from './admin/creditHub.js'
 import creditAgentRouter from './credit/agentApi.js'
+import { createSeedanceRelayRouter } from './relay/api.js'
+import { createApiKeyAuthenticator } from './relay/apiKeys.js'
+import { createPostgresRelayRepository } from './relay/postgresRepository.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -225,6 +228,108 @@ app.get('/api/session', async (req, res) => {
     },
   })
 })
+
+function buildSeedanceRelayUpstreamHeaders() {
+  return {
+    projectCode: process.env.VIDEO_PROJECT_CODE,
+    'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
+    'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
+  }
+}
+
+async function submitSeedanceRelayUpstream(requestBody) {
+  const missing = getMissingVideoConfig()
+  if (missing.length > 0) {
+    throw createHttpError(503, `Missing backend config: ${missing.join(', ')}`)
+  }
+  const payload = await requestJson(
+    videoApiBaseUrl,
+    '/openApi/generate',
+    buildSeedanceRelayUpstreamHeaders(),
+    requestBody,
+  )
+  const traceMetadata = extractTraceMetadataFromPayload(payload)
+  if (payload?.success === false) {
+    throw createHttpError(
+      502,
+      extractAggregationTerminalMessage(payload) || 'Seedance upstream request failed',
+      traceMetadata,
+    )
+  }
+
+  const taskId = extractAggregationTaskId(payload)
+  const videoUrl = extractAggregationVideoUrl(payload)
+  const status = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
+    || (taskId ? 'submitted' : null)
+  if (!taskId && !videoUrl) {
+    throw createHttpError(
+      502,
+      'Seedance upstream accepted the request but returned no taskId or video URL',
+      traceMetadata,
+    )
+  }
+
+  return {
+    taskId,
+    status: status || (videoUrl ? 'succeeded' : 'submitted'),
+    videoUrl,
+    message: status === 'failed' || status === 'cancelled'
+      ? extractAggregationTerminalMessage(payload)
+      : null,
+    upstreamRequestId: traceMetadata.requestId,
+    upstreamTraceId: traceMetadata.traceId,
+    upstreamUrl: `${videoApiBaseUrl}/openApi/generate`,
+  }
+}
+
+async function querySeedanceRelayUpstream(taskId) {
+  const missing = getMissingVideoConfig()
+  if (missing.length > 0) {
+    throw createHttpError(503, `Missing backend config: ${missing.join(', ')}`)
+  }
+  const payload = await requestJson(
+    videoApiBaseUrl,
+    '/openApi/queryResult',
+    buildSeedanceRelayUpstreamHeaders(),
+    {
+      taskId,
+      abilityType: 'VIDEO',
+    },
+  )
+  const traceMetadata = extractTraceMetadataFromPayload(payload)
+  if (payload?.success === false) {
+    throw createHttpError(
+      502,
+      extractAggregationTerminalMessage(payload) || 'Failed to query Seedance upstream task',
+      traceMetadata,
+    )
+  }
+
+  const syncUpdate = buildAggregationUsageLogSyncUpdate({
+    payload,
+    requestedTaskId: taskId,
+    traceMetadata,
+  })
+  return {
+    taskId: syncUpdate?.taskId || taskId,
+    status: syncUpdate?.updates?.status || 'submitted',
+    videoUrl: syncUpdate?.updates?.videoUrl || null,
+    message: syncUpdate?.updates?.errorMessage || null,
+    upstreamRequestId: traceMetadata.requestId,
+    upstreamTraceId: traceMetadata.traceId,
+    upstreamUrl: `${videoApiBaseUrl}/openApi/queryResult`,
+  }
+}
+
+const seedanceRelayRouter = createSeedanceRelayRouter({
+  authenticate: createApiKeyAuthenticator(process.env),
+  repository: createPostgresRelayRepository(),
+  provider: {
+    submit: submitSeedanceRelayUpstream,
+    query: querySeedanceRelayUpstream,
+  },
+})
+app.use('/v1', seedanceRelayRouter)
 
 function resolveLocalDevSession() {
   if (requireMainAppSso) return null
@@ -3133,6 +3238,9 @@ app.get('/admin', requireAdminPageAccess, (req, res) => {
 })
 app.get(adminCreditCenterPath, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'credit-hub.html'))
+})
+app.get('/relay-admin', requireAdminPageAccess, (req, res) => {
+  res.sendFile(path.join(__dirname, 'admin', 'relay.html'))
 })
 app.get('/admin/credit-hub', (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'credit-hub.html'))

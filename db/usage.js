@@ -1,15 +1,17 @@
 import { getPool } from './postgres.js'
 import { scheduleUsageLogBackupSyncById, syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
+import { calculateConfirmedMediaBilling } from './monitorPricing.js'
 
 function extractDevUserInfo() {
   const userId = process.env.DEV_USAGE_USER_ID?.trim()
-  if (!userId) return { userId: null, email: null, nickname: null, group: null }
+  if (!userId) return { userId: null, email: null, nickname: null, group: null, billingAudience: 'internal' }
 
   return {
     userId,
     email: process.env.DEV_USAGE_USER_EMAIL?.trim() || `${userId}@local.dev`,
     nickname: process.env.DEV_USAGE_USER_NICKNAME?.trim() || userId,
     group: process.env.DEV_USAGE_USER_GROUP?.trim() || 'local-dev',
+    billingAudience: 'internal',
   }
 }
 
@@ -35,6 +37,7 @@ function extractUserInfo(session) {
     email: user.account || user.email || user.username || user.userName || user.login || null,
     nickname: user.nickname || user.name || user.displayName || user.realName || null,
     group: user.groupName || user.group || (Array.isArray(user.groupNames) ? user.groupNames.join(',') : null),
+    billingAudience: user.billingAudience === 'internal' ? 'internal' : 'external',
   }
 }
 
@@ -63,7 +66,7 @@ export async function insertUsageLog({
   const db = getPool()
   if (!db) return null
 
-  const { userId, email, nickname, group } = extractUserInfo(session)
+  const { userId, email, nickname, group, billingAudience } = extractUserInfo(session)
   if (!userId) {
     console.warn('[usage-db] No usable user identity in session, skipping usage log.', {
       userKeys: session?.user ? Object.keys(session.user) : [],
@@ -72,22 +75,41 @@ export async function insertUsageLog({
   }
 
   try {
+    const monitorBilling = calculateConfirmedMediaBilling({
+      providerId,
+      model,
+      duration,
+      sampleCount,
+      billingAudience,
+    })
     const result = await db.query(
       `INSERT INTO video_usage_logs (
         user_id, user_email, user_nickname, user_group,
-        channel, provider_id, model, generation_mode,
+        channel, app_id, provider_id, model, generation_mode,
         prompt, aspect_ratio, resolution, duration, sample_count, request_params,
         engine_task_id, upstream_request_id, upstream_trace_id, upstream_url,
-        status, video_url, error_message, unit_price, estimated_cost
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+        request_id, usage_source, status, video_url, error_message, unit_price, estimated_cost,
+        billing_audience, upstream_cost_cny, sale_multiplier, sale_price_cny, cost_credits,
+        charged_credits, billing_unit, billable_units, price_version
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'web',$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
       RETURNING id`,
       [
         userId, email, nickname, group,
-        channel, providerId || null, model || null, generationMode || null,
+        channel, 'seedance', providerId || null, model || null, generationMode || null,
         prompt || null, aspectRatio || null, resolution || null, duration || null,
         sampleCount || 1, requestParams ? JSON.stringify(requestParams) : null,
         engineTaskId || null, upstreamRequestId || null, upstreamTraceId || null, upstreamUrl || null,
+        engineTaskId || upstreamRequestId || null,
         status, videoUrl, errorMessage, unitPrice, estimatedCost,
+        billingAudience,
+        monitorBilling?.upstreamCostCny ?? null,
+        monitorBilling?.saleMultiplier ?? null,
+        monitorBilling?.salePriceCny ?? null,
+        monitorBilling?.costCredits ?? null,
+        monitorBilling?.chargedCredits ?? null,
+        monitorBilling?.billingUnit ?? null,
+        monitorBilling?.billableUnits ?? null,
+        monitorBilling?.priceVersion ?? null,
       ]
     )
     const insertedId = result.rows[0]?.id || null
