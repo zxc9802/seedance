@@ -3239,7 +3239,7 @@ app.get('/admin', requireAdminPageAccess, (req, res) => {
 app.get(adminCreditCenterPath, (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'credit-hub.html'))
 })
-app.get('/relay-admin', requireAdminPageAccess, (req, res) => {
+app.get('/relay-admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'admin', 'relay.html'))
 })
 app.get('/admin/credit-hub', (req, res) => {
@@ -6741,6 +6741,8 @@ function shouldBypassSso(req) {
   const requestPath = resolveRequestPath(req)
   if (!requireMainAppSso) return true
   if (requestPath === '/api/health') return true
+  if (requestPath === '/relay-admin') return true
+  if (requestPath.startsWith('/api/admin/relay/')) return true
   if (requestPath === adminCreditCenterPath) return true
   if (requestPath === '/admin/credit-hub') return true
   if (requestPath.startsWith('/api/admin/credit-hub/')) return true
@@ -7091,6 +7093,11 @@ function isAdminRoleValue(value) {
 }
 
 function requireAdminApiAccess(req, res, next) {
+  if (req.path.startsWith('/relay/')) {
+    next()
+    return
+  }
+
   if (req.path.startsWith('/credit-hub/')) {
     next()
     return
