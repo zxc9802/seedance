@@ -19,6 +19,12 @@ import creditAgentRouter from './credit/agentApi.js'
 import { createSeedanceRelayRouter } from './relay/api.js'
 import { createApiKeyAuthenticator } from './relay/apiKeys.js'
 import { createPostgresRelayRepository } from './relay/postgresRepository.js'
+import {
+  createVideoRelayClient,
+  formatRelayTaskAsAggregationPayload,
+  normalizeRelayTask,
+  normalizeVideoUpstreamProtocol,
+} from './relay/videoRelayClient.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -39,6 +45,13 @@ const uploadTtlMinutes = Number(process.env.UPLOAD_TTL_MINUTES || 60)
 const cleanupIntervalMinutes = Number(process.env.UPLOAD_CLEANUP_INTERVAL_MINUTES || 15)
 const publicBaseUrl = stripTrailingSlash(process.env.PUBLIC_BASE_URL || '')
 const videoApiBaseUrl = stripTrailingSlash(process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
+const videoUpstreamProtocol = normalizeVideoUpstreamProtocol(process.env.VIDEO_UPSTREAM_PROTOCOL)
+const videoRelayApiBaseUrl = stripTrailingSlash(process.env.VIDEO_RELAY_API_BASE_URL || '')
+const videoRelayApiKey = process.env.VIDEO_RELAY_API_KEY?.trim() || ''
+const videoRelayClient = createVideoRelayClient({
+  baseUrl: videoRelayApiBaseUrl,
+  apiKey: videoRelayApiKey,
+})
 const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const imageApiBaseUrl = normalizeGeminiImageBaseUrl(process.env.IMAGE_API_BASE_URL || 'https://www.shanbaob.com')
 const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGATION_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
@@ -237,11 +250,44 @@ function buildSeedanceRelayUpstreamHeaders() {
   }
 }
 
-async function submitSeedanceRelayUpstream(requestBody) {
+function usesVideoRelayProtocol() {
+  return videoUpstreamProtocol === 'relay'
+}
+
+function formatVideoProviderResultAsAggregationPayload(result) {
+  const status = result?.status === 'succeeded'
+    ? 2
+    : ['failed', 'cancelled'].includes(result?.status)
+      ? 3
+      : 1
+
+  return {
+    success: true,
+    data: {
+      taskId: result?.taskId || null,
+      status,
+      message: result?.videoUrl || result?.message || null,
+    },
+  }
+}
+
+async function submitSeedanceRelayUpstream(requestBody, { idempotencyKey } = {}) {
   const missing = getMissingVideoConfig()
   if (missing.length > 0) {
     throw createHttpError(503, `Missing backend config: ${missing.join(', ')}`)
   }
+
+  if (usesVideoRelayProtocol()) {
+    const task = await videoRelayClient.submit(requestBody, {
+      idempotencyKey: idempotencyKey || `seedance-${randomUUID()}`,
+    })
+    return {
+      ...normalizeRelayTask(task),
+      rawTask: task,
+      upstreamUrl: `${videoRelayApiBaseUrl}/v1/videos/generations`,
+    }
+  }
+
   const payload = await requestJson(
     videoApiBaseUrl,
     '/openApi/generate',
@@ -287,6 +333,16 @@ async function querySeedanceRelayUpstream(taskId) {
   if (missing.length > 0) {
     throw createHttpError(503, `Missing backend config: ${missing.join(', ')}`)
   }
+
+  if (usesVideoRelayProtocol()) {
+    const task = await videoRelayClient.query(taskId)
+    return {
+      ...normalizeRelayTask(task),
+      rawTask: task,
+      upstreamUrl: `${videoRelayApiBaseUrl}/v1/videos/generations/${encodeURIComponent(taskId)}`,
+    }
+  }
+
   const payload = await requestJson(
     videoApiBaseUrl,
     '/openApi/queryResult',
@@ -452,7 +508,7 @@ app.post('/api/upload', upload.array('files', 32), async (req, res) => {
       }
     }
 
-    if (materialType !== null && storageBackend !== 'dashscope') {
+    if (materialType !== null && storageBackend !== 'dashscope' && !usesVideoRelayProtocol()) {
       const missing = getMissingMaterialConfig()
       if (missing.length > 0) {
         res.status(500).json({
@@ -461,6 +517,19 @@ app.post('/api/upload', upload.array('files', 32), async (req, res) => {
         })
         return
       }
+    }
+
+    if (
+      materialType !== null
+      && storageBackend !== 'dashscope'
+      && usesVideoRelayProtocol()
+      && !publiclyReachable
+    ) {
+      res.status(500).json({
+        success: false,
+        message: 'PUBLIC_BASE_URL must be a public HTTPS address when VIDEO_UPSTREAM_PROTOCOL=relay.',
+      })
+      return
     }
 
     for (const file of files) {
@@ -484,6 +553,18 @@ app.post('/api/upload', upload.array('files', 32), async (req, res) => {
         item.expiresAt = uploaded.expiresAt
         item.storageBackend = 'dashscope'
         registerUploadedReference(item.resourceRef, file.size, file.mimetype, uploaded.expiresAtMs)
+      } else if (
+        materialType !== null
+        && usesVideoRelayProtocol()
+        && publiclyReachable
+        && file.mimetype.startsWith('image/')
+      ) {
+        item.materialId = `relay-direct-${randomUUID()}`
+        item.materialStatus = 2
+        item.materialReviewPending = false
+        item.materialError = null
+        item.resourceRef = url
+        registerUploadedReference(item.url, file.size, file.mimetype, expiresAtMs)
       } else if (materialType !== null && publiclyReachable && file.mimetype.startsWith('image/')) {
         const material = await createMaterialReferenceTask({
           name: buildMaterialName(file.originalname),
@@ -585,6 +666,58 @@ app.post('/api/veo/generate', async (req, res) => {
   const creditProviderId = normalizeCreditProviderId(providerId)
   const creditCharge = await prepareVideoCreditCharge(req, res, creditProviderId, requestedParams, usageRequestParams)
   if (shouldChargeCreditsForProvider(creditProviderId) && !creditCharge) return
+
+  if (usesVideoRelayProtocol()) {
+    try {
+      const providerResult = await submitSeedanceRelayUpstream(body, {
+        idempotencyKey: req.get('idempotency-key') || `workbench-${randomUUID()}`,
+      })
+      const taskId = providerResult.taskId
+      const isTerminal = ['succeeded', 'failed', 'cancelled'].includes(providerResult.status)
+      await insertChargedUsageLog({
+        session: req.videoSiteSession,
+        channel: 'aggregation',
+        providerId: creditProviderId,
+        model: requestedParams.model || null,
+        generationMode: body.payload?.params?.mode || 'text_to_video',
+        prompt: body.prompt || null,
+        aspectRatio: requestedParams.aspectRatio || null,
+        resolution: requestedParams.resolution || null,
+        duration: requestedParams.duration ?? null,
+        sampleCount: requestedParams.sampleCount || 1,
+        requestParams: usageRequestParams,
+        engineTaskId: taskId || null,
+        upstreamRequestId: providerResult.upstreamRequestId || null,
+        upstreamTraceId: providerResult.upstreamTraceId || null,
+        upstreamUrl: providerResult.upstreamUrl,
+        status: providerResult.status,
+        videoUrl: providerResult.videoUrl,
+        errorMessage: providerResult.message,
+      }, creditCharge)
+
+      if (taskId && isTerminal) {
+        await updateUsageLogByTaskId(taskId, {
+          status: providerResult.status,
+          videoUrl: providerResult.videoUrl,
+          errorMessage: providerResult.message,
+          completedAt: new Date().toISOString(),
+          upstreamRequestId: providerResult.upstreamRequestId || null,
+          upstreamTraceId: providerResult.upstreamTraceId || null,
+        })
+      }
+
+      res.json(formatRelayTaskAsAggregationPayload(providerResult.rawTask))
+    } catch (error) {
+      const statusCode = Number(error.statusCode) || 502
+      res.status(statusCode).json({
+        success: false,
+        code: error.code || 'RELAY_UPSTREAM_ERROR',
+        message: error.message || 'Relay video generation failed',
+      })
+    }
+    return
+  }
+
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
@@ -621,6 +754,36 @@ app.post('/api/veo/queryResult', async (req, res) => {
       success: false,
       message: `Missing backend config: ${missing.join(', ')}`,
     })
+    return
+  }
+
+  if (usesVideoRelayProtocol()) {
+    try {
+      const taskId = normalizeTaskIdValue(req.body?.taskId)
+      if (!taskId) {
+        res.status(400).json({ success: false, message: 'taskId is required' })
+        return
+      }
+
+      const providerResult = await querySeedanceRelayUpstream(taskId)
+      const isTerminal = ['succeeded', 'failed', 'cancelled'].includes(providerResult.status)
+      await updateUsageLogByTaskId(taskId, {
+        status: providerResult.status,
+        videoUrl: providerResult.videoUrl,
+        errorMessage: providerResult.message,
+        completedAt: isTerminal ? new Date().toISOString() : null,
+        upstreamRequestId: providerResult.upstreamRequestId || null,
+        upstreamTraceId: providerResult.upstreamTraceId || null,
+      })
+      res.json(formatRelayTaskAsAggregationPayload(providerResult.rawTask))
+    } catch (error) {
+      const statusCode = Number(error.statusCode) || 502
+      res.status(statusCode).json({
+        success: false,
+        code: error.code || 'RELAY_UPSTREAM_QUERY_ERROR',
+        message: error.message || 'Relay video status query failed',
+      })
+    }
     return
   }
 
@@ -688,36 +851,47 @@ app.get('/api/veo/media/:taskId', async (req, res) => {
       throw createHttpError(400, 'taskId is required.')
     }
 
-    const payload = await requestJson(
-      videoApiBaseUrl,
-      '/openApi/queryResult',
-      {
-        projectCode: process.env.VIDEO_PROJECT_CODE,
-        'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
-        'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
-      },
-      {
-        taskId,
-        abilityType: 'VIDEO',
-      },
-    )
+    let traceMetadata = { requestId: null, traceId: null }
+    let finalStatus = null
+    let finalMessage = null
+    let mediaUrl = null
 
-    const traceMetadata = extractTraceMetadataFromPayload(payload)
-    if (payload?.success === false) {
-      throw createHttpError(502, extractAggregationTerminalMessage(payload) || '查询任务状态失败', traceMetadata)
+    if (usesVideoRelayProtocol()) {
+      const providerResult = await querySeedanceRelayUpstream(taskId)
+      traceMetadata = {
+        requestId: providerResult.upstreamRequestId || null,
+        traceId: providerResult.upstreamTraceId || null,
+      }
+      finalStatus = providerResult.status
+      finalMessage = providerResult.message
+      mediaUrl = providerResult.videoUrl
+    } else {
+      const payload = await requestJson(
+        videoApiBaseUrl,
+        '/openApi/queryResult',
+        buildSeedanceRelayUpstreamHeaders(),
+        {
+          taskId,
+          abilityType: 'VIDEO',
+        },
+      )
+      traceMetadata = extractTraceMetadataFromPayload(payload)
+      if (payload?.success === false) {
+        throw createHttpError(502, extractAggregationTerminalMessage(payload) || '查询任务状态失败', traceMetadata)
+      }
+      finalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
+      finalMessage = extractAggregationTerminalMessage(payload)
+      mediaUrl = extractAggregationVideoUrl(payload)
     }
 
-    const finalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
     if (finalStatus !== 'succeeded') {
-      const message = extractAggregationTerminalMessage(payload)
       if (finalStatus === 'failed' || finalStatus === 'cancelled') {
-        throw createHttpError(409, message || '视频生成失败', traceMetadata)
+        throw createHttpError(409, finalMessage || '视频生成失败', traceMetadata)
       }
 
-      throw createHttpError(409, message || 'Veo task is not ready for preview yet.', traceMetadata)
+      throw createHttpError(409, finalMessage || 'Veo task is not ready for preview yet.', traceMetadata)
     }
 
-    const mediaUrl = extractAggregationVideoUrl(payload)
     if (!mediaUrl) {
       throw createHttpError(404, 'Veo task succeeded, but no media URL was returned.', traceMetadata)
     }
@@ -6462,6 +6636,13 @@ function createHttpError(statusCode, message, metadata = {}) {
 }
 
 function getMissingVideoConfig() {
+  if (usesVideoRelayProtocol()) {
+    return [
+      !videoRelayApiBaseUrl && 'VIDEO_RELAY_API_BASE_URL',
+      !videoRelayApiKey && 'VIDEO_RELAY_API_KEY',
+    ].filter(Boolean)
+  }
+
   return [
     !process.env.VIDEO_PROJECT_CODE && 'VIDEO_PROJECT_CODE',
     !process.env.VIDEO_ACCESS_KEY && 'VIDEO_ACCESS_KEY',
@@ -7408,6 +7589,18 @@ async function queryAggregationTaskStatusForSync(row) {
   const isImageAggregationTask = row?.provider_id === 'gemini-image-aggregation'
 
   try {
+    if (!isImageAggregationTask && usesVideoRelayProtocol()) {
+      const providerResult = await querySeedanceRelayUpstream(taskId)
+      return buildAggregationUsageLogSyncUpdate({
+        payload: formatVideoProviderResultAsAggregationPayload(providerResult),
+        requestedTaskId: taskId,
+        traceMetadata: {
+          requestId: providerResult.upstreamRequestId || null,
+          traceId: providerResult.upstreamTraceId || null,
+        },
+      })
+    }
+
     const payload = await requestJson(
       isImageAggregationTask ? imageAggregationApiBaseUrl : videoApiBaseUrl,
       '/openApi/queryResult',
