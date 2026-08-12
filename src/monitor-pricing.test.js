@@ -38,9 +38,9 @@ test('external Seedance 2.5 reuses the standard Seedance 2.0 price', () => {
     billingAudience: 'external',
   })
 
-  assert.equal(billing.chargedCredits, 750)
+  assert.equal(billing.chargedCredits, 900)
   assert.equal(billing.costCredits, 500)
-  assert.equal(billing.salePriceCny, 7.5)
+  assert.equal(billing.salePriceCny, 9)
 })
 
 test('external Nano Banana 2 is monitored at 36 credits per image', () => {

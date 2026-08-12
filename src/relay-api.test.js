@@ -168,6 +168,38 @@ test('relay accepts Seedance 2.5 with the Seedance 2.0 contract', () => {
   assert.equal(buildAggregationRequest(request).modelId, 'seedance2.5')
 })
 
+test('relay lets Seedance 2.5 use up to 50 reference materials', () => {
+  const references = {
+    images: Array.from({ length: 30 }, (_, index) => `https://example.com/image-${index + 1}.jpg`),
+    videos: Array.from({ length: 10 }, (_, index) => `https://example.com/video-${index + 1}.mp4`),
+    audios: Array.from({ length: 10 }, (_, index) => `https://example.com/audio-${index + 1}.mp3`),
+  }
+
+  const request = normalizeGenerationRequest({
+    ...VALID_REQUEST,
+    model: 'seedance2.5',
+    mode: 'fusion',
+    references,
+  })
+  assert.equal(
+    request.references.images.length + request.references.videos.length + request.references.audios.length,
+    50,
+  )
+
+  assert.throws(
+    () => normalizeGenerationRequest({
+      ...VALID_REQUEST,
+      model: 'seedance2.5',
+      mode: 'fusion',
+      references: {
+        ...references,
+        images: [...references.images, 'https://example.com/image-31.jpg'],
+      },
+    }),
+    /up to 30 images, 10 videos and 10 audios, with 50 materials total/,
+  )
+})
+
 test('generated relay API keys are stored as hashes and authenticate immediately', async () => {
   const rows = []
   const db = {

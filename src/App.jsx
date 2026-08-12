@@ -158,9 +158,11 @@ function App() {
   }
   const isTextProvider = config.outputType === 'text'
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
-  const maxImages = resolveImageLimit(config, generationMode, videoReferences)
-  const maxVideos = resolveVideoLimit(config, generationMode, videoReferences)
-  const maxAudios = resolveLimit(config.maxReferenceAudios, generationMode)
+  const referenceLimits = resolveReferenceLimits(config, params.model)
+  const maxImages = resolveImageLimit(config, generationMode, videoReferences, referenceLimits)
+  const maxVideos = resolveVideoLimit(config, generationMode, videoReferences, referenceLimits)
+  const maxAudios = resolveLimit(referenceLimits.maxReferenceAudios, generationMode)
+  const maxTotalReferences = referenceLimits.maxTotalReferences || null
 
   const updateParam = useCallback((key, value) => {
     setAllParams((prev) => ({
@@ -1132,6 +1134,7 @@ function App() {
       maxImages={maxImages}
       maxVideos={maxVideos}
       maxAudios={maxAudios}
+      maxTotalReferences={maxTotalReferences}
       providerConfig={config}
       onGenerate={handleGenerate}
       generating={currentState.generating}
@@ -2864,8 +2867,17 @@ function resolveLimit(limitConfig, mode) {
   return limitConfig[mode] ?? 0
 }
 
-function resolveImageLimit(config, mode, references) {
-  const baseLimit = resolveLimit(config?.maxReferenceImages, mode)
+function resolveReferenceLimits(config, model) {
+  return {
+    maxReferenceImages: config?.modelReferenceLimits?.[model]?.maxReferenceImages || config?.maxReferenceImages,
+    maxReferenceVideos: config?.modelReferenceLimits?.[model]?.maxReferenceVideos || config?.maxReferenceVideos,
+    maxReferenceAudios: config?.modelReferenceLimits?.[model]?.maxReferenceAudios || config?.maxReferenceAudios,
+    maxTotalReferences: config?.modelReferenceLimits?.[model]?.maxTotalReferences || null,
+  }
+}
+
+function resolveImageLimit(config, mode, references, referenceLimits = resolveReferenceLimits(config)) {
+  const baseLimit = resolveLimit(referenceLimits.maxReferenceImages, mode)
   if (config?.id === 'wan1') {
     return Math.max(0, Math.min(baseLimit, 5 - (references?.videos?.length || 0)))
   }
@@ -2875,8 +2887,8 @@ function resolveImageLimit(config, mode, references) {
   return baseLimit
 }
 
-function resolveVideoLimit(config, mode, references) {
-  const baseLimit = resolveLimit(config?.maxReferenceVideos, mode)
+function resolveVideoLimit(config, mode, references, referenceLimits = resolveReferenceLimits(config)) {
+  const baseLimit = resolveLimit(referenceLimits.maxReferenceVideos, mode)
   if (config?.id === 'wan1') {
     return Math.max(0, Math.min(baseLimit, 5 - (references?.images?.length || 0)))
   }

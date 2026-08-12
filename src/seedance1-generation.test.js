@@ -38,6 +38,12 @@ test('seedance1 exposes Seedance 2.5 on the same channel', async () => {
       && model.label === 'Seedance 2.5'
   )))
   assert.equal(seedance1.modelMaterialTypeDefaults?.['seedance2.5'], 'role')
+  assert.deepEqual(seedance1.modelReferenceLimits?.['seedance2.5'], {
+    maxReferenceImages: { fusion: 30 },
+    maxReferenceVideos: { fusion: 10 },
+    maxReferenceAudios: { fusion: 10 },
+    maxTotalReferences: 50,
+  })
 })
 
 test('seedance1 defaults Seedance 2 models to person material review', async () => {

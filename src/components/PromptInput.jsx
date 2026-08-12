@@ -75,6 +75,7 @@ export default function PromptInput({
   maxImages,
   maxVideos,
   maxAudios,
+  maxTotalReferences,
   providerConfig,
   selectedTemplate,
   onTemplateSelect,
@@ -252,9 +253,20 @@ export default function PromptInput({
 
     setMediaError(null)
     const currentAssets = videoReferences[kind]
-    const remaining = limit - currentAssets.length
+    const totalAssetCount = videoReferences.images.length
+      + videoReferences.videos.length
+      + videoReferences.audios.length
+    const hasTotalLimit = Number.isFinite(maxTotalReferences)
+    const totalRemaining = !hasTotalLimit
+      ? Number.POSITIVE_INFINITY
+      : maxTotalReferences - totalAssetCount
+    const remaining = Math.min(limit - currentAssets.length, totalRemaining)
     if (remaining <= 0) {
-      setMediaError(`最多只能添加 ${limit} 个${bucketLabel(kind)}`)
+      setMediaError(
+        hasTotalLimit && totalRemaining <= 0
+          ? `参考素材总数最多 ${maxTotalReferences} 个`
+          : `最多只能添加 ${limit} 个${bucketLabel(kind)}`,
+      )
       return
     }
 
@@ -740,7 +752,7 @@ export default function PromptInput({
                 {mode === 'fusion' && maxAudios > 0 && (
                   <AssetUploadBucket
                     title="参考音频"
-                    subtitle="支持 mp3、wav，最多 3 段。音频不能单独作为参考。"
+                    subtitle={`支持 mp3、wav，最多 ${maxAudios} 段。音频不能单独作为参考。`}
                     icon={<Music4 size={14} />}
                     accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/wave"
                     assets={videoReferences.audios}

@@ -60,6 +60,14 @@ const BASE_PROVIDERS = {
     maxReferenceAudios: {
       fusion: 3,
     },
+    modelReferenceLimits: {
+      'seedance2.5': {
+        maxReferenceImages: { fusion: 30 },
+        maxReferenceVideos: { fusion: 10 },
+        maxReferenceAudios: { fusion: 10 },
+        maxTotalReferences: 50,
+      },
+    },
     defaults: {
       model: 'doubao-seedance-2-0-260128',
       aspectRatio: '9:16',

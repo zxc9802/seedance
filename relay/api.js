@@ -36,7 +36,7 @@ function normalizeStringArray(value, fieldName) {
   })
 }
 
-function validateReferenceCounts(mode, references) {
+function validateReferenceCounts(model, mode, references) {
   if (mode === 't2v' && (
     references.images.length > 0
     || references.videos.length > 0
@@ -54,8 +54,18 @@ function validateReferenceCounts(mode, references) {
     throw new Error(`${mode} mode does not accept reference video or audio`)
   }
   if (mode === 'fusion') {
-    if (references.images.length > 9 || references.videos.length > 3 || references.audios.length > 3) {
-      throw new Error('fusion mode supports up to 9 images, 3 videos and 3 audios')
+    const limits = model === 'seedance2.5'
+      ? { images: 30, videos: 10, audios: 10, total: 50 }
+      : { images: 9, videos: 3, audios: 3, total: Number.POSITIVE_INFINITY }
+    const total = references.images.length + references.videos.length + references.audios.length
+    if (
+      references.images.length > limits.images
+      || references.videos.length > limits.videos
+      || references.audios.length > limits.audios
+      || total > limits.total
+    ) {
+      const totalLimitMessage = Number.isFinite(limits.total) ? `, with ${limits.total} materials total` : ''
+      throw new Error(`fusion mode supports up to ${limits.images} images, ${limits.videos} videos and ${limits.audios} audios${totalLimitMessage}`)
     }
     if (references.images.length + references.videos.length === 0) {
       throw new Error('fusion mode requires at least one reference image or video')
@@ -102,7 +112,7 @@ export function normalizeGenerationRequest(body) {
     videos: normalizeStringArray(body?.references?.videos, 'references.videos'),
     audios: normalizeStringArray(body?.references?.audios, 'references.audios'),
   }
-  validateReferenceCounts(mode, references)
+  validateReferenceCounts(model, mode, references)
 
   return {
     model,
