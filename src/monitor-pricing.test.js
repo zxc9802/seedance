@@ -28,6 +28,21 @@ test('external Seedance 2 Fast is monitored at 90 credits per second', () => {
   assert.equal(billing.salePriceCny, 9)
 })
 
+test('external Seedance 2.5 reuses the standard Seedance 2.0 price', () => {
+  const billing = calculateConfirmedMediaBilling({
+    providerId: 'seedance1',
+    model: 'seedance2.5',
+    resolution: '720p',
+    duration: 5,
+    sampleCount: 1,
+    billingAudience: 'external',
+  })
+
+  assert.equal(billing.chargedCredits, 900)
+  assert.equal(billing.costCredits, 500)
+  assert.equal(billing.salePriceCny, 9)
+})
+
 test('external Nano Banana 2 is monitored at 36 credits per image', () => {
   const billing = calculateConfirmedMediaBilling({
     providerId: 'gemini-image-aggregation',

@@ -23,6 +23,7 @@ const BASE_PROVIDERS = {
     models: [
       { value: 'doubao-seedance-2-0-260128', label: 'seedance2', tag: '已接入' },
       { value: 'doubao-seedance-2-0-fast-260128', label: 'Seedance 2 Fast', tag: 'Fast' },
+      { value: 'seedance2.5', label: 'Seedance 2.5', tag: '新' },
     ],
     aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {
@@ -75,6 +76,7 @@ const BASE_PROVIDERS = {
     ],
     modelMaterialTypeDefaults: {
       'doubao-seedance-2-0-fast-260128': 'role',
+      'seedance2.5': 'role',
     },
   },
   ve31p: {

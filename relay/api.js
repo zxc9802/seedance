@@ -5,6 +5,7 @@ import { calculateConfirmedMediaBilling } from '../db/monitorPricing.js'
 const ALLOWED_MODELS = new Set([
   'doubao-seedance-2-0-260128',
   'doubao-seedance-2-0-fast-260128',
+  'seedance2.5',
 ])
 const ALLOWED_MODES = new Set(['t2v', 'i2v', 'flf', 'fusion'])
 const ALLOWED_RATIOS = new Set(['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'])
@@ -65,7 +66,7 @@ function validateReferenceCounts(mode, references) {
 export function normalizeGenerationRequest(body) {
   const model = String(body?.model || '').trim()
   if (!ALLOWED_MODELS.has(model)) {
-    throw new Error('Unsupported Seedance 2.0 model')
+    throw new Error('Unsupported Seedance model')
   }
 
   const prompt = String(body?.prompt || '').trim()

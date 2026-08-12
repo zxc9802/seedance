@@ -1267,7 +1267,9 @@
     }
 
     function shortModel(model) {
-      return String(model || '').includes('-fast-') ? 'Seedance 2 Fast' : 'Seedance 2.0'
+      const value = String(model || '')
+      if (value === 'seedance2.5') return 'Seedance 2.5'
+      return value.includes('-fast-') ? 'Seedance 2 Fast' : 'Seedance 2.0'
     }
 
     function shortId(value) {
