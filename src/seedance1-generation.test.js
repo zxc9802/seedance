@@ -29,6 +29,17 @@ test('seedance1 exposes the Seedance 2 fast model on the same channel', async ()
   assert.ok(seedance1.models.some((model) => model.value === 'doubao-seedance-2-0-fast-260128'))
 })
 
+test('seedance1 exposes Seedance 2.5 on the same channel', async () => {
+  const providers = await loadProviders()
+  const seedance1 = providers.veo
+
+  assert.ok(seedance1.models.some((model) => (
+    model.value === 'seedance2.5'
+      && model.label === 'Seedance 2.5'
+  )))
+  assert.equal(seedance1.modelMaterialTypeDefaults?.['seedance2.5'], 'role')
+})
+
 test('seedance1 defaults Seedance 2 models to person material review', async () => {
   const providers = await loadProviders()
   const seedance1 = providers.veo

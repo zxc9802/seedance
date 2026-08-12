@@ -7,7 +7,11 @@ import {
   createStoredRelayApiKey,
   findStoredRelayApiKey,
 } from '../relay/apiKeys.js'
-import { createSeedanceRelayRouter } from '../relay/api.js'
+import {
+  buildAggregationRequest,
+  createSeedanceRelayRouter,
+  normalizeGenerationRequest,
+} from '../relay/api.js'
 
 function createMemoryRepository() {
   const tasks = new Map()
@@ -152,6 +156,17 @@ const VALID_REQUEST = {
   aspect_ratio: '9:16',
   duration: 5,
 }
+
+test('relay accepts Seedance 2.5 with the Seedance 2.0 contract', () => {
+  const request = normalizeGenerationRequest({
+    ...VALID_REQUEST,
+    model: 'seedance2.5',
+  })
+
+  assert.equal(request.model, 'seedance2.5')
+  assert.equal(request.resolution, '720p')
+  assert.equal(buildAggregationRequest(request).modelId, 'seedance2.5')
+})
 
 test('generated relay API keys are stored as hashes and authenticate immediately', async () => {
   const rows = []
