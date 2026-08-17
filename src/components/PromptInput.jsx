@@ -120,17 +120,28 @@ export default function PromptInput({
   useEffect(() => {
     if (!usesSeedance1MaterialUpload) return
 
-    const assetsToUpload = videoReferences.images.filter((asset) => (
-      asset?.file
-      && asset.uploadMaterialType !== seedance1MaterialType
-      && asset.uploadStatus !== 'uploading'
-      && asset.uploadStatus !== 'reviewing'
+    const materialAssetKinds = ['images', 'videos']
+    const assetsToUpload = materialAssetKinds.flatMap((kind) => (
+      (videoReferences[kind] || [])
+        .filter((asset) => (
+          asset?.file
+          && asset.uploadMaterialType !== seedance1MaterialType
+          && asset.uploadStatus !== 'uploading'
+          && asset.uploadStatus !== 'reviewing'
+        ))
+        .map((asset) => ({ kind, asset }))
     ))
 
-    for (const asset of assetsToUpload) {
-      void uploadSeedance1MaterialAsset(asset, seedance1MaterialType, onVideoReferencesChange)
+    for (const { kind, asset } of assetsToUpload) {
+      void uploadSeedance1MaterialAsset(kind, asset, seedance1MaterialType, onVideoReferencesChange)
     }
-  }, [onVideoReferencesChange, seedance1MaterialType, usesSeedance1MaterialUpload, videoReferences.images])
+  }, [
+    onVideoReferencesChange,
+    seedance1MaterialType,
+    usesSeedance1MaterialUpload,
+    videoReferences.images,
+    videoReferences.videos,
+  ])
 
   const processImageFiles = async (files) => {
     setMediaError(null)
@@ -288,7 +299,7 @@ export default function PromptInput({
         continue
       }
       const metadata = kind === 'videos' ? await readVideoMetadata(file).catch(() => null) : null
-      const shouldUploadMaterial = kind === 'images' && usesSeedance1MaterialUpload
+      const shouldUploadMaterial = ['images', 'videos'].includes(kind) && usesSeedance1MaterialUpload
       accepted.push(createLocalAsset(file, {
         ...(shouldUploadMaterial ? { uploadStatus: 'queued' } : {}),
         ...(metadata?.duration ? { duration: metadata.duration } : {}),
@@ -1150,7 +1161,8 @@ function hasPendingVideoReferenceUploads(providerConfig, params, references) {
   if (!shouldUseSeedance1MaterialUpload(providerConfig, params)) return false
 
   const materialType = resolveSeedance1MaterialType(providerConfig, params)
-  return (references?.images || []).some((asset) => (
+  const materialAssets = [...(references?.images || []), ...(references?.videos || [])]
+  return materialAssets.some((asset) => (
     asset?.uploadStatus !== 'ready'
     || !asset.resourceRef
     || asset.uploadMaterialType !== materialType
@@ -1188,8 +1200,8 @@ function createLocalAsset(file, extras = null) {
   }
 }
 
-async function uploadSeedance1MaterialAsset(asset, materialType, onVideoReferencesChange) {
-  updateVideoReferenceAsset(onVideoReferencesChange, 'images', asset.id, {
+async function uploadSeedance1MaterialAsset(kind, asset, materialType, onVideoReferencesChange) {
+  updateVideoReferenceAsset(onVideoReferencesChange, kind, asset.id, {
     uploadStatus: 'uploading',
     uploadMaterialType: materialType,
     uploadError: null,
@@ -1228,7 +1240,7 @@ async function uploadSeedance1MaterialAsset(asset, materialType, onVideoReferenc
     }
 
     if (nextStatus === 2) {
-      updateVideoReferenceAsset(onVideoReferencesChange, 'images', asset.id, {
+      updateVideoReferenceAsset(onVideoReferencesChange, kind, asset.id, {
         ...basePatch,
         uploadStatus: 'ready',
       })
@@ -1236,7 +1248,7 @@ async function uploadSeedance1MaterialAsset(asset, materialType, onVideoReferenc
     }
 
     if (nextStatus === 3) {
-      updateVideoReferenceAsset(onVideoReferencesChange, 'images', asset.id, {
+      updateVideoReferenceAsset(onVideoReferencesChange, kind, asset.id, {
         ...basePatch,
         uploadStatus: 'failed',
         uploadError: uploaded.materialError || '素材审核未通过',
@@ -1244,13 +1256,13 @@ async function uploadSeedance1MaterialAsset(asset, materialType, onVideoReferenc
       return
     }
 
-    updateVideoReferenceAsset(onVideoReferencesChange, 'images', asset.id, {
+    updateVideoReferenceAsset(onVideoReferencesChange, kind, asset.id, {
       ...basePatch,
       uploadStatus: 'reviewing',
     })
-    await pollSeedance1MaterialStatus(asset.id, uploaded.materialId, materialType, onVideoReferencesChange)
+    await pollSeedance1MaterialStatus(kind, asset.id, uploaded.materialId, materialType, onVideoReferencesChange)
   } catch (error) {
-    updateVideoReferenceAsset(onVideoReferencesChange, 'images', asset.id, {
+    updateVideoReferenceAsset(onVideoReferencesChange, kind, asset.id, {
       uploadStatus: 'failed',
       uploadMaterialType: materialType,
       uploadError: error instanceof Error ? error.message : '素材上传失败',
@@ -1258,7 +1270,7 @@ async function uploadSeedance1MaterialAsset(asset, materialType, onVideoReferenc
   }
 }
 
-async function pollSeedance1MaterialStatus(assetId, materialId, materialType, onVideoReferencesChange) {
+async function pollSeedance1MaterialStatus(kind, assetId, materialId, materialType, onVideoReferencesChange) {
   const deadline = Date.now() + MATERIAL_REVIEW_POLL_TIMEOUT_MS
 
   while (Date.now() < deadline) {
@@ -1279,7 +1291,7 @@ async function pollSeedance1MaterialStatus(assetId, materialId, materialType, on
     const status = Number(material.status || 1)
 
     if (status === 2) {
-      updateVideoReferenceAsset(onVideoReferencesChange, 'images', assetId, {
+      updateVideoReferenceAsset(onVideoReferencesChange, kind, assetId, {
         uploadStatus: 'ready',
         uploadMaterialType: materialType,
         uploadError: null,
@@ -1291,7 +1303,7 @@ async function pollSeedance1MaterialStatus(assetId, materialId, materialType, on
     }
 
     if (status === 3) {
-      updateVideoReferenceAsset(onVideoReferencesChange, 'images', assetId, {
+      updateVideoReferenceAsset(onVideoReferencesChange, kind, assetId, {
         uploadStatus: 'failed',
         uploadMaterialType: materialType,
         uploadError: material.errorMsg || '素材审核未通过',
@@ -1302,7 +1314,7 @@ async function pollSeedance1MaterialStatus(assetId, materialId, materialType, on
       return
     }
 
-    updateVideoReferenceAsset(onVideoReferencesChange, 'images', assetId, {
+    updateVideoReferenceAsset(onVideoReferencesChange, kind, assetId, {
       uploadStatus: 'reviewing',
       uploadMaterialType: materialType,
       materialId,
@@ -1310,7 +1322,7 @@ async function pollSeedance1MaterialStatus(assetId, materialId, materialType, on
     })
   }
 
-  updateVideoReferenceAsset(onVideoReferencesChange, 'images', assetId, {
+  updateVideoReferenceAsset(onVideoReferencesChange, kind, assetId, {
     uploadStatus: 'failed',
     uploadMaterialType: materialType,
     uploadError: '素材审核超时，请重新上传',

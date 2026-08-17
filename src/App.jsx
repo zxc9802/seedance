@@ -2957,21 +2957,24 @@ function validateSeedance1MaterialReferences(provider, params, references) {
     return null
   }
 
-  const imageAssets = Array.isArray(references?.images) ? references.images : []
+  const materialAssets = [
+    ...(Array.isArray(references?.images) ? references.images : []),
+    ...(Array.isArray(references?.videos) ? references.videos : []),
+  ]
   const materialType = resolveImageMaterialType(provider, params)
-  const failedAsset = imageAssets.find((asset) => asset.uploadStatus === 'failed')
+  const failedAsset = materialAssets.find((asset) => asset.uploadStatus === 'failed')
   if (failedAsset) {
-    return failedAsset.uploadError || '参考图片素材审核未通过，请移除后重新上传'
+    return failedAsset.uploadError || '参考素材审核未通过，请移除后重新上传'
   }
 
-  const unreadyCount = imageAssets.filter((asset) => (
+  const unreadyCount = materialAssets.filter((asset) => (
     asset.uploadStatus !== 'ready'
     || !asset.resourceRef
     || asset.uploadMaterialType !== materialType
   )).length
 
   if (unreadyCount > 0) {
-    return '参考图片仍在上传或审核中，请等待全部通过后再生成'
+    return '参考素材仍在上传或审核中，请等待全部通过后再生成'
   }
 
   return null
@@ -3072,10 +3075,10 @@ function validateKlingReferenceInput(provider, params, mode, references) {
 }
 
 async function uploadVideoReferences(provider, params, references) {
-  const imageMaterialType = resolveImageMaterialType(provider, params)
+  const materialType = resolveImageMaterialType(provider, params)
   const uploadOptions = resolveReferenceUploadOptions(provider, params)
-  const images = await uploadReferenceBatch(references.images, { materialType: imageMaterialType, ...uploadOptions })
-  const videos = await uploadReferenceBatch(references.videos, uploadOptions)
+  const images = await uploadReferenceBatch(references.images, { materialType, ...uploadOptions })
+  const videos = await uploadReferenceBatch(references.videos, { materialType, ...uploadOptions })
   const audios = await uploadReferenceBatch(references.audios, uploadOptions)
   const orderedVisualRefs = [...images.items, ...videos.items]
     .sort((left, right) => left.order - right.order)

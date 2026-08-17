@@ -467,6 +467,7 @@ app.post('/api/upload', upload.array('files', 32), async (req, res) => {
 
     for (const file of files) {
       const url = buildTempAssetUrl(baseUrl, file.filename, expiresAtMs)
+      const materialFileType = resolveMaterialFileType(file.mimetype)
       const item = {
         name: file.originalname,
         size: file.size,
@@ -486,11 +487,12 @@ app.post('/api/upload', upload.array('files', 32), async (req, res) => {
         item.expiresAt = uploaded.expiresAt
         item.storageBackend = 'dashscope'
         registerUploadedReference(item.resourceRef, file.size, file.mimetype, uploaded.expiresAtMs)
-      } else if (materialType !== null && publiclyReachable && file.mimetype.startsWith('image/')) {
+      } else if (materialType !== null && publiclyReachable && materialFileType !== null) {
         const material = await createMaterialReferenceTask({
           name: buildMaterialName(file.originalname),
           originalUrl: url,
           type: materialType,
+          fileType: materialFileType,
         })
         item.materialId = material.materialId
         item.materialStatus = material.status
@@ -6288,12 +6290,12 @@ function normalizeVeoFastRequest(body, promptMode) {
   return normalized
 }
 
-async function createMaterialReferenceTask({ name, originalUrl, type }) {
+async function createMaterialReferenceTask({ name, originalUrl, type, fileType = 1 }) {
   const createPayload = await requestJson(materialApiBaseUrl, '/openApi/material/create', buildMaterialHeaders(), {
     name,
     originalUrl,
     type,
-    fileType: 1,
+    fileType,
     thirdChannel: materialThirdChannel,
   })
 
@@ -6644,6 +6646,13 @@ function parseMaterialType(value) {
     default:
       throw createHttpError(400, `Unsupported materialType: ${value}`)
   }
+}
+
+function resolveMaterialFileType(mimeType = '') {
+  const normalized = String(mimeType).trim().toLowerCase()
+  if (normalized.startsWith('image/')) return 1
+  if (normalized.startsWith('video/')) return 2
+  return null
 }
 
 function buildMaterialName(originalName) {

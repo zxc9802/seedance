@@ -84,3 +84,19 @@ test('seedance1 frontend polls material review before generation and reuses revi
   assert.match(appSource, /asset\.uploadStatus === 'ready' && asset\.resourceRef/)
   assert.match(appSource, /const readyItems = assets\.filter\(\(asset\) => asset\.uploadStatus === 'ready' && asset\.resourceRef\)/)
 })
+
+test('seedance1 reference videos use the same person material review flow as images', async () => {
+  const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
+  const promptInputSource = await fs.readFile(path.resolve('src/components/PromptInput.jsx'), 'utf8')
+  const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
+
+  assert.match(promptInputSource, /const materialAssetKinds = \['images', 'videos'\]/)
+  assert.match(promptInputSource, /uploadSeedance1MaterialAsset\(kind, asset, seedance1MaterialType, onVideoReferencesChange\)/)
+  assert.match(promptInputSource, /pollSeedance1MaterialStatus\(kind, asset\.id, uploaded\.materialId, materialType, onVideoReferencesChange\)/)
+  assert.match(promptInputSource, /const materialAssets = \[\.\.\.\(references\?\.images \|\| \[\]\), \.\.\.\(references\?\.videos \|\| \[\]\)\]/)
+  assert.match(appSource, /uploadReferenceBatch\(references\.videos, \{ materialType, \.\.\.uploadOptions \}\)/)
+  assert.match(serverSource, /function resolveMaterialFileType\(mimeType = ''\)/)
+  assert.match(serverSource, /if \(normalized\.startsWith\('image\/'\)\) return 1/)
+  assert.match(serverSource, /if \(normalized\.startsWith\('video\/'\)\) return 2/)
+  assert.match(serverSource, /createMaterialReferenceTask\(\{\s+name: buildMaterialName\(file\.originalname\),\s+originalUrl: url,\s+type: materialType,\s+fileType: materialFileType,/s)
+})
