@@ -97,6 +97,6 @@ test('seedance1 reference videos use the same person material review flow as ima
   assert.match(appSource, /uploadReferenceBatch\(references\.videos, \{ materialType, \.\.\.uploadOptions \}\)/)
   assert.match(serverSource, /function resolveMaterialFileType\(mimeType = ''\)/)
   assert.match(serverSource, /if \(normalized\.startsWith\('image\/'\)\) return 1/)
-  assert.match(serverSource, /if \(normalized\.startsWith\('video\/'\)\) return 2/)
+  assert.match(serverSource, /if \(normalized\.startsWith\('video\/'\)\) return 3/)
   assert.match(serverSource, /createMaterialReferenceTask\(\{\s+name: buildMaterialName\(file\.originalname\),\s+originalUrl: url,\s+type: materialType,\s+fileType: materialFileType,/s)
 })

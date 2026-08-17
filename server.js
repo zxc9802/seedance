@@ -6651,7 +6651,7 @@ function parseMaterialType(value) {
 function resolveMaterialFileType(mimeType = '') {
   const normalized = String(mimeType).trim().toLowerCase()
   if (normalized.startsWith('image/')) return 1
-  if (normalized.startsWith('video/')) return 2
+  if (normalized.startsWith('video/')) return 3
   return null
 }
 
