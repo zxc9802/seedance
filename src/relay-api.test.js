@@ -157,15 +157,27 @@ const VALID_REQUEST = {
   duration: 5,
 }
 
-test('relay accepts Seedance 2.5 with the Seedance 2.0 contract', () => {
+test('relay sends the canonical Seedance 2.5 model ID and accepts 30 seconds', () => {
   const request = normalizeGenerationRequest({
     ...VALID_REQUEST,
-    model: 'seedance2.5',
+    model: 'doubao-seedance-2-5-260628',
+    duration: 30,
   })
 
-  assert.equal(request.model, 'seedance2.5')
+  assert.equal(request.model, 'doubao-seedance-2-5-260628')
   assert.equal(request.resolution, '720p')
-  assert.equal(buildAggregationRequest(request).modelId, 'seedance2.5')
+  assert.equal(request.duration, 30)
+  assert.equal(buildAggregationRequest(request).modelId, 'doubao-seedance-2-5-260628')
+})
+
+test('relay keeps 30 seconds unavailable to Seedance 2.0 models', () => {
+  assert.throws(
+    () => normalizeGenerationRequest({
+      ...VALID_REQUEST,
+      duration: 30,
+    }),
+    /duration must be one of 4, 5, 6, 8, 10, 12, 15/,
+  )
 })
 
 test('relay lets Seedance 2.5 use up to 50 reference materials', () => {
@@ -177,7 +189,7 @@ test('relay lets Seedance 2.5 use up to 50 reference materials', () => {
 
   const request = normalizeGenerationRequest({
     ...VALID_REQUEST,
-    model: 'seedance2.5',
+    model: 'doubao-seedance-2-5-260628',
     mode: 'fusion',
     references,
   })
@@ -189,7 +201,7 @@ test('relay lets Seedance 2.5 use up to 50 reference materials', () => {
   assert.throws(
     () => normalizeGenerationRequest({
       ...VALID_REQUEST,
-      model: 'seedance2.5',
+      model: 'doubao-seedance-2-5-260628',
       mode: 'fusion',
       references: {
         ...references,
@@ -367,6 +379,47 @@ test('relay scopes tasks and usage to the submitting API key', async () => {
       headers: relayHeaders('sk-seedance-b'),
     })
     assert.equal((await otherUsage.json()).summary.requests, 0)
+  } finally {
+    await relay.close()
+  }
+})
+
+test('relay keeps the stored Seedance model when querying the upstream task', async () => {
+  const queryCalls = []
+  const provider = {
+    async submit() {
+      return { taskId: 'upstream-25', status: 'submitted' }
+    },
+    async query(taskId, model) {
+      queryCalls.push({ taskId, model })
+      return {
+        taskId,
+        status: 'succeeded',
+        videoUrl: 'https://media.example/seedance-25.mp4',
+      }
+    },
+  }
+  const relay = await startRelay({ provider })
+
+  try {
+    const submitted = await fetch(`${relay.baseUrl}/v1/videos/generations`, {
+      method: 'POST',
+      headers: relayHeaders('sk-seedance-a', 'req-model-25'),
+      body: JSON.stringify({
+        ...VALID_REQUEST,
+        model: 'doubao-seedance-2-5-260628',
+      }),
+    })
+    const task = await submitted.json()
+    const completed = await fetch(`${relay.baseUrl}${task.poll_url}`, {
+      headers: relayHeaders('sk-seedance-a'),
+    })
+
+    assert.equal(completed.status, 200)
+    assert.deepEqual(queryCalls, [{
+      taskId: 'upstream-25',
+      model: 'doubao-seedance-2-5-260628',
+    }])
   } finally {
     await relay.close()
   }

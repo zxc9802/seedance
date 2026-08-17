@@ -5,11 +5,12 @@ import { calculateConfirmedMediaBilling } from '../db/monitorPricing.js'
 const ALLOWED_MODELS = new Set([
   'doubao-seedance-2-0-260128',
   'doubao-seedance-2-0-fast-260128',
-  'seedance2.5',
+  'doubao-seedance-2-5-260628',
 ])
 const ALLOWED_MODES = new Set(['t2v', 'i2v', 'flf', 'fusion'])
 const ALLOWED_RATIOS = new Set(['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'])
-const ALLOWED_DURATIONS = new Set([4, 5, 6, 8, 10, 12, 15])
+const STANDARD_DURATIONS = [4, 5, 6, 8, 10, 12, 15]
+const SEEDANCE_25_DURATIONS = [...STANDARD_DURATIONS, 30]
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 
 function sendError(res, status, code, message) {
@@ -54,7 +55,7 @@ function validateReferenceCounts(model, mode, references) {
     throw new Error(`${mode} mode does not accept reference video or audio`)
   }
   if (mode === 'fusion') {
-    const limits = model === 'seedance2.5'
+    const limits = model === 'doubao-seedance-2-5-260628'
       ? { images: 30, videos: 10, audios: 10, total: 50 }
       : { images: 9, videos: 3, audios: 3, total: Number.POSITIVE_INFINITY }
     const total = references.images.length + references.videos.length + references.audios.length
@@ -103,8 +104,11 @@ export function normalizeGenerationRequest(body) {
   }
 
   const duration = Number(body?.duration ?? 5)
-  if (!Number.isInteger(duration) || !ALLOWED_DURATIONS.has(duration)) {
-    throw new Error(`duration must be one of ${[...ALLOWED_DURATIONS].join(', ')}`)
+  const allowedDurations = model === 'doubao-seedance-2-5-260628'
+    ? SEEDANCE_25_DURATIONS
+    : STANDARD_DURATIONS
+  if (!Number.isInteger(duration) || !allowedDurations.includes(duration)) {
+    throw new Error(`duration must be one of ${allowedDurations.join(', ')}`)
   }
 
   const references = {
@@ -399,7 +403,7 @@ export function createSeedanceRelayRouter({
     const storedStatus = normalizeStoredStatus(task.status)
     if (!TERMINAL_STATUSES.has(storedStatus) && task.engine_task_id) {
       try {
-        const providerResult = await provider.query(task.engine_task_id)
+        const providerResult = await provider.query(task.engine_task_id, task.model)
         task = await repository.applyProviderState(
           task.id,
           req.seedanceRelayApiKey.id,

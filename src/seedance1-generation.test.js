@@ -32,18 +32,35 @@ test('seedance1 exposes the Seedance 2 fast model on the same channel', async ()
 test('seedance1 exposes Seedance 2.5 on the same channel', async () => {
   const providers = await loadProviders()
   const seedance1 = providers.veo
+  const seedance25Model = 'doubao-seedance-2-5-260628'
 
   assert.ok(seedance1.models.some((model) => (
-    model.value === 'seedance2.5'
+    model.value === seedance25Model
       && model.label === 'Seedance 2.5'
   )))
-  assert.equal(seedance1.modelMaterialTypeDefaults?.['seedance2.5'], 'role')
-  assert.deepEqual(seedance1.modelReferenceLimits?.['seedance2.5'], {
+  assert.equal(seedance1.modelMaterialTypeDefaults?.[seedance25Model], 'role')
+  assert.deepEqual(seedance1.modelReferenceLimits?.[seedance25Model], {
     maxReferenceImages: { fusion: 30 },
     maxReferenceVideos: { fusion: 10 },
     maxReferenceAudios: { fusion: 10 },
     maxTotalReferences: 50,
   })
+  assert.deepEqual(seedance1.durationRules?.modelDefaults?.[seedance25Model], [4, 5, 6, 8, 10, 12, 15, 30])
+  assert.deepEqual(seedance1.durationRules?.modelDefaults?.['doubao-seedance-2-0-260128'], [4, 5, 6, 8, 10, 12, 15])
+  assert.deepEqual(seedance1.durationRules?.modelDefaults?.['doubao-seedance-2-0-fast-260128'], [4, 5, 6, 8, 10, 12, 15])
+})
+
+test('Seedance 2.5 keeps its credential selection through generation, polling, media and background sync', async () => {
+  const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
+  const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
+
+  assert.match(serverSource, /resolveSeedanceUpstreamConfig\(process\.env, requestBody\?\.modelId\)/)
+  assert.match(serverSource, /resolveSeedanceUpstreamConfig\(process\.env, req\.body\?\.modelId\)/)
+  assert.match(serverSource, /resolveSeedanceUpstreamConfig\(process\.env, req\.query\?\.modelId\)/)
+  assert.match(serverSource, /SELECT id, channel, provider_id, model, engine_task_id/)
+  assert.match(serverSource, /resolveSeedanceUpstreamConfig\(process\.env, row\?\.model\)/)
+  assert.match(appSource, /modelId: params\.model/)
+  assert.match(appSource, /resolveAggregationDownloadUrl\(task, provider, params\.model\)/)
 })
 
 test('seedance1 defaults Seedance 2 models to person material review', async () => {

@@ -895,7 +895,7 @@ function App() {
         if (initialTask.status === 2 && initialTask.message) {
           window.clearInterval(progressTimer)
           const previewUrl = await resolvePreviewUrl(initialTask.message, provider)
-          const downloadUrl = await resolveAggregationDownloadUrl(initialTask, provider)
+          const downloadUrl = await resolveAggregationDownloadUrl(initialTask, provider, params.model)
           completeGeneration({ progress: 100, videoUrl: previewUrl, downloadUrl })
           return
         }
@@ -917,6 +917,7 @@ function App() {
             body: JSON.stringify({
               taskId: initialTask.taskId,
               abilityType: 'VIDEO',
+              modelId: params.model,
             }),
           })
 
@@ -934,7 +935,7 @@ function App() {
             finished = true
             window.clearInterval(progressTimer)
             const previewUrl = await resolvePreviewUrl(task.message, provider)
-            const downloadUrl = await resolveAggregationDownloadUrl(task, provider)
+            const downloadUrl = await resolveAggregationDownloadUrl(task, provider, params.model)
             completeGeneration({ progress: 100, videoUrl: previewUrl, downloadUrl })
             return
           }
@@ -3213,14 +3214,15 @@ async function resolveDreaminaPlaybackUrl(task, providerId) {
   return resolvePreviewUrl(task?.videoUrl || null, providerId)
 }
 
-async function resolveAggregationDownloadUrl(task, providerId) {
+async function resolveAggregationDownloadUrl(task, providerId, modelId = null) {
   if (providerId !== 'veo') {
     return resolvePreviewUrl(task?.videoUrl || task?.message || null, providerId)
   }
 
   const taskId = typeof task?.taskId === 'string' ? task.taskId.trim() : ''
   if (taskId) {
-    return `/api/veo/media/${encodeURIComponent(taskId)}`
+    const modelQuery = modelId ? `?modelId=${encodeURIComponent(modelId)}` : ''
+    return `/api/veo/media/${encodeURIComponent(taskId)}${modelQuery}`
   }
 
   return resolvePreviewUrl(task?.videoUrl || task?.message || null, providerId)
