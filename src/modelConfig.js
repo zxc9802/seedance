@@ -31,12 +31,12 @@ const BASE_PROVIDERS = {
     resolutions: {
       default: ['480p', '720p'],
     },
-    durations: [4, 5, 6, 8, 10, 12, 15, 30],
+    durations: [4, 5, 6, 8, 10, 12, 15, 20, 25, 30],
     durationRules: {
       modelDefaults: {
         'doubao-seedance-2-0-260128': [4, 5, 6, 8, 10, 12, 15],
         'doubao-seedance-2-0-fast-260128': [4, 5, 6, 8, 10, 12, 15],
-        'doubao-seedance-2-5-260628': [4, 5, 6, 8, 10, 12, 15, 30],
+        'doubao-seedance-2-5-260628': [4, 5, 6, 8, 10, 12, 15, 20, 25, 30],
       },
     },
     sampleCounts: [1],

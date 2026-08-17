@@ -157,17 +157,19 @@ const VALID_REQUEST = {
   duration: 5,
 }
 
-test('relay sends the canonical Seedance 2.5 model ID and accepts 30 seconds', () => {
-  const request = normalizeGenerationRequest({
-    ...VALID_REQUEST,
-    model: 'doubao-seedance-2-5-260628',
-    duration: 30,
-  })
+test('relay sends the canonical Seedance 2.5 model ID and accepts 20, 25 and 30 seconds', () => {
+  for (const duration of [20, 25, 30]) {
+    const request = normalizeGenerationRequest({
+      ...VALID_REQUEST,
+      model: 'doubao-seedance-2-5-260628',
+      duration,
+    })
 
-  assert.equal(request.model, 'doubao-seedance-2-5-260628')
-  assert.equal(request.resolution, '720p')
-  assert.equal(request.duration, 30)
-  assert.equal(buildAggregationRequest(request).modelId, 'doubao-seedance-2-5-260628')
+    assert.equal(request.model, 'doubao-seedance-2-5-260628')
+    assert.equal(request.resolution, '720p')
+    assert.equal(request.duration, duration)
+    assert.equal(buildAggregationRequest(request).modelId, 'doubao-seedance-2-5-260628')
+  }
 })
 
 test('relay keeps 30 seconds unavailable to Seedance 2.0 models', () => {

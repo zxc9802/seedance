@@ -10,7 +10,7 @@ const ALLOWED_MODELS = new Set([
 const ALLOWED_MODES = new Set(['t2v', 'i2v', 'flf', 'fusion'])
 const ALLOWED_RATIOS = new Set(['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'])
 const STANDARD_DURATIONS = [4, 5, 6, 8, 10, 12, 15]
-const SEEDANCE_25_DURATIONS = [...STANDARD_DURATIONS, 30]
+const SEEDANCE_25_DURATIONS = [...STANDARD_DURATIONS, 20, 25, 30]
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 
 function sendError(res, status, code, message) {

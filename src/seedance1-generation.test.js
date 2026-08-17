@@ -45,7 +45,7 @@ test('seedance1 exposes Seedance 2.5 on the same channel', async () => {
     maxReferenceAudios: { fusion: 10 },
     maxTotalReferences: 50,
   })
-  assert.deepEqual(seedance1.durationRules?.modelDefaults?.[seedance25Model], [4, 5, 6, 8, 10, 12, 15, 30])
+  assert.deepEqual(seedance1.durationRules?.modelDefaults?.[seedance25Model], [4, 5, 6, 8, 10, 12, 15, 20, 25, 30])
   assert.deepEqual(seedance1.durationRules?.modelDefaults?.['doubao-seedance-2-0-260128'], [4, 5, 6, 8, 10, 12, 15])
   assert.deepEqual(seedance1.durationRules?.modelDefaults?.['doubao-seedance-2-0-fast-260128'], [4, 5, 6, 8, 10, 12, 15])
 })
