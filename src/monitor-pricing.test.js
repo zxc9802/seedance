@@ -31,7 +31,7 @@ test('external Seedance 2 Fast is monitored at 90 credits per second', () => {
 test('external Seedance 2.5 reuses the standard Seedance 2.0 price', () => {
   const billing = calculateConfirmedMediaBilling({
     providerId: 'seedance1',
-    model: 'seedance2.5',
+    model: 'doubao-seedance-2-5-260628',
     resolution: '720p',
     duration: 5,
     sampleCount: 1,

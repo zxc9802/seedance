@@ -23,14 +23,21 @@ const BASE_PROVIDERS = {
     models: [
       { value: 'doubao-seedance-2-0-260128', label: 'seedance2', tag: '已接入' },
       { value: 'doubao-seedance-2-0-fast-260128', label: 'Seedance 2 Fast', tag: 'Fast' },
-      { value: 'seedance2.5', label: 'Seedance 2.5', tag: '新' },
+      { value: 'doubao-seedance-2-5-260628', label: 'Seedance 2.5', tag: '新' },
     ],
     aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {
       default: ['480p', '720p', '1080p'],
       'doubao-seedance-2-0-fast-260128': ['480p', '720p'],
     },
-    durations: [4, 5, 6, 8, 10, 12, 15],
+    durations: [4, 5, 6, 8, 10, 12, 15, 20, 25, 30],
+    durationRules: {
+      modelDefaults: {
+        'doubao-seedance-2-0-260128': [4, 5, 6, 8, 10, 12, 15],
+        'doubao-seedance-2-0-fast-260128': [4, 5, 6, 8, 10, 12, 15],
+        'doubao-seedance-2-5-260628': [4, 5, 6, 8, 10, 12, 15, 20, 25, 30],
+      },
+    },
     sampleCounts: [1],
     features: {
       generateAudio: true,
@@ -59,6 +66,14 @@ const BASE_PROVIDERS = {
     maxReferenceAudios: {
       fusion: 3,
     },
+    modelReferenceLimits: {
+      'doubao-seedance-2-5-260628': {
+        maxReferenceImages: { fusion: 30 },
+        maxReferenceVideos: { fusion: 10 },
+        maxReferenceAudios: { fusion: 10 },
+        maxTotalReferences: 50,
+      },
+    },
     defaults: {
       model: 'doubao-seedance-2-0-260128',
       aspectRatio: '9:16',
@@ -76,7 +91,7 @@ const BASE_PROVIDERS = {
     ],
     modelMaterialTypeDefaults: {
       'doubao-seedance-2-0-fast-260128': 'role',
-      'seedance2.5': 'role',
+      'doubao-seedance-2-5-260628': 'role',
     },
   },
   ve31p: {

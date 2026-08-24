@@ -158,9 +158,11 @@ function App() {
   }
   const isTextProvider = config.outputType === 'text'
   const hasActiveGeneration = PROVIDER_ORDER.some((key) => providerState[key]?.generating)
-  const maxImages = resolveImageLimit(config, generationMode, videoReferences)
-  const maxVideos = resolveVideoLimit(config, generationMode, videoReferences)
-  const maxAudios = resolveLimit(config.maxReferenceAudios, generationMode)
+  const referenceLimits = resolveReferenceLimits(config, params.model)
+  const maxImages = resolveImageLimit(config, generationMode, videoReferences, referenceLimits)
+  const maxVideos = resolveVideoLimit(config, generationMode, videoReferences, referenceLimits)
+  const maxAudios = resolveLimit(referenceLimits.maxReferenceAudios, generationMode)
+  const maxTotalReferences = referenceLimits.maxTotalReferences || null
 
   const updateParam = useCallback((key, value) => {
     setAllParams((prev) => ({
@@ -893,7 +895,7 @@ function App() {
         if (initialTask.status === 2 && initialTask.message) {
           window.clearInterval(progressTimer)
           const previewUrl = await resolvePreviewUrl(initialTask.message, provider)
-          const downloadUrl = await resolveAggregationDownloadUrl(initialTask, provider)
+          const downloadUrl = await resolveAggregationDownloadUrl(initialTask, provider, params.model)
           completeGeneration({ progress: 100, videoUrl: previewUrl, downloadUrl })
           return
         }
@@ -915,6 +917,7 @@ function App() {
             body: JSON.stringify({
               taskId: initialTask.taskId,
               abilityType: 'VIDEO',
+              modelId: params.model,
             }),
           })
 
@@ -932,7 +935,7 @@ function App() {
             finished = true
             window.clearInterval(progressTimer)
             const previewUrl = await resolvePreviewUrl(task.message, provider)
-            const downloadUrl = await resolveAggregationDownloadUrl(task, provider)
+            const downloadUrl = await resolveAggregationDownloadUrl(task, provider, params.model)
             completeGeneration({ progress: 100, videoUrl: previewUrl, downloadUrl })
             return
           }
@@ -1132,6 +1135,7 @@ function App() {
       maxImages={maxImages}
       maxVideos={maxVideos}
       maxAudios={maxAudios}
+      maxTotalReferences={maxTotalReferences}
       providerConfig={config}
       onGenerate={handleGenerate}
       generating={currentState.generating}
@@ -2864,8 +2868,17 @@ function resolveLimit(limitConfig, mode) {
   return limitConfig[mode] ?? 0
 }
 
-function resolveImageLimit(config, mode, references) {
-  const baseLimit = resolveLimit(config?.maxReferenceImages, mode)
+function resolveReferenceLimits(config, model) {
+  return {
+    maxReferenceImages: config?.modelReferenceLimits?.[model]?.maxReferenceImages || config?.maxReferenceImages,
+    maxReferenceVideos: config?.modelReferenceLimits?.[model]?.maxReferenceVideos || config?.maxReferenceVideos,
+    maxReferenceAudios: config?.modelReferenceLimits?.[model]?.maxReferenceAudios || config?.maxReferenceAudios,
+    maxTotalReferences: config?.modelReferenceLimits?.[model]?.maxTotalReferences || null,
+  }
+}
+
+function resolveImageLimit(config, mode, references, referenceLimits = resolveReferenceLimits(config)) {
+  const baseLimit = resolveLimit(referenceLimits.maxReferenceImages, mode)
   if (config?.id === 'wan1') {
     return Math.max(0, Math.min(baseLimit, 5 - (references?.videos?.length || 0)))
   }
@@ -2875,8 +2888,8 @@ function resolveImageLimit(config, mode, references) {
   return baseLimit
 }
 
-function resolveVideoLimit(config, mode, references) {
-  const baseLimit = resolveLimit(config?.maxReferenceVideos, mode)
+function resolveVideoLimit(config, mode, references, referenceLimits = resolveReferenceLimits(config)) {
+  const baseLimit = resolveLimit(referenceLimits.maxReferenceVideos, mode)
   if (config?.id === 'wan1') {
     return Math.max(0, Math.min(baseLimit, 5 - (references?.images?.length || 0)))
   }
@@ -3060,10 +3073,10 @@ function validateKlingReferenceInput(provider, params, mode, references) {
 }
 
 async function uploadVideoReferences(provider, params, references) {
-  const imageMaterialType = resolveImageMaterialType(provider, params)
+  const materialType = resolveImageMaterialType(provider, params)
   const uploadOptions = resolveReferenceUploadOptions(provider, params)
-  const images = await uploadReferenceBatch(references.images, { materialType: imageMaterialType, ...uploadOptions })
-  const videos = await uploadReferenceBatch(references.videos, uploadOptions)
+  const images = await uploadReferenceBatch(references.images, { materialType, ...uploadOptions })
+  const videos = await uploadReferenceBatch(references.videos, { materialType, ...uploadOptions })
   const audios = await uploadReferenceBatch(references.audios, uploadOptions)
   const orderedVisualRefs = [...images.items, ...videos.items]
     .sort((left, right) => left.order - right.order)
@@ -3198,14 +3211,15 @@ async function resolveDreaminaPlaybackUrl(task, providerId) {
   return resolvePreviewUrl(task?.videoUrl || null, providerId)
 }
 
-async function resolveAggregationDownloadUrl(task, providerId) {
+async function resolveAggregationDownloadUrl(task, providerId, modelId = null) {
   if (providerId !== 'veo') {
     return resolvePreviewUrl(task?.videoUrl || task?.message || null, providerId)
   }
 
   const taskId = typeof task?.taskId === 'string' ? task.taskId.trim() : ''
   if (taskId) {
-    return `/api/veo/media/${encodeURIComponent(taskId)}`
+    const modelQuery = modelId ? `?modelId=${encodeURIComponent(modelId)}` : ''
+    return `/api/veo/media/${encodeURIComponent(taskId)}${modelQuery}`
   }
 
   return resolvePreviewUrl(task?.videoUrl || task?.message || null, providerId)

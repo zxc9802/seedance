@@ -153,15 +153,61 @@ const VALID_REQUEST = {
   duration: 5,
 }
 
-test('relay accepts Seedance 2.5 with the Seedance 2.0 contract', () => {
+test('relay sends the canonical Seedance 2.5 model ID and accepts 20, 25 and 30 seconds', () => {
+  for (const duration of [20, 25, 30]) {
+    const request = normalizeGenerationRequest({
+      ...VALID_REQUEST,
+      model: 'doubao-seedance-2-5-260628',
+      duration,
+    })
+
+    assert.equal(request.model, 'doubao-seedance-2-5-260628')
+    assert.equal(request.resolution, '720p')
+    assert.equal(request.duration, duration)
+    assert.equal(buildAggregationRequest(request).modelId, 'doubao-seedance-2-5-260628')
+  }
+})
+
+test('relay keeps 30 seconds unavailable to Seedance 2.0 models', () => {
+  assert.throws(
+    () => normalizeGenerationRequest({
+      ...VALID_REQUEST,
+      duration: 30,
+    }),
+    /duration must be one of 4, 5, 6, 8, 10, 12, 15/,
+  )
+})
+
+test('relay lets Seedance 2.5 use up to 50 reference materials', () => {
+  const references = {
+    images: Array.from({ length: 30 }, (_, index) => `https://example.com/image-${index + 1}.jpg`),
+    videos: Array.from({ length: 10 }, (_, index) => `https://example.com/video-${index + 1}.mp4`),
+    audios: Array.from({ length: 10 }, (_, index) => `https://example.com/audio-${index + 1}.mp3`),
+  }
+
   const request = normalizeGenerationRequest({
     ...VALID_REQUEST,
-    model: 'seedance2.5',
+    model: 'doubao-seedance-2-5-260628',
+    mode: 'fusion',
+    references,
   })
+  assert.equal(
+    request.references.images.length + request.references.videos.length + request.references.audios.length,
+    50,
+  )
 
-  assert.equal(request.model, 'seedance2.5')
-  assert.equal(request.resolution, '720p')
-  assert.equal(buildAggregationRequest(request).modelId, 'seedance2.5')
+  assert.throws(
+    () => normalizeGenerationRequest({
+      ...VALID_REQUEST,
+      model: 'doubao-seedance-2-5-260628',
+      mode: 'fusion',
+      references: {
+        ...references,
+        images: [...references.images, 'https://example.com/image-31.jpg'],
+      },
+    }),
+    /up to 30 images, 10 videos and 10 audios, with 50 materials total/,
+  )
 })
 
 test('production server mounts the API-key relay before browser SSO middleware', async () => {
@@ -283,6 +329,47 @@ test('relay scopes tasks and usage to the submitting API key', async () => {
       headers: relayHeaders('sk-seedance-b'),
     })
     assert.equal((await otherUsage.json()).summary.requests, 0)
+  } finally {
+    await relay.close()
+  }
+})
+
+test('relay keeps the stored Seedance model when querying the upstream task', async () => {
+  const queryCalls = []
+  const provider = {
+    async submit() {
+      return { taskId: 'upstream-25', status: 'submitted' }
+    },
+    async query(taskId, model) {
+      queryCalls.push({ taskId, model })
+      return {
+        taskId,
+        status: 'succeeded',
+        videoUrl: 'https://media.example/seedance-25.mp4',
+      }
+    },
+  }
+  const relay = await startRelay({ provider })
+
+  try {
+    const submitted = await fetch(`${relay.baseUrl}/v1/videos/generations`, {
+      method: 'POST',
+      headers: relayHeaders('sk-seedance-a', 'req-model-25'),
+      body: JSON.stringify({
+        ...VALID_REQUEST,
+        model: 'doubao-seedance-2-5-260628',
+      }),
+    })
+    const task = await submitted.json()
+    const completed = await fetch(`${relay.baseUrl}${task.poll_url}`, {
+      headers: relayHeaders('sk-seedance-a'),
+    })
+
+    assert.equal(completed.status, 200)
+    assert.deepEqual(queryCalls, [{
+      taskId: 'upstream-25',
+      model: 'doubao-seedance-2-5-260628',
+    }])
   } finally {
     await relay.close()
   }

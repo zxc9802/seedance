@@ -32,12 +32,22 @@ test('seedance1 exposes the Seedance 2 fast model on the same channel', async ()
 test('seedance1 exposes Seedance 2.5 on the same channel', async () => {
   const providers = await loadProviders()
   const seedance1 = providers.veo
+  const seedance25Model = 'doubao-seedance-2-5-260628'
 
   assert.ok(seedance1.models.some((model) => (
-    model.value === 'seedance2.5'
+    model.value === seedance25Model
       && model.label === 'Seedance 2.5'
   )))
-  assert.equal(seedance1.modelMaterialTypeDefaults?.['seedance2.5'], 'role')
+  assert.equal(seedance1.modelMaterialTypeDefaults?.[seedance25Model], 'role')
+  assert.deepEqual(seedance1.modelReferenceLimits?.[seedance25Model], {
+    maxReferenceImages: { fusion: 30 },
+    maxReferenceVideos: { fusion: 10 },
+    maxReferenceAudios: { fusion: 10 },
+    maxTotalReferences: 50,
+  })
+  assert.deepEqual(seedance1.durationRules?.modelDefaults?.[seedance25Model], [4, 5, 6, 8, 10, 12, 15, 20, 25, 30])
+  assert.deepEqual(seedance1.durationRules?.modelDefaults?.['doubao-seedance-2-0-260128'], [4, 5, 6, 8, 10, 12, 15])
+  assert.deepEqual(seedance1.durationRules?.modelDefaults?.['doubao-seedance-2-0-fast-260128'], [4, 5, 6, 8, 10, 12, 15])
 })
 
 test('seedance1 limits Seedance 2 fast model to 480p and 720p', async () => {
@@ -45,6 +55,30 @@ test('seedance1 limits Seedance 2 fast model to 480p and 720p', async () => {
   const seedance1 = providers.veo
 
   assert.deepEqual(seedance1.resolutions['doubao-seedance-2-0-fast-260128'], ['480p', '720p'])
+})
+
+test('seedance1 frontend applies the selected model reference limits', async () => {
+  const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
+  const promptInputSource = await fs.readFile(path.resolve('src/components/PromptInput.jsx'), 'utf8')
+
+  assert.match(appSource, /resolveReferenceLimits\(config, params\.model\)/)
+  assert.match(appSource, /maxTotalReferences=\{maxTotalReferences\}/)
+  assert.match(promptInputSource, /maxTotalReferences - totalAssetCount/)
+})
+
+test('Seedance 2.5 keeps its credential selection through generation, polling, media and background sync', async () => {
+  const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
+  const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
+  const relaySource = await fs.readFile(path.resolve('relay/api.js'), 'utf8')
+
+  assert.match(serverSource, /resolveSeedanceUpstreamConfig\(process\.env, requestBody\?\.modelId\)/)
+  assert.match(serverSource, /resolveSeedanceUpstreamConfig\(process\.env, req\.body\?\.modelId\)/)
+  assert.match(serverSource, /resolveSeedanceUpstreamConfig\(process\.env, req\.query\?\.modelId\)/)
+  assert.match(serverSource, /SELECT id, channel, provider_id, model, engine_task_id/)
+  assert.match(serverSource, /resolveSeedanceUpstreamConfig\(process\.env, row\?\.model\)/)
+  assert.match(appSource, /modelId: params\.model/)
+  assert.match(appSource, /resolveAggregationDownloadUrl\(task, provider, params\.model\)/)
+  assert.match(relaySource, /provider\.query\(task\.engine_task_id, task\.model\)/)
 })
 
 test('seedance1 defaults Seedance 2 models to person material review', async () => {
@@ -84,4 +118,20 @@ test('seedance1 frontend polls material review before generation and reuses revi
   assert.match(promptInputSource, /hasPendingVideoReferenceUploads\(/)
   assert.match(appSource, /asset\.uploadStatus === 'ready' && asset\.resourceRef/)
   assert.match(appSource, /const readyItems = assets\.filter\(\(asset\) => asset\.uploadStatus === 'ready' && asset\.resourceRef\)/)
+})
+
+test('seedance1 reference videos use the same person material review flow as images', async () => {
+  const appSource = await fs.readFile(path.resolve('src/App.jsx'), 'utf8')
+  const promptInputSource = await fs.readFile(path.resolve('src/components/PromptInput.jsx'), 'utf8')
+  const serverSource = await fs.readFile(path.resolve('server.js'), 'utf8')
+
+  assert.match(promptInputSource, /const materialAssetKinds = \['images', 'videos'\]/)
+  assert.match(promptInputSource, /uploadSeedance1MaterialAsset\(kind, asset, seedance1MaterialType, onVideoReferencesChange\)/)
+  assert.match(promptInputSource, /pollSeedance1MaterialStatus\(kind, asset\.id, uploaded\.materialId, materialType, onVideoReferencesChange\)/)
+  assert.match(promptInputSource, /const materialAssets = \[\.\.\.\(references\?\.images \|\| \[\]\), \.\.\.\(references\?\.videos \|\| \[\]\)\]/)
+  assert.match(appSource, /uploadReferenceBatch\(references\.videos, \{ materialType, \.\.\.uploadOptions \}\)/)
+  assert.match(serverSource, /function resolveMaterialFileType\(mimeType = ''\)/)
+  assert.match(serverSource, /if \(normalized\.startsWith\('image\/'\)\) return 1/)
+  assert.match(serverSource, /if \(normalized\.startsWith\('video\/'\)\) return 3/)
+  assert.match(serverSource, /createMaterialReferenceTask\(\{\s+name: buildMaterialName\(file\.originalname\),\s+originalUrl: url,\s+type: materialType,\s+fileType: materialFileType,/s)
 })

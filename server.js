@@ -32,6 +32,7 @@ import {
   normalizeRelayTask,
   normalizeVideoUpstreamProtocol,
 } from './relay/videoRelayClient.js'
+import { resolveSeedanceUpstreamConfig } from './relay/upstreamCredentials.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -249,14 +250,6 @@ app.get('/api/session', async (req, res) => {
   })
 })
 
-function buildSeedanceRelayUpstreamHeaders() {
-  return {
-    projectCode: process.env.VIDEO_PROJECT_CODE,
-    'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
-    'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
-  }
-}
-
 function usesVideoRelayProtocol() {
   return videoUpstreamProtocol === 'relay'
 }
@@ -279,7 +272,8 @@ function formatVideoProviderResultAsAggregationPayload(result) {
 }
 
 async function submitSeedanceRelayUpstream(requestBody, { idempotencyKey } = {}) {
-  const missing = getMissingVideoConfig()
+  const upstreamConfig = resolveSeedanceUpstreamConfig(process.env, requestBody?.modelId)
+  const missing = getMissingVideoConfig(requestBody?.modelId)
   if (missing.length > 0) {
     throw createHttpError(503, `Missing backend config: ${missing.join(', ')}`)
   }
@@ -298,7 +292,7 @@ async function submitSeedanceRelayUpstream(requestBody, { idempotencyKey } = {})
   const payload = await requestJson(
     videoApiBaseUrl,
     '/openApi/generate',
-    buildSeedanceRelayUpstreamHeaders(),
+    upstreamConfig.headers,
     requestBody,
   )
   const traceMetadata = extractTraceMetadataFromPayload(payload)
@@ -335,8 +329,9 @@ async function submitSeedanceRelayUpstream(requestBody, { idempotencyKey } = {})
   }
 }
 
-async function querySeedanceRelayUpstream(taskId) {
-  const missing = getMissingVideoConfig()
+async function querySeedanceRelayUpstream(taskId, modelId = null) {
+  const upstreamConfig = resolveSeedanceUpstreamConfig(process.env, modelId)
+  const missing = getMissingVideoConfig(modelId)
   if (missing.length > 0) {
     throw createHttpError(503, `Missing backend config: ${missing.join(', ')}`)
   }
@@ -353,7 +348,7 @@ async function querySeedanceRelayUpstream(taskId) {
   const payload = await requestJson(
     videoApiBaseUrl,
     '/openApi/queryResult',
-    buildSeedanceRelayUpstreamHeaders(),
+    upstreamConfig.headers,
     {
       taskId,
       abilityType: 'VIDEO',
@@ -541,6 +536,7 @@ app.post('/api/upload', upload.array('files', 32), async (req, res) => {
 
     for (const file of files) {
       const url = buildTempAssetUrl(baseUrl, file.filename, expiresAtMs)
+      const materialFileType = resolveMaterialFileType(file.mimetype)
       const item = {
         name: file.originalname,
         size: file.size,
@@ -564,7 +560,7 @@ app.post('/api/upload', upload.array('files', 32), async (req, res) => {
         materialType !== null
         && usesVideoRelayProtocol()
         && publiclyReachable
-        && file.mimetype.startsWith('image/')
+        && materialFileType !== null
       ) {
         item.materialId = `relay-direct-${randomUUID()}`
         item.materialStatus = 2
@@ -572,11 +568,12 @@ app.post('/api/upload', upload.array('files', 32), async (req, res) => {
         item.materialError = null
         item.resourceRef = url
         registerUploadedReference(item.url, file.size, file.mimetype, expiresAtMs)
-      } else if (materialType !== null && publiclyReachable && file.mimetype.startsWith('image/')) {
+      } else if (materialType !== null && publiclyReachable && materialFileType !== null) {
         const material = await createMaterialReferenceTask({
           name: buildMaterialName(file.originalname),
           originalUrl: url,
           type: materialType,
+          fileType: materialFileType,
         })
         item.materialId = material.materialId
         item.materialStatus = material.status
@@ -656,7 +653,8 @@ app.post('/api/material/status', async (req, res) => {
 })
 
 app.post('/api/veo/generate', async (req, res) => {
-  const missing = getMissingVideoConfig()
+  const upstreamConfig = resolveSeedanceUpstreamConfig(process.env, req.body?.modelId)
+  const missing = getMissingVideoConfig(req.body?.modelId)
   if (missing.length > 0) {
     res.status(500).json({
       success: false,
@@ -727,11 +725,7 @@ app.post('/api/veo/generate', async (req, res) => {
   }
 
   let creditReservationHandled = false
-  await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
-    projectCode: process.env.VIDEO_PROJECT_CODE,
-    'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
-    'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
-  }, async ({ payload, traceMetadata, status, url }) => {
+  await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, upstreamConfig.headers, async ({ payload, traceMetadata, status, url }) => {
     if (status >= 400) {
       await releasePreparedCreditCharge(creditCharge, '上游拒绝提交，释放预占积分')
       creditReservationHandled = true
@@ -765,7 +759,8 @@ app.post('/api/veo/generate', async (req, res) => {
 })
 
 app.post('/api/veo/queryResult', async (req, res) => {
-  const missing = getMissingVideoConfig()
+  const upstreamConfig = resolveSeedanceUpstreamConfig(process.env, req.body?.modelId)
+  const missing = getMissingVideoConfig(req.body?.modelId)
   if (missing.length > 0) {
     res.status(500).json({
       success: false,
@@ -782,7 +777,7 @@ app.post('/api/veo/queryResult', async (req, res) => {
         return
       }
 
-      const providerResult = await querySeedanceRelayUpstream(taskId)
+      const providerResult = await querySeedanceRelayUpstream(taskId, req.body?.modelId)
       const isTerminal = ['succeeded', 'failed', 'cancelled'].includes(providerResult.status)
       await updateUsageLogByTaskId(taskId, {
         status: providerResult.status,
@@ -804,11 +799,7 @@ app.post('/api/veo/queryResult', async (req, res) => {
     return
   }
 
-  await proxyJson(req, res, `${videoApiBaseUrl}/openApi/queryResult`, {
-    projectCode: process.env.VIDEO_PROJECT_CODE,
-    'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
-    'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
-  }, ({ payload, traceMetadata }) => {
+  await proxyJson(req, res, `${videoApiBaseUrl}/openApi/queryResult`, upstreamConfig.headers, ({ payload, traceMetadata }) => {
     const syncUpdate = buildAggregationUsageLogSyncUpdate({
       payload,
       requestedTaskId: req.body?.taskId,
@@ -853,7 +844,8 @@ app.post('/api/veo/queryResult', async (req, res) => {
 })
 
 app.get('/api/veo/media/:taskId', async (req, res) => {
-  const missing = getMissingVideoConfig()
+  const upstreamConfig = resolveSeedanceUpstreamConfig(process.env, req.query?.modelId)
+  const missing = getMissingVideoConfig(req.query?.modelId)
   if (missing.length > 0) {
     res.status(500).json({
       success: false,
@@ -874,7 +866,7 @@ app.get('/api/veo/media/:taskId', async (req, res) => {
     let mediaUrl = null
 
     if (usesVideoRelayProtocol()) {
-      const providerResult = await querySeedanceRelayUpstream(taskId)
+      const providerResult = await querySeedanceRelayUpstream(taskId, req.query?.modelId)
       traceMetadata = {
         requestId: providerResult.upstreamRequestId || null,
         traceId: providerResult.upstreamTraceId || null,
@@ -886,7 +878,7 @@ app.get('/api/veo/media/:taskId', async (req, res) => {
       const payload = await requestJson(
         videoApiBaseUrl,
         '/openApi/queryResult',
-        buildSeedanceRelayUpstreamHeaders(),
+        upstreamConfig.headers,
         {
           taskId,
           abilityType: 'VIDEO',
@@ -6569,12 +6561,12 @@ function normalizeVeoFastRequest(body, promptMode) {
   return normalized
 }
 
-async function createMaterialReferenceTask({ name, originalUrl, type }) {
+async function createMaterialReferenceTask({ name, originalUrl, type, fileType = 1 }) {
   const createPayload = await requestJson(materialApiBaseUrl, '/openApi/material/create', buildMaterialHeaders(), {
     name,
     originalUrl,
     type,
-    fileType: 1,
+    fileType,
     thirdChannel: materialThirdChannel,
   })
 
@@ -6699,7 +6691,7 @@ function createHttpError(statusCode, message, metadata = {}) {
   return error
 }
 
-function getMissingVideoConfig() {
+function getMissingVideoConfig(modelId = null) {
   if (usesVideoRelayProtocol()) {
     return [
       !videoRelayApiBaseUrl && 'VIDEO_RELAY_API_BASE_URL',
@@ -6707,11 +6699,7 @@ function getMissingVideoConfig() {
     ].filter(Boolean)
   }
 
-  return [
-    !process.env.VIDEO_PROJECT_CODE && 'VIDEO_PROJECT_CODE',
-    !process.env.VIDEO_ACCESS_KEY && 'VIDEO_ACCESS_KEY',
-    !process.env.VIDEO_SECRET_KEY && 'VIDEO_SECRET_KEY',
-  ].filter(Boolean)
+  return resolveSeedanceUpstreamConfig(process.env, modelId).missing
 }
 
 function getMissingImageAggregationConfig() {
@@ -6932,6 +6920,13 @@ function parseMaterialType(value) {
     default:
       throw createHttpError(400, `Unsupported materialType: ${value}`)
   }
+}
+
+function resolveMaterialFileType(mimeType = '') {
+  const normalized = String(mimeType).trim().toLowerCase()
+  if (normalized.startsWith('image/')) return 1
+  if (normalized.startsWith('video/')) return 3
+  return null
 }
 
 function buildMaterialName(originalName) {
@@ -7625,7 +7620,7 @@ async function fetchAggregationLogsForStatusSync() {
   const retryDelaySeconds = Math.max(30, Math.floor(USAGE_STATUS_SYNC_INTERVAL_MS / 1000))
   const result = await db.query(
     `
-      SELECT id, channel, provider_id, engine_task_id, status, created_at, updated_at
+      SELECT id, channel, provider_id, model, engine_task_id, status, created_at, updated_at
       FROM video_usage_logs
       WHERE (channel = 'aggregation' OR provider_id = 'gemini-image-aggregation')
         AND status = ANY($1::text[])
@@ -7651,10 +7646,13 @@ async function fetchAggregationLogsForStatusSync() {
 async function queryAggregationTaskStatusForSync(row) {
   const taskId = normalizeTaskIdValue(row?.engine_task_id)
   const isImageAggregationTask = row?.provider_id === 'gemini-image-aggregation'
+  const videoUpstreamConfig = isImageAggregationTask || usesVideoRelayProtocol()
+    ? null
+    : resolveSeedanceUpstreamConfig(process.env, row?.model)
 
   try {
     if (!isImageAggregationTask && usesVideoRelayProtocol()) {
-      const providerResult = await querySeedanceRelayUpstream(taskId)
+      const providerResult = await querySeedanceRelayUpstream(taskId, row?.model)
       return buildAggregationUsageLogSyncUpdate({
         payload: formatVideoProviderResultAsAggregationPayload(providerResult),
         requestedTaskId: taskId,
@@ -7665,14 +7663,14 @@ async function queryAggregationTaskStatusForSync(row) {
       })
     }
 
+    if (videoUpstreamConfig?.missing.length > 0) {
+      throw createHttpError(503, `Missing backend config: ${videoUpstreamConfig.missing.join(', ')}`)
+    }
+
     const payload = await requestJson(
       isImageAggregationTask ? imageAggregationApiBaseUrl : videoApiBaseUrl,
       '/openApi/queryResult',
-      isImageAggregationTask ? buildImageAggregationHeaders() : {
-        projectCode: process.env.VIDEO_PROJECT_CODE,
-        'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
-        'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
-      },
+      isImageAggregationTask ? buildImageAggregationHeaders() : videoUpstreamConfig.headers,
       {
       taskId,
       abilityType: isImageAggregationTask ? 'IMAGE' : 'VIDEO',
