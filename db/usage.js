@@ -1,5 +1,5 @@
 import { getPool } from './postgres.js'
-import { deductUserCreditsForSucceededUsageLog, shouldDeductCreditsForUsageUpdate } from './credits.js'
+import { reconcileCreditsForUsageLog } from './credits.js'
 import { scheduleUsageLogBackupSyncById, syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
 import { calculateConfirmedMediaBilling } from './monitorPricing.js'
 
@@ -63,6 +63,7 @@ export async function insertUsageLog({
   errorMessage = null,
   unitPrice = null,
   estimatedCost = null,
+  creditReservationId = null,
 }) {
   const db = getPool()
   if (!db) return null
@@ -91,8 +92,8 @@ export async function insertUsageLog({
         engine_task_id, upstream_request_id, upstream_trace_id, upstream_url,
         request_id, usage_source, status, video_url, error_message, unit_price, estimated_cost,
         billing_audience, upstream_cost_cny, sale_multiplier, sale_price_cny, cost_credits,
-        charged_credits, billing_unit, billable_units, price_version
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'web',$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
+        charged_credits, billing_unit, billable_units, price_version, credit_reservation_id
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'web',$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35)
       RETURNING id`,
       [
         userId, email, nickname, group,
@@ -111,10 +112,14 @@ export async function insertUsageLog({
         monitorBilling?.billingUnit ?? null,
         monitorBilling?.billableUnits ?? null,
         monitorBilling?.priceVersion ?? null,
+        creditReservationId || null,
       ]
     )
     const insertedId = result.rows[0]?.id || null
     if (insertedId) {
+      if (status === 'failed' || status === 'cancelled' || shouldReconcileSuccessfulUsage(status, videoUrl)) {
+        await reconcileCreditsForUsageLog(insertedId)
+      }
       scheduleUsageLogBackupSyncById(insertedId).catch(() => {})
     }
     return insertedId
@@ -122,6 +127,10 @@ export async function insertUsageLog({
     console.error('[usage-db] insertUsageLog failed:', err.message)
     return null
   }
+}
+
+function shouldReconcileSuccessfulUsage(status, videoUrl) {
+  return status === 'succeeded' && typeof videoUrl === 'string' && videoUrl.trim() !== ''
 }
 
 export async function updateUsageLogByTaskId(engineTaskId, updates) {
@@ -177,12 +186,14 @@ export async function updateUsageLogByTaskId(engineTaskId, updates) {
     )
     if (result.rows.length > 0) {
       const updatedIds = result.rows.map((row) => row.id)
-      if (shouldDeductCreditsForUsageUpdate(updates)) {
-        updatedIds.forEach((id) => {
-          deductUserCreditsForSucceededUsageLog(id).catch((error) => {
-            console.error('[credits] success deduction failed:', error.message)
-          })
-        })
+      if (updates.status !== undefined || updates.videoUrl !== undefined) {
+        await Promise.all(updatedIds.map(async (id) => {
+          try {
+            await reconcileCreditsForUsageLog(id)
+          } catch (error) {
+            console.error('[credits] reservation reconciliation failed:', error.message)
+          }
+        }))
       }
       syncUsageLogBackupByIds(updatedIds).catch(() => {})
     }
@@ -229,6 +240,13 @@ export async function updateUsageLogById(logId, updates) {
       values
     )
     if (result.rows[0]?.id) {
+      if (updates.status !== undefined || updates.videoUrl !== undefined) {
+        try {
+          await reconcileCreditsForUsageLog(result.rows[0].id)
+        } catch (error) {
+          console.error('[credits] reservation reconciliation failed:', error.message)
+        }
+      }
       scheduleUsageLogBackupSyncById(result.rows[0].id).catch(() => {})
     }
   } catch (err) {

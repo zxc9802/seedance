@@ -67,6 +67,12 @@ export function convertCreditsToCny(credits) {
   return Number((amount / CREDITS_PER_CNY).toFixed(2))
 }
 
+export function convertCreditBalanceToCny(credits) {
+  const balance = Number(credits)
+  if (!Number.isFinite(balance)) return 0
+  return Number((balance / CREDITS_PER_CNY).toFixed(2))
+}
+
 export function shouldDeductCreditsForUsageUpdate(updates) {
   return updates?.status === 'succeeded' && typeof updates.videoUrl === 'string' && updates.videoUrl.trim() !== ''
 }
@@ -327,14 +333,23 @@ export async function deductUserCreditsForSucceededUsageLog(usageLogId) {
       }
     }
     const account = await upsertCreditAccount(client, SITE_CREDIT_ACCOUNT)
-    const nextBalance = Number((Number(account.balance) - charge.amount).toFixed(2))
-
-    await client.query(
+    const balanceResult = await client.query(
       `UPDATE user_credit_accounts
-       SET balance = $2, updated_at = NOW()
-       WHERE user_id = $1`,
-      [getCreditBalanceAccountId(), nextBalance],
+       SET balance = balance - $2, updated_at = NOW()
+       WHERE user_id = $1 AND balance >= $2
+       RETURNING balance`,
+      [getCreditBalanceAccountId(), charge.amount],
     )
+    if (!balanceResult.rows[0]) {
+      await client.query('COMMIT')
+      return {
+        skipped: true,
+        reason: 'insufficient_unreserved_balance',
+        balance: Number(account.balance),
+        amount: charge.amount,
+      }
+    }
+    const nextBalance = Number(balanceResult.rows[0].balance)
     await client.query(
       `INSERT INTO user_credit_transactions (
         user_id, user_email, user_nickname, user_group, type, amount, balance_after, usage_log_id, note, created_by
@@ -363,12 +378,245 @@ export async function deductUserCreditsForSucceededUsageLog(usageLogId) {
   }
 }
 
-export async function assertSufficientCredits(session, charge) {
+async function settleCreditReservationForUsageLog(usageLogId) {
+  const db = getPool()
+  if (!db || !usageLogId) return null
+  const client = await db.connect()
+
+  try {
+    await client.query('BEGIN')
+    const result = await client.query(
+      `SELECT
+         reservations.id, reservations.amount, reservations.status,
+         logs.status AS usage_status, logs.video_url
+       FROM video_usage_logs logs
+       JOIN credit_reservations reservations ON reservations.id = logs.credit_reservation_id
+       WHERE logs.id = $1::uuid
+       FOR UPDATE OF logs, reservations`,
+      [usageLogId],
+    )
+    const reservation = result.rows[0]
+    if (!reservation) {
+      await client.query('COMMIT')
+      return null
+    }
+    if (reservation.status === 'settled') {
+      await client.query('COMMIT')
+      return { skipped: true, reason: 'already_settled' }
+    }
+    if (
+      reservation.status !== 'reserved'
+      || !shouldDeductCreditsForUsageUpdate({
+        status: reservation.usage_status,
+        videoUrl: reservation.video_url,
+      })
+    ) {
+      await client.query('COMMIT')
+      return null
+    }
+
+    await client.query(
+      `UPDATE credit_reservations
+       SET status = 'settled', usage_log_id = $2::uuid, settled_at = NOW(), updated_at = NOW()
+       WHERE id = $1::uuid`,
+      [reservation.id, usageLogId],
+    )
+    await client.query(
+      `UPDATE user_credit_transactions
+       SET type = 'consume', usage_log_id = $2::uuid
+       WHERE type = 'reserve' AND request_id = $1`,
+      [reservation.id, usageLogId],
+    )
+    await client.query('COMMIT')
+    return {
+      settled: true,
+      reservationId: reservation.id,
+      amount: Number(reservation.amount),
+    }
+  } catch (error) {
+    await client.query('ROLLBACK')
+    if (error?.code === '23505') {
+      return { skipped: true, reason: 'already_settled' }
+    }
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+export async function releaseCreditReservation(
+  reservationId,
+  { usageLogId = null, reason = '生成失败，释放预占积分' } = {},
+) {
+  const db = getPool()
+  if (!db || !reservationId) return null
+  const client = await db.connect()
+
+  try {
+    await client.query('BEGIN')
+    const result = await client.query(
+      `SELECT id, user_id, user_email, user_nickname, user_group, amount, status
+       FROM credit_reservations
+       WHERE id = $1::uuid
+       FOR UPDATE`,
+      [reservationId],
+    )
+    const reservation = result.rows[0]
+    if (!reservation) {
+      await client.query('COMMIT')
+      return null
+    }
+    if (reservation.status !== 'reserved') {
+      await client.query('COMMIT')
+      return { skipped: true, reason: `already_${reservation.status}` }
+    }
+
+    const account = await upsertCreditAccount(client, SITE_CREDIT_ACCOUNT)
+    const amount = Number(reservation.amount)
+    const nextBalance = Number((Number(account.balance) + amount).toFixed(2))
+    await client.query(
+      `UPDATE user_credit_accounts
+       SET balance = $2, updated_at = NOW()
+       WHERE user_id = $1`,
+      [getCreditBalanceAccountId(), nextBalance],
+    )
+    await client.query(
+      `UPDATE credit_reservations
+       SET status = 'released', usage_log_id = $2::uuid, released_at = NOW(), updated_at = NOW()
+       WHERE id = $1::uuid`,
+      [reservation.id, usageLogId],
+    )
+    await client.query(
+      `INSERT INTO user_credit_transactions (
+        user_id, user_email, user_nickname, user_group, type, amount, balance_after,
+        usage_log_id, note, created_by, request_id
+      ) VALUES ($1,$2,$3,$4,'release',$5,$6,$7::uuid,$8,'system',$9)`,
+      [
+        reservation.user_id || getCreditBalanceAccountId(),
+        reservation.user_email,
+        reservation.user_nickname,
+        reservation.user_group,
+        amount,
+        nextBalance,
+        usageLogId,
+        reason,
+        `${reservation.id}:release`,
+      ],
+    )
+    await client.query('COMMIT')
+    return {
+      released: true,
+      reservationId: reservation.id,
+      amount,
+      balance: nextBalance,
+    }
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+export async function reconcileCreditsForUsageLog(usageLogId) {
+  const db = getPool()
+  if (!db || !usageLogId) return null
+  const result = await db.query(
+    `SELECT status, video_url, credit_reservation_id
+     FROM video_usage_logs
+     WHERE id = $1::uuid`,
+    [usageLogId],
+  )
+  const log = result.rows[0]
+  if (!log) return null
+  if (log.credit_reservation_id) {
+    if (shouldDeductCreditsForUsageUpdate({ status: log.status, videoUrl: log.video_url })) {
+      return settleCreditReservationForUsageLog(usageLogId)
+    }
+    if (log.status === 'failed' || log.status === 'cancelled') {
+      return releaseCreditReservation(log.credit_reservation_id, { usageLogId })
+    }
+    return null
+  }
+  if (shouldDeductCreditsForUsageUpdate({ status: log.status, videoUrl: log.video_url })) {
+    return deductUserCreditsForSucceededUsageLog(usageLogId)
+  }
+  return null
+}
+
+export async function assertSufficientCredits(session, charge, { reservationId = null } = {}) {
   const user = extractCreditUserInfo(session)
   if (!charge?.amount) return { ok: true, userId: user.userId, balance: null }
-  const balance = await getSiteCreditBalance()
-  if (balance === null || balance >= charge.amount) return { ok: true, userId: user.userId, balance }
-  return { ok: false, userId: user.userId, balance }
+  if (!reservationId) {
+    const balance = await getSiteCreditBalance()
+    if (balance === null || balance >= charge.amount) return { ok: true, userId: user.userId, balance }
+    return { ok: false, userId: user.userId, balance }
+  }
+
+  const db = getPool()
+  if (!db) return { ok: true, userId: user.userId, balance: null, reservationId: null }
+  const amount = normalizeCreditAmount(charge.amount)
+  const client = await db.connect()
+
+  try {
+    await client.query('BEGIN')
+    await upsertCreditAccount(client, SITE_CREDIT_ACCOUNT)
+    const balanceResult = await client.query(
+      `UPDATE user_credit_accounts
+       SET balance = balance - $2, updated_at = NOW()
+       WHERE user_id = $1 AND balance >= $2
+       RETURNING balance`,
+      [getCreditBalanceAccountId(), amount],
+    )
+    const nextBalance = balanceResult.rows[0]?.balance
+    if (nextBalance === undefined) {
+      const currentResult = await client.query(
+        'SELECT COALESCE(balance, 0)::float AS balance FROM user_credit_accounts WHERE user_id = $1',
+        [getCreditBalanceAccountId()],
+      )
+      await client.query('ROLLBACK')
+      return {
+        ok: false,
+        userId: user.userId,
+        balance: Number(currentResult.rows[0]?.balance || 0),
+      }
+    }
+
+    await client.query(
+      `INSERT INTO credit_reservations (
+        id, user_id, user_email, user_nickname, user_group, amount, status
+      ) VALUES ($1::uuid,$2,$3,$4,$5,$6,'reserved')`,
+      [reservationId, user.userId, user.email, user.nickname, user.group, amount],
+    )
+    await client.query(
+      `INSERT INTO user_credit_transactions (
+        user_id, user_email, user_nickname, user_group, type, amount, balance_after,
+        note, created_by, request_id
+      ) VALUES ($1,$2,$3,$4,'reserve',$5,$6,$7,'system',$8)`,
+      [
+        user.userId || getCreditBalanceAccountId(),
+        user.email,
+        user.nickname,
+        user.group,
+        -amount,
+        Number(nextBalance),
+        formatCreditConsumeNote(charge),
+        reservationId,
+      ],
+    )
+    await client.query('COMMIT')
+    return {
+      ok: true,
+      userId: user.userId,
+      balance: Number(nextBalance),
+      reservationId,
+    }
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
 }
 
 async function upsertCreditAccount(client, { userId, email, nickname, group }) {

@@ -204,6 +204,12 @@ let TOKEN = localStorage.getItem('admin_token') || ''
 let instances = []
 let selectedId = ''
 let editingId = ''
+const TRANSACTION_TYPE_LABELS = {
+  recharge: '充值',
+  reserve: '预占',
+  consume: '消耗',
+  release: '释放',
+}
 
 function hubRequest(path, opts = {}) {
   return fetch(`/api/admin/credit-hub${path}`, {
@@ -460,7 +466,7 @@ function renderTransactions(rows, error) {
       <tr>
         <td>${fmtTime(tx.created_at)}</td>
         <td>${esc(tx.user_nickname || tx.user_email || tx.user_id || '-')}</td>
-        <td>${tx.type === 'recharge' ? '充值' : '消耗'}</td>
+        <td>${esc(TRANSACTION_TYPE_LABELS[tx.type] || tx.type || '-')}</td>
         <td class="${amount < 0 ? 'text-amber-300' : 'text-emerald-300'}">${fmtCredit(amount)}</td>
         <td>${fmtCny(Math.abs(amount) / 5)}</td>
         <td>${fmtCredit(tx.balance_after)}</td>

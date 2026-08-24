@@ -12,7 +12,14 @@ import { promisify } from 'node:util'
 import { createServer as createViteServer, loadEnv } from 'vite'
 import { getPool, initDatabase, closePool } from './db/postgres.js'
 import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
-import { assertSufficientCredits, calculateVideoCreditCharge, normalizeCreditProviderId, shouldChargeCreditsForProvider } from './db/credits.js'
+import {
+  assertSufficientCredits,
+  calculateImageCreditCharge,
+  calculateVideoCreditCharge,
+  normalizeCreditProviderId,
+  releaseCreditReservation,
+  shouldChargeCreditsForProvider,
+} from './db/credits.js'
 import adminRouter from './admin/api.js'
 import { startCreditHubSyncLoop } from './admin/creditHub.js'
 import creditAgentRouter from './credit/agentApi.js'
@@ -708,6 +715,7 @@ app.post('/api/veo/generate', async (req, res) => {
 
       res.json(formatRelayTaskAsAggregationPayload(providerResult.rawTask))
     } catch (error) {
+      await releasePreparedCreditCharge(creditCharge, '上游提交失败，释放预占积分').catch(() => {})
       const statusCode = Number(error.statusCode) || 502
       res.status(statusCode).json({
         success: false,
@@ -718,14 +726,19 @@ app.post('/api/veo/generate', async (req, res) => {
     return
   }
 
+  let creditReservationHandled = false
   await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, {
     projectCode: process.env.VIDEO_PROJECT_CODE,
     'X-Access-Key': process.env.VIDEO_ACCESS_KEY,
     'X-Secret-Key': process.env.VIDEO_SECRET_KEY,
-  }, ({ payload, traceMetadata, status, url }) => {
-    if (status >= 400) return
+  }, async ({ payload, traceMetadata, status, url }) => {
+    if (status >= 400) {
+      await releasePreparedCreditCharge(creditCharge, '上游拒绝提交，释放预占积分')
+      creditReservationHandled = true
+      return
+    }
     const taskId = extractAggregationTaskId(payload)
-    insertChargedUsageLog({
+    await insertChargedUsageLog({
       session: req.videoSiteSession,
       channel: 'aggregation',
       providerId: creditProviderId,
@@ -743,8 +756,12 @@ app.post('/api/veo/generate', async (req, res) => {
       upstreamUrl: url,
       status: taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
       errorMessage: taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
-    }, creditCharge).catch(() => {})
+    }, creditCharge)
+    creditReservationHandled = true
   })
+  if (!creditReservationHandled) {
+    await releasePreparedCreditCharge(creditCharge, '上游请求异常，释放预占积分').catch(() => {})
+  }
 })
 
 app.post('/api/veo/queryResult', async (req, res) => {
@@ -1437,14 +1454,28 @@ app.post('/api/image/aggregation/generate', async (req, res) => {
   const mediaSummary = parseUsageMediaSummaryHeader(req)
   const upstreamBody = normalizeAggregationImageGenerateBody(body)
   const requestedSampleCount = Math.max(1, Math.trunc(Number(upstreamBody.n ?? body.sampleCount) || 1))
+  const creditProviderId = normalizeCreditProviderId(body.providerId || 'gemini-image-aggregation')
+  const creditCharge = await prepareImageCreditCharge(
+    req,
+    res,
+    creditProviderId,
+    upstreamBody.payload?.params?.resolution,
+    requestedSampleCount,
+  )
+  if (shouldChargeCreditsForProvider(creditProviderId) && !creditCharge) return
 
-  await proxyJsonWithBody(req, res, `${imageAggregationApiBaseUrl}/openApi/generate`, upstreamBody, buildImageAggregationHeaders(), ({ payload, traceMetadata, status, url }) => {
-    if (status >= 400) return
+  let creditReservationHandled = false
+  await proxyJsonWithBody(req, res, `${imageAggregationApiBaseUrl}/openApi/generate`, upstreamBody, buildImageAggregationHeaders(), async ({ payload, traceMetadata, status, url }) => {
+    if (status >= 400) {
+      await releasePreparedCreditCharge(creditCharge, '上游拒绝提交，释放预占积分')
+      creditReservationHandled = true
+      return
+    }
     const taskId = extractAggregationTaskId(payload)
-    insertUsageLog({
+    await insertChargedUsageLog({
       session: req.videoSiteSession,
       channel: 'image',
-      providerId: body.providerId || 'gemini-image-aggregation',
+      providerId: creditProviderId,
       model: upstreamBody.modelId || body.modelId || body.model || null,
       generationMode: 'image',
       prompt: upstreamBody.prompt || null,
@@ -1462,8 +1493,12 @@ app.post('/api/image/aggregation/generate', async (req, res) => {
       upstreamUrl: url,
       status: taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
       errorMessage: taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
-    }).catch(() => {})
+    }, creditCharge)
+    creditReservationHandled = true
   })
+  if (!creditReservationHandled) {
+    await releasePreparedCreditCharge(creditCharge, '上游请求异常，释放预占积分').catch(() => {})
+  }
 })
 
 app.post('/api/image/aggregation/queryResult', async (req, res) => {
@@ -2919,10 +2954,25 @@ async function prepareVideoCreditCharge(req, res, providerId, requestedParams, r
     requestParams,
   })
 
+  return prepareCreditReservation(req, res, charge)
+}
+
+async function prepareImageCreditCharge(req, res, providerId, resolution, sampleCount) {
+  if (!shouldChargeCreditsForProvider(providerId)) return null
+  return prepareCreditReservation(req, res, calculateImageCreditCharge({
+    providerId,
+    resolution,
+    sampleCount,
+  }))
+}
+
+async function prepareCreditReservation(req, res, charge) {
   if (charge.amount <= 0) return charge
 
   try {
-    const creditStatus = await assertSufficientCredits(req.videoSiteSession, charge)
+    const creditStatus = await assertSufficientCredits(req.videoSiteSession, charge, {
+      reservationId: randomUUID(),
+    })
     if (!creditStatus.ok) {
       res.status(402).json({
         success: false,
@@ -2933,6 +2983,10 @@ async function prepareVideoCreditCharge(req, res, providerId, requestedParams, r
       })
       return null
     }
+    return {
+      ...charge,
+      reservationId: creditStatus.reservationId || null,
+    }
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -2940,16 +2994,26 @@ async function prepareVideoCreditCharge(req, res, providerId, requestedParams, r
     })
     return null
   }
-
-  return charge
 }
 
-function insertChargedUsageLog(options, charge) {
-  return insertUsageLog({
+async function insertChargedUsageLog(options, charge) {
+  const usageLogId = await insertUsageLog({
     ...options,
     unitPrice: charge?.rate ?? null,
     estimatedCost: charge?.amount ?? null,
+    creditReservationId: charge?.reservationId ?? null,
   })
+  if (!usageLogId && charge?.reservationId) {
+    await releaseCreditReservation(charge.reservationId, {
+      reason: '用量记录创建失败，释放预占积分',
+    })
+  }
+  return usageLogId
+}
+
+async function releasePreparedCreditCharge(charge, reason) {
+  if (!charge?.reservationId) return null
+  return releaseCreditReservation(charge.reservationId, { reason })
 }
 
 function resolveUsageMediaSummary(requestParams, headerSummary) {
@@ -3520,7 +3584,7 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onRespo
       }
 
       const exhausted = didExhaustProxyRetries(result.response.status, retryOptions, attempt)
-      sendProxyJsonResult(res, url, result, onResponse, {
+      await sendProxyJsonResult(res, url, result, onResponse, {
         attempts: attempt,
         retryOptions,
         exhausted,
@@ -3539,7 +3603,7 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onRespo
   }
 
   if (lastResult) {
-    sendProxyJsonResult(res, url, lastResult, onResponse, {
+    await sendProxyJsonResult(res, url, lastResult, onResponse, {
       attempts: retryOptions.maxAttempts,
       retryOptions,
       exhausted: true,
@@ -3574,14 +3638,14 @@ async function fetchProxyJsonResult(req, url, body, extraHeaders) {
   }
 }
 
-function sendProxyJsonResult(res, url, result, onResponse, retryContext) {
+async function sendProxyJsonResult(res, url, result, onResponse, retryContext) {
   const { response, buffer, contentType, parsedPayload, traceMetadata } = result
   const payload = retryContext?.exhausted
     ? decorateRetryExhaustedPayload(parsedPayload, traceMetadata, retryContext)
     : injectUpstreamTraceMetadata(parsedPayload, traceMetadata)
 
   if (onResponse) {
-    try { onResponse({ payload: parsedPayload, traceMetadata, status: response.status, url }) } catch (_) {}
+    try { await onResponse({ payload: parsedPayload, traceMetadata, status: response.status, url }) } catch (_) {}
   }
 
   res.status(response.status)

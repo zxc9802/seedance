@@ -191,7 +191,7 @@
       <div class="card"><div class="text-sm text-gray-400 mb-1">总请求数</div><div class="stat-value text-white" id="s-total">-</div></div>
       <div class="card"><div class="text-sm text-gray-400 mb-1">剩余积分</div><div class="stat-value text-sky-400" id="s-credit-balance">-</div></div>
       <div class="card"><div class="text-sm text-gray-400 mb-1">消耗积分</div><div class="stat-value text-amber-300" id="s-credit-consumed">-</div></div>
-      <div class="card"><div class="text-sm text-gray-400 mb-1">费用</div><div class="stat-value text-yellow-400" id="s-cost">-</div></div>
+      <div class="card"><div class="text-sm text-gray-400 mb-1">剩余金额</div><div class="stat-value text-yellow-400" id="s-cost">-</div></div>
       <div class="card"><div class="text-sm text-gray-400 mb-1">活跃用户</div><div class="stat-value text-purple-400" id="s-users">-</div></div>
     </div>
     <div class="grid grid-cols-1 gap-4 mb-6">
@@ -492,7 +492,7 @@ async function refreshAll() {
     document.getElementById('s-total').textContent = overview.totalRequests ?? 0
     document.getElementById('s-credit-balance').textContent = formatCredits(overview.creditBalance)
     document.getElementById('s-credit-consumed').textContent = formatCredits(overview.creditConsumed)
-    document.getElementById('s-cost').textContent = formatMoney(overview.creditCost ?? overview.totalCost)
+    document.getElementById('s-cost').textContent = formatMoney(overview.remainingAmount)
     document.getElementById('s-users').textContent = overview.activeUsers ?? 0
 
     renderTrendChart(trend)

@@ -42,17 +42,19 @@ test('admin overview day range can request all data without the 90 day cap', asy
   assert.doesNotMatch(apiSource, /Number\(req\.query\.days\) \|\| 30/)
 })
 
-test('main admin shows shared credit balance and converted credit fees', async () => {
+test('main admin shows shared credit balance and its remaining RMB amount', async () => {
   const apiSource = await readFile(new URL('../admin/api.js', import.meta.url), 'utf8')
   const adminSource = await readFile(new URL('../admin/index.html', import.meta.url), 'utf8')
 
   assert.match(adminSource, /剩余积分/)
-  assert.match(adminSource, /消耗积分[\s\S]*费用/)
+  assert.match(adminSource, /消耗积分[\s\S]*剩余金额/)
   assert.match(adminSource, /id="s-credit-balance"/)
   assert.match(adminSource, /overview\.creditBalance/)
+  assert.match(adminSource, /formatMoney\(overview\.remainingAmount\)/)
   assert.match(adminSource, /formatCredits\(task\.credit_spent\)[\s\S]*formatMoney\(task\.credit_cost\)/)
   assert.match(adminSource, /formatCredits\(user\.credit_spent\)[\s\S]*formatMoney\(user\.credit_cost\)/)
   assert.match(apiSource, /creditBalance/)
+  assert.match(apiSource, /remainingAmount/)
   assert.match(apiSource, /creditConsumed/)
   assert.match(apiSource, /creditCost/)
 })

@@ -27,6 +27,8 @@ test('credit hub admin page and APIs are password-only hidden surfaces', async (
   assert.match(hubPage, /\/api\/admin\/credit-hub\/instances/)
   assert.match(hubPage, /新增项目/)
   assert.match(hubPage, /同步状态/)
+  assert.match(hubPage, /reserve:\s*'预占'/)
+  assert.match(hubPage, /release:\s*'释放'/)
   assert.doesNotMatch(hubPage, /token_ciphertext/)
 })
 

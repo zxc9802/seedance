@@ -1,7 +1,7 @@
 import ExcelJS from 'exceljs'
 import express from 'express'
 import { getPool } from '../db/postgres.js'
-import { convertCreditsToCny, getCreditBalanceAccountId } from '../db/credits.js'
+import { convertCreditBalanceToCny, convertCreditsToCny, getCreditBalanceAccountId } from '../db/credits.js'
 import { getSeedanceRelayPricing } from '../relay/api.js'
 import { parseConfiguredApiKeys } from '../relay/apiKeys.js'
 import creditHubRouter from './creditHub.js'
@@ -608,6 +608,7 @@ router.get('/overview', async (req, res) => {
 
     const t = totals.rows[0]
     const r = ranged.rows[0]
+    const creditBalance = Number(account.rows[0]?.credit_balance || 0)
     const creditConsumed = normalizeCreditSpent(r.credit_consumed)
     const creditCost = convertCreditsToCny(creditConsumed)
     res.json({
@@ -616,7 +617,8 @@ router.get('/overview', async (req, res) => {
       succeeded: r.succeeded,
       failed: r.failed,
       successRate: r.range_requests > 0 ? ((r.succeeded / r.range_requests) * 100).toFixed(1) : '0',
-      creditBalance: Number(account.rows[0]?.credit_balance || 0),
+      creditBalance,
+      remainingAmount: convertCreditBalanceToCny(creditBalance),
       creditConsumed,
       creditCost,
       totalCost: creditCost,

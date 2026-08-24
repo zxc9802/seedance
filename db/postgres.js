@@ -87,6 +87,7 @@ export async function initDatabase() {
     await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS billing_unit TEXT`)
     await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS billable_units NUMERIC(18,4)`)
     await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS price_version TEXT`)
+    await db.query(`ALTER TABLE video_usage_logs ADD COLUMN IF NOT EXISTS credit_reservation_id UUID`)
 
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_user_id ON video_usage_logs(user_id)`)
     await db.query(`CREATE INDEX IF NOT EXISTS idx_usage_logs_channel ON video_usage_logs(channel)`)
@@ -160,6 +161,25 @@ export async function initDatabase() {
       ON user_credit_transactions(request_id)
       WHERE type = 'recharge' AND request_id IS NOT NULL
     `)
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS credit_reservations (
+        id            UUID PRIMARY KEY,
+        user_id       TEXT,
+        user_email    TEXT,
+        user_nickname TEXT,
+        user_group    TEXT,
+        amount        NUMERIC(12,2) NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'reserved',
+        usage_log_id  UUID UNIQUE,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        settled_at    TIMESTAMPTZ,
+        released_at   TIMESTAMPTZ
+      )
+    `)
+    await db.query(`CREATE INDEX IF NOT EXISTS idx_credit_reservations_status_created ON credit_reservations(status, created_at)`)
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_logs_credit_reservation_id ON video_usage_logs(credit_reservation_id) WHERE credit_reservation_id IS NOT NULL`)
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS credit_hub_instances (

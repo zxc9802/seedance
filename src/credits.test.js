@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import {
   calculateImageCreditCharge,
   calculateVideoCreditCharge,
+  convertCreditBalanceToCny,
   extractCreditUserInfo,
   normalizeCreditProviderId,
   shouldChargeCreditsForProvider,
@@ -287,4 +288,10 @@ test('credit cost converts five credits into one yuan', async () => {
   assert.equal(credits.convertCreditsToCny(5), 1)
   assert.equal(credits.convertCreditsToCny(25.5), 5.1)
   assert.equal(credits.convertCreditsToCny(null), 0)
+})
+
+test('remaining credit amount preserves a historical negative balance', () => {
+  assert.equal(convertCreditBalanceToCny(24945.5), 4989.1)
+  assert.equal(convertCreditBalanceToCny(-175.5), -35.1)
+  assert.equal(convertCreditBalanceToCny(null), 0)
 })
