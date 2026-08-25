@@ -36,6 +36,50 @@ test('seedance2 text-to-video credit charge uses the enterprise stable rates', (
   })
 })
 
+test('seedance2.5 charges 1.5 times the matching seedance2.0 rates', () => {
+  const textCharge = calculateVideoCreditCharge({
+    providerId: 'seedance1',
+    model: 'doubao-seedance-2-5-260628',
+    resolution: '720p',
+    duration: 5,
+    sampleCount: 1,
+    requestParams: {
+      mediaSummary: {
+        images: { count: 0 },
+        videos: { count: 0 },
+      },
+    },
+  })
+  const referenceCharge = calculateVideoCreditCharge({
+    providerId: 'seedance1',
+    model: 'doubao-seedance-2-5-260628',
+    resolution: '1080p',
+    duration: 5,
+    sampleCount: 1,
+    requestParams: {
+      mediaSummary: {
+        images: { count: 0 },
+        videos: { count: 1, durationSeconds: 3 },
+      },
+    },
+  })
+
+  assert.deepEqual(textCharge, {
+    category: 'text',
+    resolution: '720p',
+    rate: 6,
+    billableSeconds: 5,
+    amount: 30,
+  })
+  assert.deepEqual(referenceCharge, {
+    category: 'reference',
+    resolution: '1080p',
+    rate: 26.25,
+    billableSeconds: 8,
+    amount: 210,
+  })
+})
+
 test('seedance2 fast model on seedance1 channel uses its own 480p and 720p rates', () => {
   const standardCharge = calculateVideoCreditCharge({
     providerId: 'seedance1',

@@ -19,6 +19,8 @@ const NANOBANANA2_IMAGE_RATES = Object.freeze({
 const IMAGE_CREDIT_BILLED_PROVIDERS = new Set(['gemini-image-aggregation'])
 const CREDIT_BILLED_PROVIDERS = new Set(['seedance1', ...IMAGE_CREDIT_BILLED_PROVIDERS])
 const SEEDANCE1_FAST_MODELS = new Set(['doubao-seedance-2-0-fast-260128'])
+const SEEDANCE1_25_MODELS = new Set(['doubao-seedance-2-5-260628'])
+const SEEDANCE1_25_RATE_MULTIPLIER = 1.5
 const SEEDANCE1_FAST_TEXT_VIDEO_RATES = Object.freeze({
   '480p': 1,
   '720p': 3,
@@ -51,10 +53,10 @@ function shouldChargeImageCreditsForProvider(providerId) {
   return IMAGE_CREDIT_BILLED_PROVIDERS.has(String(providerId || '').trim().toLowerCase())
 }
 
-function isSeedance1FastModel(log) {
+function isSeedance1Model(log, models) {
   const providerId = String(log?.providerId ?? log?.provider_id ?? '').trim().toLowerCase()
   const model = String(log?.model ?? log?.requestParams?.requestedParams?.model ?? '').trim().toLowerCase()
-  return providerId === 'seedance1' && SEEDANCE1_FAST_MODELS.has(model)
+  return providerId === 'seedance1' && models.has(model)
 }
 
 export function getCreditBalanceAccountId() {
@@ -134,9 +136,12 @@ export function calculateVideoCreditCharge(log) {
   const category = imageCount + videoCount > 0 ? 'reference' : 'text'
   const rates = category === 'reference' ? REFERENCE_VIDEO_RATES : TEXT_VIDEO_RATES
   const fastRates = category === 'reference' ? SEEDANCE1_FAST_REFERENCE_VIDEO_RATES : SEEDANCE1_FAST_TEXT_VIDEO_RATES
-  const rate = isSeedance1FastModel(log)
+  const standardRate = rates[resolution] || rates['720p']
+  const rate = isSeedance1Model(log, SEEDANCE1_FAST_MODELS)
     ? (fastRates[resolution] || fastRates['720p'])
-    : (rates[resolution] || rates['720p'])
+    : isSeedance1Model(log, SEEDANCE1_25_MODELS)
+      ? Number((standardRate * SEEDANCE1_25_RATE_MULTIPLIER).toFixed(2))
+      : standardRate
   const billableSeconds = (duration * sampleCount) + (category === 'reference' ? referenceVideoSeconds : 0)
   const amount = Number((rate * billableSeconds).toFixed(2))
 

@@ -52,6 +52,46 @@ export default function Header({
             </div>
             <div className="pricing-info-grid">
               <section>
+                <h3>seedance企业稳定版 seedance2.5 · Seedance 2.0 的 1.5 倍</h3>
+                <table className="pricing-table">
+                  <thead>
+                    <tr>
+                      <th>类型</th>
+                      <th>分辨率</th>
+                      <th>积分</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td className="pricing-type-cell" rowSpan={3}>文生视频</td>
+                      <td>480P</td>
+                      <td>3积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td>720P</td>
+                      <td>6积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td>1080P</td>
+                      <td>15积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td className="pricing-type-cell" rowSpan={3}>图生视频 / 融合参考 / 首尾帧</td>
+                      <td>480P</td>
+                      <td>5.25积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td>720P</td>
+                      <td>10.5积分/秒</td>
+                    </tr>
+                    <tr>
+                      <td>1080P</td>
+                      <td>26.25积分/秒</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </section>
+              <section>
                 <h3>seedance企业稳定版 seedance2.0</h3>
                 <table className="pricing-table">
                   <thead>
