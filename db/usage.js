@@ -41,6 +41,40 @@ function extractUserInfo(session) {
   }
 }
 
+export function extractExternalVideoBillingContext(row) {
+  const billing = row?.request_params?.externalVideoBilling
+  const requestId = typeof billing?.requestId === 'string' ? billing.requestId.trim() : ''
+  const userId = typeof row?.user_id === 'string' ? row.user_id.trim() : ''
+  if (!requestId || !userId) return null
+
+  return {
+    userId,
+    requestId,
+    chargeRequired: billing.chargeRequired === true,
+    requiredPoints: Math.max(0, Number(billing.requiredPoints) || 0),
+  }
+}
+
+export async function getExternalVideoBillingContextByTaskId(engineTaskId) {
+  const db = getPool()
+  if (!db || !engineTaskId) return null
+
+  try {
+    const result = await db.query(
+      `SELECT user_id, request_params
+       FROM video_usage_logs
+       WHERE engine_task_id = $1
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [engineTaskId],
+    )
+    return extractExternalVideoBillingContext(result.rows[0])
+  } catch (error) {
+    console.error('[usage-db] getExternalVideoBillingContextByTaskId failed:', error.message)
+    return null
+  }
+}
+
 export async function insertUsageLog({
   session,
   channel,
