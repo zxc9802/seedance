@@ -11,10 +11,12 @@ import { createServer as createHttpServer } from 'node:http'
 import { promisify } from 'node:util'
 import { createServer as createViteServer, loadEnv } from 'vite'
 import { getPool, initDatabase, closePool } from './db/postgres.js'
-import { insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
+import { getExternalVideoBillingContextByTaskId, insertUsageLog, updateUsageLogByTaskId } from './db/usage.js'
 import adminRouter from './admin/api.js'
 import { startCreditHubSyncLoop } from './admin/creditHub.js'
 import creditAgentRouter from './credit/agentApi.js'
+import { createMainAppVideoBillingClient } from './billing/mainAppVideoBilling.js'
+import { beginVideoBilling, finalizeVideoBilling } from './billing/videoBillingOrchestrator.js'
 import { createSeedanceRelayRouter } from './relay/api.js'
 import { createApiKeyAuthenticator, findStoredRelayApiKey } from './relay/apiKeys.js'
 import { createPostgresRelayRepository } from './relay/postgresRepository.js'
@@ -77,6 +79,7 @@ const hasExplicitAdminAllowlist = [
   adminUserEmailAllowlist,
   adminUserNameAllowlist,
 ].some((set) => set.size > 0)
+const mainAppVideoBillingClient = createMainAppVideoBillingClient()
 const UPSTREAM_REQUEST_ID_HEADERS = ['x-oneapi-request-id', 'x-request-id', 'request-id']
 const UPSTREAM_TRACE_ID_HEADERS = ['trace-id', 'x-trace-id', 'cf-ray']
 const COPYWRITING_RETRY_OPTIONS = Object.freeze({
@@ -580,12 +583,44 @@ app.post('/api/veo/generate', async (req, res) => {
   const body = req.body || {}
   const mediaSummary = resolveUsageMediaSummary(body, parseUsageMediaSummaryHeader(req))
   const requestedParams = extractRequestedVideoParams(body)
-  const usageRequestParams = attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary)
+  const billingSession = req.videoSiteSession || resolveLocalDevSession()
+  let externalVideoBilling
+  try {
+    externalVideoBilling = await beginVideoBilling({
+      client: mainAppVideoBillingClient,
+      session: billingSession,
+      model: requestedParams.model,
+      resolution: requestedParams.resolution,
+      duration: requestedParams.duration,
+    })
+  } catch (error) {
+    sendMainAppVideoBillingError(res, error)
+    return
+  }
+  const usageRequestParams = {
+    ...attachUsageMediaSummary(attachRequestedVideoParams(body, requestedParams), mediaSummary),
+    externalVideoBilling,
+  }
   const providerId = body.providerId || 'veo'
-  await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, upstreamConfig.headers, ({ payload, traceMetadata, status, url }) => {
-    if (status >= 400) return
+  await proxyJson(req, res, `${videoApiBaseUrl}/openApi/generate`, upstreamConfig.headers, async ({ payload, traceMetadata, status, url }) => {
+    if (status >= 400) {
+      await safelyFinalizeExternalVideoBilling({
+        session: billingSession,
+        billing: externalVideoBilling,
+        status: 'failed',
+      })
+      return
+    }
     const taskId = extractAggregationTaskId(payload)
-    insertUsageLog({
+    const terminalStatus = normalizeAggregationFinalStatus(extractAggregationStatus(payload))
+    if (terminalStatus) {
+      await safelyFinalizeExternalVideoBilling({
+        session: billingSession,
+        billing: externalVideoBilling,
+        status: terminalStatus,
+      })
+    }
+    const usageLogId = await insertUsageLog({
       session: req.videoSiteSession,
       channel: 'aggregation',
       providerId,
@@ -603,7 +638,26 @@ app.post('/api/veo/generate', async (req, res) => {
       upstreamUrl: url,
       status: taskId ? 'submitted' : USAGE_STATUS_NEEDS_REVIEW,
       errorMessage: taskId ? null : UNTRACKED_USAGE_STATUS_MESSAGE,
-    }).catch(() => {})
+    })
+    if (!taskId && !terminalStatus) {
+      await safelyFinalizeExternalVideoBilling({
+        session: billingSession,
+        billing: externalVideoBilling,
+        status: 'failed',
+      })
+    } else if (externalVideoBilling.chargeRequired && !usageLogId && !terminalStatus) {
+      await safelyFinalizeExternalVideoBilling({
+        session: billingSession,
+        billing: externalVideoBilling,
+        status: 'failed',
+      })
+    }
+  }, {
+    onError: () => safelyFinalizeExternalVideoBilling({
+      session: billingSession,
+      billing: externalVideoBilling,
+      status: 'failed',
+    }),
   })
 })
 
@@ -618,13 +672,26 @@ app.post('/api/veo/queryResult', async (req, res) => {
     return
   }
 
-  await proxyJson(req, res, `${videoApiBaseUrl}/openApi/queryResult`, upstreamConfig.headers, ({ payload, traceMetadata }) => {
+  const requestedTaskId = normalizeTaskIdValue(req.body?.taskId)
+  const externalVideoBilling = requestedTaskId
+    ? await getExternalVideoBillingContextByTaskId(requestedTaskId)
+    : null
+  const billingSession = req.videoSiteSession || resolveLocalDevSession()
+
+  await proxyJson(req, res, `${videoApiBaseUrl}/openApi/queryResult`, upstreamConfig.headers, async ({ payload, traceMetadata }) => {
     const syncUpdate = buildAggregationUsageLogSyncUpdate({
       payload,
       requestedTaskId: req.body?.taskId,
       traceMetadata,
     })
     if (syncUpdate?.taskId && syncUpdate.updates) {
+      if (syncUpdate.outcome === 'terminal') {
+        await safelyFinalizeExternalVideoBilling({
+          session: billingSession,
+          billing: externalVideoBilling,
+          status: syncUpdate.updates.status,
+        })
+      }
       updateUsageLogByTaskId(syncUpdate.taskId, syncUpdate.updates).catch(() => {})
       return
     }
@@ -651,6 +718,11 @@ app.post('/api/veo/queryResult', async (req, res) => {
       ? extractAggregationTerminalMessage(payload)
       : null
     if (!taskId || !finalStatus) return
+    await safelyFinalizeExternalVideoBilling({
+      session: billingSession,
+      billing: externalVideoBilling,
+      status: finalStatus,
+    })
     updateUsageLogByTaskId(taskId, {
       status: finalStatus,
       videoUrl: finalStatus === 'succeeded' ? extractAggregationVideoUrl(payload) : null,
@@ -3271,8 +3343,8 @@ httpServer.listen(port, async () => {
   startCreditHubSyncLoop()
 })
 
-async function proxyJson(req, res, url, extraHeaders = {}, onResponse = null) {
-  return proxyJsonWithBody(req, res, url, req.body, extraHeaders, onResponse)
+async function proxyJson(req, res, url, extraHeaders = {}, onResponse = null, options = {}) {
+  return proxyJsonWithBody(req, res, url, req.body, extraHeaders, onResponse, options)
 }
 
 async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onResponse = null, options = {}) {
@@ -3291,7 +3363,7 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onRespo
       }
 
       const exhausted = didExhaustProxyRetries(result.response.status, retryOptions, attempt)
-      sendProxyJsonResult(res, url, result, onResponse, {
+      await sendProxyJsonResult(res, url, result, onResponse, {
         attempts: attempt,
         retryOptions,
         exhausted,
@@ -3304,13 +3376,14 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onRespo
         continue
       }
 
+      await notifyProxyError(options.onError, error)
       sendProxyError(res, error)
       return
     }
   }
 
   if (lastResult) {
-    sendProxyJsonResult(res, url, lastResult, onResponse, {
+    await sendProxyJsonResult(res, url, lastResult, onResponse, {
       attempts: retryOptions.maxAttempts,
       retryOptions,
       exhausted: true,
@@ -3318,7 +3391,9 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onRespo
     return
   }
 
-  sendProxyError(res, lastError || new Error('Upstream request failed'))
+  const finalError = lastError || new Error('Upstream request failed')
+  await notifyProxyError(options.onError, finalError)
+  sendProxyError(res, finalError)
 }
 
 async function fetchProxyJsonResult(req, url, body, extraHeaders) {
@@ -3345,14 +3420,14 @@ async function fetchProxyJsonResult(req, url, body, extraHeaders) {
   }
 }
 
-function sendProxyJsonResult(res, url, result, onResponse, retryContext) {
+async function sendProxyJsonResult(res, url, result, onResponse, retryContext) {
   const { response, buffer, contentType, parsedPayload, traceMetadata } = result
   const payload = retryContext?.exhausted
     ? decorateRetryExhaustedPayload(parsedPayload, traceMetadata, retryContext)
     : injectUpstreamTraceMetadata(parsedPayload, traceMetadata)
 
   if (onResponse) {
-    try { onResponse({ payload: parsedPayload, traceMetadata, status: response.status, url }) } catch (_) {}
+    try { await onResponse({ payload: parsedPayload, traceMetadata, status: response.status, url }) } catch (_) {}
   }
 
   res.status(response.status)
@@ -3374,6 +3449,11 @@ function sendProxyJsonResult(res, url, result, onResponse, retryContext) {
   }
 
   res.end(buffer)
+}
+
+async function notifyProxyError(onError, error) {
+  if (typeof onError !== 'function') return
+  try { await onError(error) } catch (_) {}
 }
 
 function sendProxyError(res, error) {
@@ -6897,6 +6977,43 @@ async function exchangeVideoSsoTicket(ticket, baseUrl) {
     token: data.token,
     user: data.user,
     redirectPath: normalizeStudioRedirectPath(data.redirectPath),
+  }
+}
+
+function sendMainAppVideoBillingError(res, error) {
+  const statusCode = Number(error?.statusCode) || 502
+  res.status(statusCode).json({
+    success: false,
+    code: error?.code || 'MAIN_APP_VIDEO_BILLING_FAILED',
+    message: error?.message || '主站视频积分计费失败。',
+  })
+}
+
+async function safelyFinalizeExternalVideoBilling({ session, billing, status }) {
+  if (!billing?.requestId) return null
+  if (billing.userId && billing.userId !== session?.user?.id) {
+    console.error('[video-billing] Refusing to finalize another user\'s reservation.', {
+      taskUserId: billing.userId,
+      sessionUserId: session?.user?.id || null,
+    })
+    return null
+  }
+
+  try {
+    return await finalizeVideoBilling({
+      client: mainAppVideoBillingClient,
+      session,
+      billing,
+      status,
+    })
+  } catch (error) {
+    console.error('[video-billing] Main-site finalization failed:', {
+      requestId: billing.requestId,
+      status,
+      code: error?.code || null,
+      message: error?.message || 'Unknown billing error',
+    })
+    return null
   }
 }
 
