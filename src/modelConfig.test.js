@@ -56,7 +56,7 @@ test('gpt-image2 exposes Yunwu image generation parameters in the frontend confi
   assert.equal(provider.id, 'gpt-image2')
   assert.equal(provider.outputType, 'image')
   assert.equal(provider.backendKind, 'gpt-image2')
-  assert.equal(provider.defaults.model, 'gpt-image-2')
+  assert.equal(provider.defaults.model, 'gpt-image-2-c')
   assert.deepEqual(provider.aspectRatios, ['1:1', '16:9', '9:16', '3:4'])
   assert.deepEqual(provider.resolutions.default, ['1024x1024', '1536x864', '864x1536', '1152x1536'])
   assert.equal(provider.hideResolutionSelector, true)
