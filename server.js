@@ -1403,7 +1403,7 @@ async function handleFalGptImage2QueryRequest(req, res) {
     const failureMessage = readFalGptImage2ErrorMessage(statusPayload)
 
     if (upstreamStatus === 'COMPLETED' && !failureMessage) {
-      const resultPayload = await requestFalGptImage2Json(`${requestBaseUrl}/response`, apiKey)
+      const resultPayload = await requestFalGptImage2Json(requestBaseUrl, apiKey)
       const imageUrl = extractFalGptImage2ImageUrl(resultPayload)
       if (!imageUrl) {
         throw createHttpError(502, 'fal.ai task completed without a result image')
