@@ -45,6 +45,7 @@ const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL 
 const imageApiBaseUrl = normalizeGeminiImageBaseUrl(process.env.IMAGE_API_BASE_URL || 'https://www.shanbaob.com')
 const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGATION_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const gptImage2ApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_API_BASE_URL || 'https://yunwu.ai')
+const gptImage2VipApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_VIP_API_BASE_URL || 'https://api.apiyi.com')
 const bcaiApiUrl = normalizeChatCompletionsUrl(process.env.BCAI_API_URL || process.env.BCAI_API_BASE_URL || 'https://bcai.online/v1/chat/completions')
 const shanbaoCopywritingApiUrl = normalizeChatCompletionsUrl(
   process.env.SHANBAO_API_URL
@@ -817,6 +818,7 @@ app.get('/api/veo/media/:taskId', async (req, res) => {
 app.post('/api/image/chat/completions', handleGeminiImageGenerateRequest)
 app.post('/api/image/generate-content', handleGeminiImageGenerateRequest)
 app.post('/api/gpt-image2/generations', handleGptImage2GenerateRequest)
+app.post('/api/gpt-image2-vip/generations', handleGptImage2VipGenerateRequest)
 app.post('/api/copywriting/chat/completions', handleCopywritingChatRequest)
 
 async function handleCopywritingChatRequest(req, res) {
@@ -982,6 +984,136 @@ async function handleGptImage2GenerateRequest(req, res) {
       }).catch(() => {})
     },
   )
+}
+
+async function handleGptImage2VipGenerateRequest(req, res) {
+  const apiKey = process.env.GPT_IMAGE2_VIP_API_KEY?.trim()
+  if (!apiKey) {
+    res.status(500).json({
+      error: {
+        message: 'Missing backend config: GPT_IMAGE2_VIP_API_KEY',
+        type: 'config_error',
+      },
+    })
+    return
+  }
+
+  const body = req.body || {}
+  const upstreamBody = normalizeGptImage2VipGenerateBody(body)
+  if (!upstreamBody.prompt) {
+    res.status(400).json({
+      error: {
+        message: 'Missing required field: prompt',
+        type: 'request_error',
+      },
+    })
+    return
+  }
+
+  if (upstreamBody.image.length > 3) {
+    res.status(400).json({
+      error: {
+        message: 'gpt-image2-vip supports at most 3 reference images',
+        type: 'request_error',
+      },
+    })
+    return
+  }
+
+  const isImageEdit = upstreamBody.image.length > 0
+  const upstreamUrl = `${gptImage2VipApiBaseUrl}/v1/images/${isImageEdit ? 'edits' : 'generations'}`
+  const upstreamHeaders = {
+    Accept: 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+  }
+  const mediaSummary = parseUsageMediaSummaryHeader(req)
+
+  try {
+    const result = isImageEdit
+      ? await fetchGptImage2VipEditResult(upstreamUrl, upstreamBody, upstreamHeaders)
+      : await fetchProxyJsonResult(req, upstreamUrl, {
+          model: upstreamBody.model,
+          prompt: upstreamBody.prompt,
+        }, upstreamHeaders)
+
+    await sendProxyJsonResult(
+      res,
+      upstreamUrl,
+      result,
+      ({ payload, traceMetadata, status, url }) => {
+        const imageResult = status < 400 ? extractImageResponseResult(payload, upstreamBody.prompt) : null
+        const errorMessage = status >= 400
+          ? (payload?.error?.message || payload?.message || null)
+          : (imageResult ? null : buildImageResponseParseError(payload))
+
+        insertUsageLog({
+          session: req.videoSiteSession,
+          channel: 'image',
+          providerId: body.providerId || 'gpt-image2-vip',
+          model: upstreamBody.model,
+          generationMode: isImageEdit ? 'image-to-image' : 'text-to-image',
+          prompt: upstreamBody.prompt,
+          sampleCount: 1,
+          requestParams: attachUsageMediaSummary({
+            model: upstreamBody.model,
+            mediaCounts: { images: upstreamBody.image.length, videos: 0, audios: 0 },
+          }, mediaSummary),
+          upstreamRequestId: traceMetadata?.requestId || null,
+          upstreamTraceId: traceMetadata?.traceId || null,
+          upstreamUrl: url,
+          status: imageResult ? 'succeeded' : 'failed',
+          errorMessage,
+        }).catch(() => {})
+      },
+      { attempts: 1 },
+    )
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    applyUpstreamTraceHeaders(res, error)
+    res.status(statusCode).json({
+      error: {
+        message: error.message || 'gpt-image2-vip upstream request failed',
+        type: statusCode < 500 ? 'request_error' : 'upstream_error',
+      },
+    })
+  }
+}
+
+async function fetchGptImage2VipEditResult(url, body, headers) {
+  const formData = new FormData()
+  formData.append('model', body.model)
+  formData.append('prompt', body.prompt)
+
+  body.image.forEach((image, index) => {
+    const reference = decodeGptImage2VipReference(image)
+    const extension = inferExtension(reference.mimeType) || '.png'
+    formData.append(
+      'image',
+      new Blob([reference.buffer], { type: reference.mimeType }),
+      `reference-${index + 1}${extension}`,
+    )
+  })
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: formData,
+  })
+  return readProxyResponseResult(response)
+}
+
+function decodeGptImage2VipReference(value) {
+  const match = value.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i)
+  if (!match) {
+    throw createHttpError(400, 'gpt-image2-vip reference images must use base64 data URLs')
+  }
+
+  const buffer = Buffer.from(match[2].replace(/\s/g, ''), 'base64')
+  if (buffer.length === 0) {
+    throw createHttpError(400, 'gpt-image2-vip reference image is empty')
+  }
+
+  return { mimeType: match[1].toLowerCase(), buffer }
 }
 
 async function handleGptImage2FanoutGenerateRequest(req, res, {
@@ -3406,6 +3538,10 @@ async function fetchProxyJsonResult(req, url, body, extraHeaders) {
     body: JSON.stringify(body),
   })
 
+  return readProxyResponseResult(response)
+}
+
+async function readProxyResponseResult(response) {
   const buffer = Buffer.from(await response.arrayBuffer())
   const contentType = response.headers.get('content-type') || ''
   const parsedPayload = tryParseJsonBuffer(buffer, contentType)
@@ -6149,6 +6285,14 @@ function normalizeGptImage2GenerateBody(body) {
   }
 
   return normalized
+}
+
+function normalizeGptImage2VipGenerateBody(body) {
+  return {
+    model: readFirstString(body.model) || 'gpt-image-2-vip',
+    prompt: readFirstString(body.prompt) || '',
+    image: normalizeStringArray(body.image),
+  }
 }
 
 function resolveBcaiApiKey() {
