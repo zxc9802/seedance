@@ -54,6 +54,8 @@ test('gpt image2(Medium) backend uses fal.ai queue endpoints with fixed medium q
   assert.match(serverSource, /quality: 'medium'/)
   assert.match(serverSource, /body\.inputUrls\.length > 16/)
   assert.match(serverSource, /\/status/)
+  assert.match(serverSource, /\$\{falGptImage2ApiBaseUrl\}\/openai\/gpt-image-2\/requests\/\$\{encodeURIComponent\(taskId\)\}/)
+  assert.doesNotMatch(serverSource, /\$\{falGptImage2ApiBaseUrl\}\/\$\{model\}\/requests/)
   assert.match(serverSource, /requestFalGptImage2Json\(requestBaseUrl, apiKey\)/)
   assert.doesNotMatch(serverSource, /\$\{requestBaseUrl\}\/response/)
 })

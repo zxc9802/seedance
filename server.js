@@ -1395,7 +1395,7 @@ async function handleFalGptImage2QueryRequest(req, res) {
   }
 
   const model = resolveFalGptImage2Model(req.body?.hasReferences === true)
-  const requestBaseUrl = `${falGptImage2ApiBaseUrl}/${model}/requests/${encodeURIComponent(taskId)}`
+  const requestBaseUrl = `${falGptImage2ApiBaseUrl}/openai/gpt-image-2/requests/${encodeURIComponent(taskId)}`
 
   try {
     const statusPayload = await requestFalGptImage2Json(`${requestBaseUrl}/status?logs=1`, apiKey)
