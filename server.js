@@ -47,6 +47,7 @@ const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGAT
 const gptImage2ApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_API_BASE_URL || 'https://yunwu.ai')
 const gptImage2VipApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_VIP_API_BASE_URL || 'https://api.apiyi.com')
 const kieGptImage2ApiBaseUrl = stripTrailingSlash(process.env.KIE_GPT_IMAGE2_API_BASE_URL || 'https://api.kie.ai')
+const falGptImage2ApiBaseUrl = stripTrailingSlash(process.env.FAL_GPT_IMAGE2_API_BASE_URL || 'https://queue.fal.run')
 const bcaiApiUrl = normalizeChatCompletionsUrl(process.env.BCAI_API_URL || process.env.BCAI_API_BASE_URL || 'https://bcai.online/v1/chat/completions')
 const shanbaoCopywritingApiUrl = normalizeChatCompletionsUrl(
   process.env.SHANBAO_API_URL
@@ -133,6 +134,12 @@ const DREAMINA_IMAGE2IMAGE_MODELS = new Set(['4.0', '4.1', '4.5', '4.6', '5.0', 
 const DREAMINA_IMAGE_RATIOS = new Set(['21:9', '16:9', '3:2', '4:3', '1:1', '3:4', '2:3', '9:16'])
 const DREAMINA_IMAGE_RESOLUTION_TYPES = new Set(['1k', '2k', '4k', '8k'])
 const DREAMINA_CLI_TIMEOUT_MS = Math.max(30000, Number(process.env.DREAMINA_CLI_TIMEOUT_MS || 600000))
+const FAL_GPT_IMAGE2_OUTPUTS = Object.freeze({
+  '1920x1920': { width: 1920, height: 1920, aspectRatio: '1:1' },
+  '1440x1920': { width: 1440, height: 1920, aspectRatio: '3:4' },
+  '1080x1920': { width: 1080, height: 1920, aspectRatio: '9:16' },
+  '1920x1080': { width: 1920, height: 1080, aspectRatio: '16:9' },
+})
 const uploadedReferenceMetadata = new Map()
 let usageStatusSyncTimer = null
 let usageStatusSyncRunning = false
@@ -822,6 +829,8 @@ app.post('/api/gpt-image2/generations', handleGptImage2GenerateRequest)
 app.post('/api/gpt-image2-vip/generations', handleGptImage2VipGenerateRequest)
 app.post('/api/kie/gpt-image2/generate', handleKieGptImage2GenerateRequest)
 app.post('/api/kie/gpt-image2/query', handleKieGptImage2QueryRequest)
+app.post('/api/fal/gpt-image2/generate', handleFalGptImage2GenerateRequest)
+app.post('/api/fal/gpt-image2/query', handleFalGptImage2QueryRequest)
 app.post('/api/copywriting/chat/completions', handleCopywritingChatRequest)
 
 async function handleCopywritingChatRequest(req, res) {
@@ -1290,6 +1299,213 @@ function parseKieGptImage2ResultJson(value) {
   } catch {
     return {}
   }
+}
+
+async function handleFalGptImage2GenerateRequest(req, res) {
+  const apiKey = process.env.FAL_GPT_IMAGE2_API_KEY?.trim()
+  if (!apiKey) {
+    res.status(500).json({ success: false, message: 'Missing backend config: FAL_GPT_IMAGE2_API_KEY' })
+    return
+  }
+
+  const body = normalizeFalGptImage2GenerateBody(req.body || {})
+  if (!body.prompt) {
+    res.status(400).json({ success: false, message: 'Missing required field: prompt' })
+    return
+  }
+  if (body.inputUrls.length > 16) {
+    res.status(400).json({ success: false, message: 'gpt image2(Medium) supports at most 16 reference images' })
+    return
+  }
+
+  const output = FAL_GPT_IMAGE2_OUTPUTS[body.resolution]
+  if (!output) {
+    res.status(400).json({ success: false, message: `Unsupported gpt image2(Medium) resolution: ${body.resolution}` })
+    return
+  }
+
+  const hasReferences = body.inputUrls.length > 0
+  const model = resolveFalGptImage2Model(hasReferences)
+  const upstreamBody = {
+    prompt: body.prompt,
+    image_size: { width: output.width, height: output.height },
+    quality: 'medium',
+    num_images: 1,
+    output_format: 'png',
+    ...(hasReferences ? { image_urls: body.inputUrls } : {}),
+  }
+
+  try {
+    const payload = await requestJson(
+      falGptImage2ApiBaseUrl,
+      `/${model}`,
+      { Authorization: `Key ${apiKey}` },
+      upstreamBody,
+    )
+    const taskId = normalizeTaskIdValue(payload?.request_id || payload?.requestId)
+    if (!taskId) {
+      throw createHttpError(502, 'fal.ai task creation succeeded without a request_id')
+    }
+
+    const mediaSummary = parseUsageMediaSummaryHeader(req)
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'image',
+      providerId: req.body?.providerId || 'fal-gpt-image2-medium',
+      model,
+      generationMode: hasReferences ? 'image-to-image' : 'text-to-image',
+      prompt: body.prompt,
+      aspectRatio: output.aspectRatio,
+      sampleCount: 1,
+      requestParams: attachUsageMediaSummary({
+        model,
+        quality: 'medium',
+        resolution: body.resolution,
+        aspectRatio: output.aspectRatio,
+        mediaCounts: { images: body.inputUrls.length, videos: 0, audios: 0 },
+      }, mediaSummary),
+      engineTaskId: taskId,
+      upstreamRequestId: payload?.requestId || payload?.request_id || null,
+      upstreamTraceId: payload?.traceId || null,
+      upstreamUrl: `${falGptImage2ApiBaseUrl}/${model}`,
+      status: 'submitted',
+      errorMessage: null,
+    }).catch(() => {})
+
+    res.json({
+      success: true,
+      data: { taskId, status: 'submitted', model },
+    })
+  } catch (error) {
+    sendFalGptImage2Error(res, error, 'fal.ai task creation failed')
+  }
+}
+
+async function handleFalGptImage2QueryRequest(req, res) {
+  const apiKey = process.env.FAL_GPT_IMAGE2_API_KEY?.trim()
+  if (!apiKey) {
+    res.status(500).json({ success: false, message: 'Missing backend config: FAL_GPT_IMAGE2_API_KEY' })
+    return
+  }
+
+  const taskId = normalizeTaskIdValue(req.body?.taskId)
+  if (!taskId) {
+    res.status(400).json({ success: false, message: 'taskId is required' })
+    return
+  }
+
+  const model = resolveFalGptImage2Model(req.body?.hasReferences === true)
+  const requestBaseUrl = `${falGptImage2ApiBaseUrl}/${model}/requests/${encodeURIComponent(taskId)}`
+
+  try {
+    const statusPayload = await requestFalGptImage2Json(`${requestBaseUrl}/status?logs=1`, apiKey)
+    const upstreamStatus = (readFirstString(statusPayload?.status) || 'IN_QUEUE').toUpperCase()
+    const failureMessage = readFalGptImage2ErrorMessage(statusPayload)
+
+    if (upstreamStatus === 'COMPLETED' && !failureMessage) {
+      const resultPayload = await requestFalGptImage2Json(`${requestBaseUrl}/response`, apiKey)
+      const imageUrl = extractFalGptImage2ImageUrl(resultPayload)
+      if (!imageUrl) {
+        throw createHttpError(502, 'fal.ai task completed without a result image')
+      }
+
+      updateUsageLogByTaskId(taskId, {
+        status: 'succeeded',
+        videoUrl: imageUrl,
+        errorMessage: null,
+        completedAt: new Date().toISOString(),
+      }).catch(() => {})
+
+      res.json({
+        success: true,
+        data: { taskId, status: 'succeeded', imageUrl, model },
+      })
+      return
+    }
+
+    if (failureMessage || ['FAILED', 'ERROR', 'CANCELLED', 'CANCELED'].includes(upstreamStatus)) {
+      const message = failureMessage || `fal.ai task failed with status ${upstreamStatus}`
+      updateUsageLogByTaskId(taskId, {
+        status: 'failed',
+        videoUrl: null,
+        errorMessage: message,
+        completedAt: new Date().toISOString(),
+      }).catch(() => {})
+
+      res.json({
+        success: true,
+        data: { taskId, status: 'failed', imageUrl: null, message, model },
+      })
+      return
+    }
+
+    res.json({
+      success: true,
+      data: { taskId, status: 'submitted', imageUrl: null, message: null, model },
+    })
+  } catch (error) {
+    sendFalGptImage2Error(res, error, 'fal.ai task query failed')
+  }
+}
+
+function resolveFalGptImage2Model(hasReferences) {
+  return hasReferences ? 'openai/gpt-image-2/edit' : 'openai/gpt-image-2'
+}
+
+async function requestFalGptImage2Json(url, apiKey) {
+  const response = await fetch(url, {
+    headers: { Authorization: `Key ${apiKey}` },
+  })
+  const contentType = response.headers.get('content-type') || ''
+  const payload = contentType.includes('application/json')
+    ? await response.json()
+    : await response.text()
+  const traceMetadata = extractUpstreamTraceMetadata(response, payload)
+
+  if (!response.ok) {
+    throw createHttpError(
+      response.status,
+      readFalGptImage2ErrorMessage(payload) || 'fal.ai request failed',
+      traceMetadata,
+    )
+  }
+
+  return injectUpstreamTraceMetadata(payload, traceMetadata)
+}
+
+function readFalGptImage2ErrorMessage(payload) {
+  if (typeof payload === 'string') {
+    return payload.trim() || null
+  }
+
+  const detailMessage = Array.isArray(payload?.detail)
+    ? payload.detail.map((item) => readFirstString(item?.msg, item?.message)).filter(Boolean).join('; ')
+    : null
+
+  return readFirstString(
+    payload?.error?.message,
+    typeof payload?.error === 'string' ? payload.error : null,
+    payload?.message,
+    detailMessage,
+  )
+}
+
+function extractFalGptImage2ImageUrl(payload) {
+  const images = Array.isArray(payload?.images)
+    ? payload.images
+    : (Array.isArray(payload?.data?.images) ? payload.data.images : [])
+  return readFirstString(images[0]?.url)
+}
+
+function sendFalGptImage2Error(res, error, fallbackMessage) {
+  const statusCode = Number(error.statusCode) || 502
+  applyUpstreamTraceHeaders(res, error)
+  res.status(statusCode).json({
+    success: false,
+    message: error.message || fallbackMessage,
+    ...(error.requestId ? { requestId: error.requestId } : {}),
+    ...(error.traceId ? { traceId: error.traceId } : {}),
+  })
 }
 
 async function handleGptImage2FanoutGenerateRequest(req, res, {
@@ -6476,6 +6692,14 @@ function normalizeKieGptImage2GenerateBody(body) {
   return {
     prompt: readFirstString(body.prompt) || '',
     aspectRatio: readFirstString(body.aspectRatio, body.aspect_ratio) || '1:1',
+    inputUrls: normalizeStringArray(body.inputUrls || body.input_urls),
+  }
+}
+
+function normalizeFalGptImage2GenerateBody(body) {
+  return {
+    prompt: readFirstString(body.prompt) || '',
+    resolution: readFirstString(body.resolution) || '1920x1080',
     inputUrls: normalizeStringArray(body.inputUrls || body.input_urls),
   }
 }
