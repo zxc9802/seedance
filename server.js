@@ -6475,7 +6475,7 @@ function normalizeGptImage2VipGenerateBody(body) {
 function normalizeKieGptImage2GenerateBody(body) {
   return {
     prompt: readFirstString(body.prompt) || '',
-    aspectRatio: readFirstString(body.aspectRatio, body.aspect_ratio) || 'auto',
+    aspectRatio: readFirstString(body.aspectRatio, body.aspect_ratio) || '1:1',
     inputUrls: normalizeStringArray(body.inputUrls || body.input_urls),
   }
 }

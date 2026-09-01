@@ -2718,7 +2718,7 @@ function buildKieGptImage2Request(provider, params, prompt, mode, inputUrls) {
     body: {
       providerId: provider,
       prompt,
-      aspectRatio: params.aspectRatio || 'auto',
+      aspectRatio: params.aspectRatio || '1:1',
       ...(mode === 'i2v' && inputUrls.length > 0 ? { inputUrls } : {}),
     },
   }

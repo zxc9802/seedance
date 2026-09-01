@@ -22,7 +22,8 @@ test('gpt image2(2) exposes the verified Kie text and reference-image modes', as
   assert.equal(provider.name, 'gpt image2(2)')
   assert.equal(provider.backendKind, 'kie-gpt-image2')
   assert.equal(provider.defaults.model, 'gpt-image-2-text-to-image')
-  assert.deepEqual(provider.aspectRatios, ['auto', '1:1'])
+  assert.deepEqual(provider.aspectRatios, ['1:1', '3:4', '9:16', '16:9'])
+  assert.equal(provider.defaults.aspectRatio, '1:1')
   assert.equal(provider.maxReferenceImages, 1)
 })
 
@@ -35,6 +36,7 @@ test('gpt image2(2) frontend uploads references and polls the Kie backend', asyn
   assert.match(appSource, /url: '\/api\/kie\/gpt-image2\/query'/)
   assert.match(appSource, /uploadImageReferences\(referenceMedia\)/)
   assert.match(appSource, /inputUrls/)
+  assert.match(appSource, /aspectRatio: params\.aspectRatio \|\| '1:1'/)
 })
 
 test('gpt image2(2) backend selects both Kie models and normalizes task results', async () => {
@@ -48,4 +50,5 @@ test('gpt image2(2) backend selects both Kie models and normalizes task results'
   assert.match(serverSource, /\/api\/v1\/jobs\/recordInfo/)
   assert.match(serverSource, /parseKieGptImage2ResultJson\(data\.resultJson\)/)
   assert.match(serverSource, /result\?\.resultUrls/)
+  assert.match(serverSource, /aspectRatio: readFirstString\(body\.aspectRatio, body\.aspect_ratio\) \|\| '1:1'/)
 })

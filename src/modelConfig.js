@@ -512,7 +512,7 @@ const BASE_PROVIDERS = {
     models: [
       { value: 'gpt-image-2-text-to-image', label: 'gpt image2(2)', tag: 'Kie' },
     ],
-    aspectRatios: ['auto', '1:1'],
+    aspectRatios: ['1:1', '3:4', '9:16', '16:9'],
     resolutions: { default: ['auto'] },
     hideResolutionSelector: true,
     durations: [],
@@ -525,7 +525,7 @@ const BASE_PROVIDERS = {
     maxReferenceImages: 1,
     defaults: {
       model: 'gpt-image-2-text-to-image',
-      aspectRatio: 'auto',
+      aspectRatio: '1:1',
       resolution: 'auto',
       sampleCount: 1,
     },
