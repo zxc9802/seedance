@@ -46,6 +46,7 @@ const imageApiBaseUrl = normalizeGeminiImageBaseUrl(process.env.IMAGE_API_BASE_U
 const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGATION_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const gptImage2ApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_API_BASE_URL || 'https://yunwu.ai')
 const gptImage2VipApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_VIP_API_BASE_URL || 'https://api.apiyi.com')
+const kieGptImage2ApiBaseUrl = stripTrailingSlash(process.env.KIE_GPT_IMAGE2_API_BASE_URL || 'https://api.kie.ai')
 const bcaiApiUrl = normalizeChatCompletionsUrl(process.env.BCAI_API_URL || process.env.BCAI_API_BASE_URL || 'https://bcai.online/v1/chat/completions')
 const shanbaoCopywritingApiUrl = normalizeChatCompletionsUrl(
   process.env.SHANBAO_API_URL
@@ -819,6 +820,8 @@ app.post('/api/image/chat/completions', handleGeminiImageGenerateRequest)
 app.post('/api/image/generate-content', handleGeminiImageGenerateRequest)
 app.post('/api/gpt-image2/generations', handleGptImage2GenerateRequest)
 app.post('/api/gpt-image2-vip/generations', handleGptImage2VipGenerateRequest)
+app.post('/api/kie/gpt-image2/generate', handleKieGptImage2GenerateRequest)
+app.post('/api/kie/gpt-image2/query', handleKieGptImage2QueryRequest)
 app.post('/api/copywriting/chat/completions', handleCopywritingChatRequest)
 
 async function handleCopywritingChatRequest(req, res) {
@@ -1120,6 +1123,173 @@ function decodeGptImage2VipReference(value) {
   }
 
   return { mimeType: match[1].toLowerCase(), buffer }
+}
+
+async function handleKieGptImage2GenerateRequest(req, res) {
+  const apiKey = process.env.KIE_GPT_IMAGE2_API_KEY?.trim()
+  if (!apiKey) {
+    res.status(500).json({ success: false, message: 'Missing backend config: KIE_GPT_IMAGE2_API_KEY' })
+    return
+  }
+
+  const body = normalizeKieGptImage2GenerateBody(req.body || {})
+  if (!body.prompt) {
+    res.status(400).json({ success: false, message: 'Missing required field: prompt' })
+    return
+  }
+  if (body.inputUrls.length > 1) {
+    res.status(400).json({ success: false, message: 'gpt image2(2) supports at most 1 reference image' })
+    return
+  }
+
+  const model = body.inputUrls.length > 0
+    ? 'gpt-image-2-image-to-image'
+    : 'gpt-image-2-text-to-image'
+  const upstreamBody = {
+    model,
+    input: {
+      prompt: body.prompt,
+      aspect_ratio: body.aspectRatio,
+      ...(body.inputUrls.length > 0 ? { input_urls: body.inputUrls } : {}),
+    },
+  }
+
+  try {
+    const payload = await requestJson(
+      kieGptImage2ApiBaseUrl,
+      '/api/v1/jobs/createTask',
+      { Authorization: `Bearer ${apiKey}` },
+      upstreamBody,
+    )
+    if (Number(payload?.code) !== 200) {
+      throw createHttpError(400, payload?.msg || payload?.message || 'Kie task creation failed')
+    }
+
+    const taskId = normalizeTaskIdValue(payload?.data?.taskId || payload?.data?.recordId)
+    if (!taskId) {
+      throw createHttpError(502, 'Kie task creation succeeded without a taskId')
+    }
+
+    const mediaSummary = parseUsageMediaSummaryHeader(req)
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'image',
+      providerId: req.body?.providerId || 'gpt-image2-2',
+      model,
+      generationMode: body.inputUrls.length > 0 ? 'image-to-image' : 'text-to-image',
+      prompt: body.prompt,
+      aspectRatio: body.aspectRatio,
+      sampleCount: 1,
+      requestParams: attachUsageMediaSummary({
+        model,
+        aspectRatio: body.aspectRatio,
+        mediaCounts: { images: body.inputUrls.length, videos: 0, audios: 0 },
+      }, mediaSummary),
+      engineTaskId: taskId,
+      upstreamRequestId: payload?.requestId || null,
+      upstreamTraceId: payload?.traceId || null,
+      upstreamUrl: `${kieGptImage2ApiBaseUrl}/api/v1/jobs/createTask`,
+      status: 'submitted',
+      errorMessage: null,
+    }).catch(() => {})
+
+    res.json({
+      success: true,
+      data: { taskId, status: 'submitted', model },
+    })
+  } catch (error) {
+    sendKieGptImage2Error(res, error, 'Kie task creation failed')
+  }
+}
+
+async function handleKieGptImage2QueryRequest(req, res) {
+  const apiKey = process.env.KIE_GPT_IMAGE2_API_KEY?.trim()
+  if (!apiKey) {
+    res.status(500).json({ success: false, message: 'Missing backend config: KIE_GPT_IMAGE2_API_KEY' })
+    return
+  }
+
+  const taskId = normalizeTaskIdValue(req.body?.taskId)
+  if (!taskId) {
+    res.status(400).json({ success: false, message: 'taskId is required' })
+    return
+  }
+
+  try {
+    const queryUrl = new URL(`${kieGptImage2ApiBaseUrl}/api/v1/jobs/recordInfo`)
+    queryUrl.searchParams.set('taskId', taskId)
+    const response = await fetch(queryUrl, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    })
+    const payload = await response.json()
+    const traceMetadata = extractUpstreamTraceMetadata(response, payload)
+    if (!response.ok || Number(payload?.code) !== 200) {
+      throw createHttpError(
+        response.ok ? 400 : response.status,
+        payload?.msg || payload?.message || 'Kie task query failed',
+        traceMetadata,
+      )
+    }
+
+    const data = payload?.data || {}
+    const status = readFirstString(data.state, data.status) || 'waiting'
+    const result = parseKieGptImage2ResultJson(data.resultJson)
+    const imageUrl = normalizeStringArray(result?.resultUrls || result?.result_urls)[0] || null
+    const message = readFirstString(data.failMsg, data.failMessage, payload?.msg)
+    const terminalStatus = status === 'success'
+      ? 'succeeded'
+      : (status === 'fail' ? 'failed' : null)
+
+    if (terminalStatus) {
+      updateUsageLogByTaskId(taskId, {
+        status: terminalStatus,
+        videoUrl: terminalStatus === 'succeeded' ? imageUrl : null,
+        errorMessage: terminalStatus === 'failed' ? (message || 'Kie task failed') : null,
+        completedAt: new Date().toISOString(),
+      }).catch(() => {})
+    }
+
+    res.json({
+      success: true,
+      data: {
+        taskId,
+        status,
+        imageUrl,
+        message,
+        model: data.model || null,
+        progress: data.progress ?? null,
+        creditsConsumed: data.creditsConsumed ?? null,
+      },
+    })
+  } catch (error) {
+    sendKieGptImage2Error(res, error, 'Kie task query failed')
+  }
+}
+
+function sendKieGptImage2Error(res, error, fallbackMessage) {
+  const statusCode = Number(error.statusCode) || 502
+  applyUpstreamTraceHeaders(res, error)
+  res.status(statusCode).json({
+    success: false,
+    message: error.message || fallbackMessage,
+    ...(error.requestId ? { requestId: error.requestId } : {}),
+    ...(error.traceId ? { traceId: error.traceId } : {}),
+  })
+}
+
+function parseKieGptImage2ResultJson(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    return {}
+  }
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
 }
 
 async function handleGptImage2FanoutGenerateRequest(req, res, {
@@ -6299,6 +6469,14 @@ function normalizeGptImage2VipGenerateBody(body) {
     prompt: readFirstString(body.prompt) || '',
     size: readFirstString(body.size, body.resolution),
     image: normalizeStringArray(body.image),
+  }
+}
+
+function normalizeKieGptImage2GenerateBody(body) {
+  return {
+    prompt: readFirstString(body.prompt) || '',
+    aspectRatio: readFirstString(body.aspectRatio, body.aspect_ratio) || 'auto',
+    inputUrls: normalizeStringArray(body.inputUrls || body.input_urls),
   }
 }
 

@@ -69,6 +69,10 @@ function isGptImage2VipProvider(id) {
   return PROVIDERS[id]?.backendKind === 'gpt-image2-vip'
 }
 
+function isKieGptImage2Provider(id) {
+  return PROVIDERS[id]?.backendKind === 'kie-gpt-image2'
+}
+
 function isOpenAiImageProvider(id) {
   return PROVIDERS[id]?.backendKind === 'openai-image'
 }
@@ -977,13 +981,15 @@ function App() {
           throw new Error(buildImageResponseParseError(data))
         }
 
-        if (isAggregationImageProvider(provider)) {
+        if (isAggregationImageProvider(provider) || isKieGptImage2Provider(provider)) {
           const uploadedReferences = await uploadImageReferences(referenceMedia)
           if (uploadedReferences.requiresPublicBaseUrl) {
             throw new Error('Reference images were uploaded locally, but the backend is not reachable from the public internet. Set PUBLIC_BASE_URL to a public host before using aggregation image references.')
           }
 
-          const requestInfo = buildAggregationImageRequest(provider, params, finalPrompt, generationMode, uploadedReferences.resourceRefs)
+          const requestInfo = isKieGptImage2Provider(provider)
+            ? buildKieGptImage2Request(provider, params, finalPrompt, generationMode, uploadedReferences.resourceRefs)
+            : buildAggregationImageRequest(provider, params, finalPrompt, generationMode, uploadedReferences.resourceRefs)
           updateProviderState(provider, { progress: 18 })
 
           const response = await fetch(requestInfo.url, {
@@ -1027,7 +1033,9 @@ function App() {
           let lastTask = initialTask
           while (Date.now() < pollDeadline) {
             await sleep(TASK_POLL_INTERVAL_MS)
-            const pollRequest = buildAggregationImageQueryRequest(initialTask.taskId)
+            const pollRequest = isKieGptImage2Provider(provider)
+              ? buildKieGptImage2QueryRequest(initialTask.taskId)
+              : buildAggregationImageQueryRequest(initialTask.taskId)
             const pollResponse = await fetch(pollRequest.url, {
               method: 'POST',
               headers: pollRequest.headers,
@@ -2703,6 +2711,27 @@ function buildAggregationImageQueryRequest(taskId) {
   }
 }
 
+function buildKieGptImage2Request(provider, params, prompt, mode, inputUrls) {
+  return {
+    url: '/api/kie/gpt-image2/generate',
+    headers: { 'Content-Type': 'application/json' },
+    body: {
+      providerId: provider,
+      prompt,
+      aspectRatio: params.aspectRatio || 'auto',
+      ...(mode === 'i2v' && inputUrls.length > 0 ? { inputUrls } : {}),
+    },
+  }
+}
+
+function buildKieGptImage2QueryRequest(taskId) {
+  return {
+    url: '/api/kie/gpt-image2/query',
+    headers: { 'Content-Type': 'application/json' },
+    body: { taskId },
+  }
+}
+
 function extractImageBase64Payload(media) {
   if (typeof media !== 'string') return null
 
@@ -3332,6 +3361,9 @@ function normalizeTaskState(value) {
     case 'submitted':
     case 'pending':
     case 'queued':
+    case 'waiting':
+    case 'queuing':
+    case 'generating':
     case 'processing':
     case 'running':
     case 'inprogress':
