@@ -1034,6 +1034,7 @@ async function handleGptImage2VipGenerateRequest(req, res) {
       : await fetchProxyJsonResult(req, upstreamUrl, {
           model: upstreamBody.model,
           prompt: upstreamBody.prompt,
+          ...(upstreamBody.size ? { size: upstreamBody.size } : {}),
         }, upstreamHeaders)
 
     await sendProxyJsonResult(
@@ -1053,9 +1054,11 @@ async function handleGptImage2VipGenerateRequest(req, res) {
           model: upstreamBody.model,
           generationMode: isImageEdit ? 'image-to-image' : 'text-to-image',
           prompt: upstreamBody.prompt,
+          resolution: upstreamBody.size || null,
           sampleCount: 1,
           requestParams: attachUsageMediaSummary({
             model: upstreamBody.model,
+            size: upstreamBody.size || null,
             mediaCounts: { images: upstreamBody.image.length, videos: 0, audios: 0 },
           }, mediaSummary),
           upstreamRequestId: traceMetadata?.requestId || null,
@@ -1083,6 +1086,9 @@ async function fetchGptImage2VipEditResult(url, body, headers) {
   const formData = new FormData()
   formData.append('model', body.model)
   formData.append('prompt', body.prompt)
+  if (body.size) {
+    formData.append('size', body.size)
+  }
 
   body.image.forEach((image, index) => {
     const reference = decodeGptImage2VipReference(image)
@@ -6291,6 +6297,7 @@ function normalizeGptImage2VipGenerateBody(body) {
   return {
     model: readFirstString(body.model) || 'gpt-image-2-vip',
     prompt: readFirstString(body.prompt) || '',
+    size: readFirstString(body.size, body.resolution),
     image: normalizeStringArray(body.image),
   }
 }

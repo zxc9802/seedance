@@ -2189,6 +2189,8 @@ function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
 
 function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
   if (isGptImage2VipProvider(provider)) {
+    const size = resolveImageSizeForParams(provider, params)
+
     return {
       url: '/api/gpt-image2-vip/generations',
       headers: {
@@ -2198,6 +2200,7 @@ function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
         providerId: provider,
         model: params.model,
         prompt,
+        ...(size && size !== 'auto' ? { size } : {}),
         ...(mode === 'i2v' && mediaList.length > 0 ? { image: mediaList } : {}),
       },
     }

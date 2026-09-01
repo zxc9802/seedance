@@ -24,6 +24,13 @@ test('gpt-image2-vip exposes the verified APIYi model and reference-image limit'
   assert.deepEqual(provider.models.map((item) => item.value), ['gpt-image-2-vip'])
   assert.equal(provider.maxReferenceImages, 3)
   assert.deepEqual(provider.sampleCounts, [1])
+  assert.deepEqual(provider.aspectRatios, ['1:1', '16:9', '9:16', '3:4'])
+  assert.deepEqual(provider.resolutionByAspectRatio, {
+    '1:1': 'auto',
+    '16:9': '1536x864',
+    '9:16': '864x1536',
+    '3:4': '1152x1536',
+  })
 })
 
 test('gpt-image2-vip frontend uses its private backend route and preserves image references', async () => {
@@ -33,6 +40,7 @@ test('gpt-image2-vip frontend uses its private backend route and preserves image
   assert.match(appSource, /url: '\/api\/gpt-image2-vip\/generations'/)
   assert.match(appSource, /model: params\.model/)
   assert.match(appSource, /prompt,/)
+  assert.match(appSource, /size && size !== 'auto' \? \{ size \} : \{\}/)
   assert.match(appSource, /image: mediaList/)
 })
 
@@ -44,7 +52,9 @@ test('gpt-image2-vip backend switches between JSON generations and multipart edi
   assert.match(serverSource, /app\.post\('\/api\/gpt-image2-vip\/generations', handleGptImage2VipGenerateRequest\)/)
   assert.match(serverSource, /\/v1\/images\/\$\{isImageEdit \? 'edits' : 'generations'\}/)
   assert.match(serverSource, /formData\.append\('model', body\.model\)/)
+  assert.match(serverSource, /formData\.append\('size', body\.size\)/)
   assert.match(serverSource, /formData\.append\(\s*'image'/s)
   assert.match(serverSource, /new Blob\(\[reference\.buffer\], \{ type: reference\.mimeType \}\)/)
   assert.match(serverSource, /model: readFirstString\(body\.model\) \|\| 'gpt-image-2-vip'/)
+  assert.match(serverSource, /size: readFirstString\(body\.size, body\.resolution\)/)
 })

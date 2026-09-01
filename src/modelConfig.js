@@ -468,9 +468,21 @@ const BASE_PROVIDERS = {
     models: [
       { value: 'gpt-image-2-vip', label: 'gpt-image-2-vip', tag: 'VIP' },
     ],
-    aspectRatios: ['1:1'],
-    resolutions: { default: ['auto'] },
+    aspectRatios: ['1:1', '16:9', '9:16', '3:4'],
+    resolutions: { default: ['auto', '1536x864', '864x1536', '1152x1536'] },
     hideResolutionSelector: true,
+    resolutionByAspectRatio: {
+      '1:1': 'auto',
+      '16:9': '1536x864',
+      '9:16': '864x1536',
+      '3:4': '1152x1536',
+    },
+    aspectRatioByResolution: {
+      auto: '1:1',
+      '1536x864': '16:9',
+      '864x1536': '9:16',
+      '1152x1536': '3:4',
+    },
     durations: [],
     sampleCounts: [1],
     features: {
