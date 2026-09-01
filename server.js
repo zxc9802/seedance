@@ -1137,8 +1137,8 @@ async function handleKieGptImage2GenerateRequest(req, res) {
     res.status(400).json({ success: false, message: 'Missing required field: prompt' })
     return
   }
-  if (body.inputUrls.length > 1) {
-    res.status(400).json({ success: false, message: 'gpt image2(2) supports at most 1 reference image' })
+  if (body.inputUrls.length > 16) {
+    res.status(400).json({ success: false, message: 'gpt image2(2) supports at most 16 reference images' })
     return
   }
 

@@ -522,14 +522,14 @@ const BASE_PROVIDERS = {
       negativePrompt: false,
       referenceImage: true,
     },
-    maxReferenceImages: 1,
+    maxReferenceImages: 16,
     defaults: {
       model: 'gpt-image-2-text-to-image',
       aspectRatio: '1:1',
       resolution: 'auto',
       sampleCount: 1,
     },
-    referenceHelpText: '文生图使用 Kie GPT Image 2 Text to Image；上传 1 张参考图后自动切换为 Image to Image。',
+    referenceHelpText: '文生图使用 Kie GPT Image 2 Text to Image；上传 1–16 张参考图后自动切换为 Image to Image。',
     backendKind: 'kie-gpt-image2',
   },
   'gemini-image-aggregation': {
