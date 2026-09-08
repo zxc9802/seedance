@@ -28,3 +28,7 @@ original_app.txt
 *.njsproj
 *.sln
 *.sw?
+
+# Server-side usage report outbox (contains employee IDs).
+.usage-outbox/
+**/.usage-outbox/

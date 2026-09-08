@@ -1,3 +1,4 @@
+import { meteredFetch } from './lib/main-usage.js'
 import express from 'express'
 import multer from 'multer'
 import fs from 'node:fs'
@@ -1352,7 +1353,7 @@ async function handleGeminiImageGenerateRequest(req, res) {
   const upstreamUrl = buildGeminiGenerateContentUrl(imageApiBaseUrl, model)
 
   try {
-    const response = await fetch(upstreamUrl, {
+    const response = await meteredFetch(upstreamUrl, {
       method: req.method,
       headers: {
         'Content-Type': 'application/json',
@@ -1360,7 +1361,7 @@ async function handleGeminiImageGenerateRequest(req, res) {
         Authorization: `Bearer ${process.env.IMAGE_API_KEY}`,
       },
       body: JSON.stringify(upstreamBody),
-    })
+    }, req.videoSiteSession?.user?.id)
 
     const buffer = Buffer.from(await response.arrayBuffer())
     const contentType = response.headers.get('content-type') || ''
@@ -3607,7 +3608,10 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onRespo
 }
 
 async function fetchProxyJsonResult(req, url, body, extraHeaders) {
-  const response = await fetch(url, {
+  const providerFetch = ['/api/copywriting/chat/completions', '/api/gpt-image2/generations'].includes(req.path)
+    ? (input, init) => meteredFetch(input, init, req.videoSiteSession?.user?.id)
+    : fetch
+  const response = await providerFetch(url, {
     method: req.method,
     headers: {
       'Content-Type': 'application/json',

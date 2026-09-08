@@ -1,3 +1,5 @@
+import { queueUsageReport, isUsageReportingEnabled } from '../lib/main-usage.js'
+import { emptyUsage } from '../lib/usage-values.js'
 import { getPool } from './postgres.js'
 import { reconcileCreditsForUsageLog } from './credits.js'
 import { scheduleUsageLogBackupSyncById, syncUsageLogBackupByIds } from '../integrations/larkBaseUsageBackup.js'
@@ -120,6 +122,7 @@ export async function insertUsageLog({
       if (status === 'failed' || status === 'cancelled' || shouldReconcileSuccessfulUsage(status, videoUrl)) {
         await reconcileCreditsForUsageLog(insertedId)
       }
+      await reportTerminalUsage(insertedId).catch(() => console.error('[usage-report] Unable to queue terminal media usage'))
       scheduleUsageLogBackupSyncById(insertedId).catch(() => {})
     }
     return insertedId
@@ -195,6 +198,7 @@ export async function updateUsageLogByTaskId(engineTaskId, updates) {
           }
         }))
       }
+      await Promise.all(updatedIds.map(reportTerminalUsage)).catch(() => console.error('[usage-report] Unable to queue terminal media usage'))
       syncUsageLogBackupByIds(updatedIds).catch(() => {})
     }
   } catch (err) {
@@ -247,9 +251,32 @@ export async function updateUsageLogById(logId, updates) {
           console.error('[credits] reservation reconciliation failed:', error.message)
         }
       }
+      await reportTerminalUsage(result.rows[0].id).catch(() => console.error('[usage-report] Unable to queue terminal media usage'))
       scheduleUsageLogBackupSyncById(result.rows[0].id).catch(() => {})
     }
   } catch (err) {
     console.error('[usage-db] updateUsageLogById failed:', err.message)
+  }
+}
+
+// Media polling updates an existing log. The stable log ID prevents double counting.
+async function reportTerminalUsage(id) {
+  if (!isUsageReportingEnabled()) return
+  const result = await getPool().query(
+    'SELECT id, user_id, channel, provider_id, model, status, upstream_cost_cny, upstream_request_id FROM video_usage_logs WHERE id = $1', [id])
+  const event = mediaUsageEvent(result.rows[0])
+  if (event) await queueUsageReport(event)
+}
+
+export function mediaUsageEvent(row) {
+  if (!row?.user_id || row.channel === 'copywriting' || (row.channel === 'image' && row.provider_id !== 'gemini-image-aggregation') || !['succeeded', 'failed', 'cancelled'].includes(row.status)) return
+  const cost = row.upstream_cost_cny === null ? null : Number(row.upstream_cost_cny)
+  return {
+    ...emptyUsage(), userId: row.user_id, requestId: 'usage-log:' + row.id,
+    provider: row.provider_id || 'unknown', model: row.model || 'unknown',
+    status: row.status === 'succeeded' ? 'completed' : row.status === 'cancelled' ? 'interrupted' : 'failed',
+    tokenBasis: 'missing', upstreamRequestId: row.upstream_request_id || null,
+    ...(row.status === 'succeeded' && cost !== null && Number.isFinite(cost) && cost > 0
+      ? { amount: cost, currency: 'CNY', costBasis: 'estimated' } : {}),
   }
 }

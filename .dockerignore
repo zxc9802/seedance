@@ -7,3 +7,7 @@ dist
 .temp_uploads
 .DS_Store
 npm-debug.log*
+
+# Server-side usage report outbox (contains employee IDs).
+.usage-outbox/
+**/.usage-outbox/
