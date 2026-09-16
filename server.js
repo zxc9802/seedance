@@ -829,6 +829,7 @@ app.post('/api/image/generate-content', handleGeminiImageGenerateRequest)
 app.post('/api/gpt-image2/generations', handleGptImage2GenerateRequest)
 app.post('/api/gpt-image2-vip/generations', handleGptImage2VipGenerateRequest)
 app.post('/api/gpt-image-2.5/generations', handleGptImage2VipGenerateRequest)
+app.post('/api/gpt-image-2.5-sunburst/generations', handleGptImage2VipGenerateRequest)
 app.post('/api/kie/gpt-image2/generate', handleKieGptImage2GenerateRequest)
 app.post('/api/kie/gpt-image2/query', handleKieGptImage2QueryRequest)
 app.post('/api/fal/gpt-image2/generate', handleFalGptImage2GenerateRequest)
@@ -1001,8 +1002,9 @@ async function handleGptImage2GenerateRequest(req, res) {
 }
 
 async function handleGptImage2VipGenerateRequest(req, res) {
-  const isMixtoken = req.route.path === '/api/gpt-image-2.5/generations'
-  const providerId = isMixtoken ? 'gpt-image-2.5' : 'gpt-image2-vip'
+  const isSunburst = req.route.path === '/api/gpt-image-2.5-sunburst/generations'
+  const isMixtoken = isSunburst || req.route.path === '/api/gpt-image-2.5/generations'
+  const providerId = isSunburst ? 'gpt-image-2.5-sunburst' : isMixtoken ? 'gpt-image-2.5' : 'gpt-image2-vip'
   const apiKey = isMixtoken ? process.env.MIXTOKEN_API_KEY?.trim() : process.env.GPT_IMAGE2_VIP_API_KEY?.trim()
   if (!apiKey) {
     res.status(500).json({
@@ -1015,7 +1017,7 @@ async function handleGptImage2VipGenerateRequest(req, res) {
   }
 
   const body = req.body || {}
-  const upstreamBody = normalizeGptImage2VipGenerateBody(isMixtoken ? { ...body, model: 'gpt-image-2.5' } : body)
+  const upstreamBody = normalizeGptImage2VipGenerateBody(isMixtoken ? { ...body, model: providerId } : body)
   if (!upstreamBody.prompt) {
     res.status(400).json({
       error: {
@@ -1046,13 +1048,31 @@ async function handleGptImage2VipGenerateRequest(req, res) {
   const mediaSummary = parseUsageMediaSummaryHeader(req)
 
   try {
-    const result = isImageEdit
-      ? await fetchGptImage2VipEditResult(upstreamUrl, upstreamBody, upstreamHeaders)
-      : await fetchProxyJsonResult(req, upstreamUrl, {
-          model: upstreamBody.model,
-          prompt: upstreamBody.prompt,
-          ...(upstreamBody.size ? { size: upstreamBody.size } : {}),
-        }, upstreamHeaders)
+    if (isSunburst) upstreamBody.image.forEach(decodeGptImage2VipReference)
+    const maxAttempts = isSunburst ? 5 : 1 // Initial Sunburst call, three retries, then one fallback.
+    let attempts = 0
+    let result
+    while (attempts < maxAttempts) {
+      attempts += 1
+      if (isSunburst && attempts === 5) upstreamBody.model = 'gpt-image-2.5'
+      try {
+        result = isImageEdit
+          ? await fetchGptImage2VipEditResult(upstreamUrl, upstreamBody, upstreamHeaders)
+          : await fetchProxyJsonResult(req, upstreamUrl, {
+              model: upstreamBody.model,
+              prompt: upstreamBody.prompt,
+              ...(upstreamBody.size ? { size: upstreamBody.size } : {}),
+            }, upstreamHeaders)
+        if (!isSunburst || (result.response.ok && extractImageResponseResult(result.parsedPayload, upstreamBody.prompt))) break
+      } catch (error) {
+        if (attempts === maxAttempts) throw error
+      }
+      if (attempts < maxAttempts) await sleep(1000)
+    }
+    if (isSunburst && result.response.ok && !extractImageResponseResult(result.parsedPayload, upstreamBody.prompt)) {
+      throw createHttpError(502, buildImageResponseParseError(result.parsedPayload))
+    }
+    if (isMixtoken) res.setHeader('X-Image-Model', upstreamBody.model)
 
     await sendProxyJsonResult(
       res,
@@ -1075,6 +1095,7 @@ async function handleGptImage2VipGenerateRequest(req, res) {
           sampleCount: 1,
           requestParams: attachUsageMediaSummary({
             model: upstreamBody.model,
+            ...(isSunburst ? { requestedModel: providerId, attempts } : {}),
             size: upstreamBody.size || null,
             mediaCounts: { images: upstreamBody.image.length, videos: 0, audios: 0 },
           }, mediaSummary),
@@ -1085,7 +1106,7 @@ async function handleGptImage2VipGenerateRequest(req, res) {
           errorMessage,
         }).catch(() => {})
       },
-      { attempts: 1 },
+      { attempts },
     )
   } catch (error) {
     const statusCode = Number(error.statusCode) || 502

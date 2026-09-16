@@ -722,6 +722,19 @@ const BASE_PROVIDERS = {
 
 export const PROVIDERS = {
   ...BASE_PROVIDERS,
+  'gpt-image-2.5-sunburst': {
+    ...BASE_PROVIDERS['gpt-image-2.5'],
+    id: 'gpt-image-2.5-sunburst',
+    selectorLabel: 'gpt-image-2.5-sunburst',
+    name: 'gpt-image-2.5-sunburst',
+    models: [
+      { value: 'gpt-image-2.5-sunburst', label: 'gpt-image-2.5-sunburst', tag: 'Mixtoken' },
+    ],
+    defaults: {
+      ...BASE_PROVIDERS['gpt-image-2.5'].defaults,
+      model: 'gpt-image-2.5-sunburst',
+    },
+  },
   ...YUNWU_PROVIDERS,
 }
 
@@ -731,6 +744,7 @@ const BASE_PROVIDER_ORDER = [
   'veo31fast',
   'kling',
   'wan1',
+  'gpt-image-2.5-sunburst',
   'gemini-image',
   'gpt-image2',
   'gpt-image-2.5',

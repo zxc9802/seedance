@@ -2207,7 +2207,7 @@ function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
 function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
   if (PROVIDERS[provider]?.backendKind === 'mixtoken-image') {
     return {
-      url: '/api/gpt-image-2.5/generations',
+      url: `/api/${provider}/generations`,
       headers: { 'Content-Type': 'application/json' },
       body: {
         providerId: provider,
