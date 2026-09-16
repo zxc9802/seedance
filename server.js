@@ -33,6 +33,9 @@ import {
   normalizeVideoUpstreamProtocol,
 } from './relay/videoRelayClient.js'
 import { resolveSeedanceUpstreamConfig } from './relay/upstreamCredentials.js'
+import { usageMonitor } from './usage/index.mjs'
+
+const fetch = usageMonitor.fetch
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -59,6 +62,7 @@ const videoRelayApiKey = process.env.VIDEO_RELAY_API_KEY?.trim() || ''
 const videoRelayClient = createVideoRelayClient({
   baseUrl: videoRelayApiBaseUrl,
   apiKey: videoRelayApiKey,
+  fetchImpl: fetch,
 })
 const materialApiBaseUrl = stripTrailingSlash(process.env.MATERIAL_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const imageApiBaseUrl = normalizeGeminiImageBaseUrl(process.env.IMAGE_API_BASE_URL || 'https://www.shanbaob.com')
@@ -473,6 +477,10 @@ app.use(async (req, res, next) => {
     clearVideoSiteSession(res)
     res.redirect(302, buildMainAppVideoEntryUrl(requestedMainAppUrl))
   }
+})
+
+app.use((req, _res, next) => {
+  usageMonitor.run(req.videoSiteSession?.user?.id, next)
 })
 
 app.post('/api/upload', upload.array('files', 32), async (req, res) => {
@@ -7731,6 +7739,7 @@ async function syncAggregationUsageStatuses() {
 }
 
 async function runUsageStatusMaintenance(trigger = 'interval') {
+  await usageMonitor.drain()
   if (usageStatusSyncRunning) {
     return
   }
