@@ -21,9 +21,6 @@ import { createSeedanceRelayRouter } from './relay/api.js'
 import { createApiKeyAuthenticator, findStoredRelayApiKey } from './relay/apiKeys.js'
 import { createPostgresRelayRepository } from './relay/postgresRepository.js'
 import { resolveSeedanceUpstreamConfig } from './relay/upstreamCredentials.js'
-import { usageMonitor } from './usage/index.mjs'
-
-const fetch = usageMonitor.fetch
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -427,10 +424,6 @@ app.use(async (req, res, next) => {
     clearVideoSiteSession(res)
     res.redirect(302, buildMainAppVideoEntryUrl(requestedMainAppUrl))
   }
-})
-
-app.use((req, _res, next) => {
-  usageMonitor.run(req.videoSiteSession?.user?.id, next)
 })
 
 app.post('/api/upload', upload.array('files', 32), async (req, res) => {
@@ -8113,7 +8106,6 @@ async function syncAggregationUsageStatuses() {
 }
 
 async function runUsageStatusMaintenance(trigger = 'interval') {
-  await usageMonitor.drain()
   if (usageStatusSyncRunning) {
     return
   }

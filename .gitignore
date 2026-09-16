@@ -28,6 +28,3 @@ original_app.txt
 *.njsproj
 *.sln
 *.sw?
-
-# Durable OpenLux reporting metadata
-/data/usage-monitor/
