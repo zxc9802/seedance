@@ -63,6 +63,7 @@ function isAggregationImageProvider(id) {
 function isGptImage2Provider(id) {
   return PROVIDERS[id]?.backendKind === 'gpt-image2'
     || PROVIDERS[id]?.backendKind === 'gpt-image2-vip'
+    || PROVIDERS[id]?.backendKind === 'mixtoken-image'
 }
 
 function isGptImage2VipProvider(id) {
@@ -2204,6 +2205,20 @@ function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
 }
 
 function buildGptImage2Request(provider, params, prompt, mode, mediaList) {
+  if (PROVIDERS[provider]?.backendKind === 'mixtoken-image') {
+    return {
+      url: '/api/gpt-image-2.5/generations',
+      headers: { 'Content-Type': 'application/json' },
+      body: {
+        providerId: provider,
+        model: params.model,
+        prompt,
+        size: resolveImageSizeForParams(provider, params),
+        ...(mode === 'i2v' && mediaList.length > 0 ? { image: mediaList } : {}),
+      },
+    }
+  }
+
   if (isGptImage2VipProvider(provider)) {
     const size = resolveImageSizeForParams(provider, params)
 
