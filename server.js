@@ -21,6 +21,7 @@ import { createSeedanceRelayRouter } from './relay/api.js'
 import { createApiKeyAuthenticator, findStoredRelayApiKey } from './relay/apiKeys.js'
 import { createPostgresRelayRepository } from './relay/postgresRepository.js'
 import { resolveSeedanceUpstreamConfig } from './relay/upstreamCredentials.js'
+import { generateFalGptImage25 } from './integrations/falGptImage25.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -1006,10 +1007,11 @@ async function handleGptImage2VipGenerateRequest(req, res) {
   const isMixtoken = isSunburst || req.route.path === '/api/gpt-image-2.5/generations'
   const providerId = isSunburst ? 'gpt-image-2.5-sunburst' : isMixtoken ? 'gpt-image-2.5' : 'gpt-image2-vip'
   const apiKey = isMixtoken ? process.env.MIXTOKEN_API_KEY?.trim() : process.env.GPT_IMAGE2_VIP_API_KEY?.trim()
-  if (!apiKey) {
+  const falKey = isMixtoken && (process.env.FAL_KEY?.trim() || process.env.FAL_GPT_IMAGE2_API_KEY?.trim())
+  if (!apiKey && !falKey) {
     res.status(500).json({
       error: {
-        message: `Missing backend config: ${isMixtoken ? 'MIXTOKEN_API_KEY' : 'GPT_IMAGE2_VIP_API_KEY'}`,
+        message: `Missing backend config: ${isMixtoken ? 'FAL_KEY / FAL_GPT_IMAGE2_API_KEY / MIXTOKEN_API_KEY' : 'GPT_IMAGE2_VIP_API_KEY'}`,
         type: 'config_error',
       },
     })
@@ -1040,7 +1042,7 @@ async function handleGptImage2VipGenerateRequest(req, res) {
 
   const isImageEdit = upstreamBody.image.length > 0
   const apiBaseUrl = isMixtoken ? mixtokenApiBaseUrl : gptImage2VipApiBaseUrl
-  const upstreamUrl = `${apiBaseUrl}/v1/images/${isImageEdit ? 'edits' : 'generations'}`
+  let upstreamUrl = `${apiBaseUrl}/v1/images/${isImageEdit && !isMixtoken ? 'edits' : 'generations'}`
   const upstreamHeaders = {
     Accept: 'application/json',
     Authorization: `Bearer ${apiKey}`,
@@ -1048,31 +1050,50 @@ async function handleGptImage2VipGenerateRequest(req, res) {
   const mediaSummary = parseUsageMediaSummaryHeader(req)
 
   try {
-    if (isSunburst) upstreamBody.image.forEach(decodeGptImage2VipReference)
+    if (isMixtoken) upstreamBody.image.forEach(decodeGptImage2VipReference)
     const maxAttempts = isSunburst ? 5 : 1 // Initial Sunburst call, three retries, then one fallback.
     let attempts = 0
     let result
-    while (attempts < maxAttempts) {
+    let falError = null
+    let imageProvider = isMixtoken ? 'mixtoken' : 'apiyi'
+    if (falKey) {
+      try {
+        const generated = await generateFalGptImage25(upstreamBody, { apiKey: falKey, baseUrl: falGptImage2ApiBaseUrl })
+        upstreamUrl = generated.endpoint
+        upstreamBody.model = generated.model
+        imageProvider = 'fal'
+        result = await readProxyResponseResult(Response.json({ data: generated.data, requestId: generated.requestId }))
+      } catch (error) {
+        if (!apiKey) throw error
+        falError = error.message
+      }
+    }
+    while (!result && attempts < maxAttempts) {
       attempts += 1
       if (isSunburst && attempts === 5) upstreamBody.model = 'gpt-image-2.5'
       try {
-        result = isImageEdit
+        result = isImageEdit && !isMixtoken
           ? await fetchGptImage2VipEditResult(upstreamUrl, upstreamBody, upstreamHeaders)
           : await fetchProxyJsonResult(req, upstreamUrl, {
               model: upstreamBody.model,
               prompt: upstreamBody.prompt,
               ...(upstreamBody.size ? { size: upstreamBody.size } : {}),
+              ...(isMixtoken && isImageEdit ? { image: upstreamBody.image } : {}),
             }, upstreamHeaders)
         if (!isSunburst || (result.response.ok && extractImageResponseResult(result.parsedPayload, upstreamBody.prompt))) break
+        if (attempts < maxAttempts) result = null
       } catch (error) {
         if (attempts === maxAttempts) throw error
       }
       if (attempts < maxAttempts) await sleep(1000)
     }
-    if (isSunburst && result.response.ok && !extractImageResponseResult(result.parsedPayload, upstreamBody.prompt)) {
+    if (isMixtoken && result.response.ok && !extractImageResponseResult(result.parsedPayload, upstreamBody.prompt)) {
       throw createHttpError(502, buildImageResponseParseError(result.parsedPayload))
     }
-    if (isMixtoken) res.setHeader('X-Image-Model', upstreamBody.model)
+    if (isMixtoken) {
+      res.setHeader('X-Image-Model', upstreamBody.model)
+      res.setHeader('X-Image-Provider', imageProvider)
+    }
 
     await sendProxyJsonResult(
       res,
@@ -1095,7 +1116,8 @@ async function handleGptImage2VipGenerateRequest(req, res) {
           sampleCount: 1,
           requestParams: attachUsageMediaSummary({
             model: upstreamBody.model,
-            ...(isSunburst ? { requestedModel: providerId, attempts } : {}),
+            ...(isSunburst ? { requestedModel: providerId, attempts: attempts + (falKey ? 1 : 0) } : {}),
+            ...(isMixtoken ? { imageProvider, ...(imageProvider === 'fal' ? { quality: 'high' } : {}), ...(falError ? { falError } : {}) } : {}),
             size: upstreamBody.size || null,
             mediaCounts: { images: upstreamBody.image.length, videos: 0, audios: 0 },
           }, mediaSummary),
@@ -1106,7 +1128,7 @@ async function handleGptImage2VipGenerateRequest(req, res) {
           errorMessage,
         }).catch(() => {})
       },
-      { attempts },
+      { attempts: attempts + (falKey ? 1 : 0) },
     )
   } catch (error) {
     const statusCode = Number(error.statusCode) || 502

@@ -462,11 +462,11 @@ const BASE_PROVIDERS = {
     typeLabel: 'Image',
     selectorLabel: 'gpt-image-2.5',
     name: 'gpt-image-2.5',
-    vendor: 'Mixtoken',
+    vendor: 'fal.ai',
     color: '#0f9f7a',
     outputType: 'image',
     models: [
-      { value: 'gpt-image-2.5', label: 'gpt-image-2.5', tag: 'Mixtoken' },
+      { value: 'gpt-image-2.5', label: 'gpt-image-2.5', tag: 'High' },
     ],
     aspectRatios: ['1:1', '16:9', '9:16', '3:4'],
     resolutions: { default: ['1024x1024', '1536x864', '864x1536', '1152x1536'] },
@@ -497,7 +497,7 @@ const BASE_PROVIDERS = {
       resolution: '1024x1024',
       sampleCount: 1,
     },
-    referenceHelpText: '支持文生图和参考图编辑，最多上传 3 张参考图。',
+    referenceHelpText: '质量固定为 High，支持文生图和参考图编辑，最多上传 3 张参考图。',
     backendKind: 'mixtoken-image',
   },
   'gpt-image2-vip': {
@@ -728,7 +728,7 @@ export const PROVIDERS = {
     selectorLabel: 'gpt-image-2.5-sunburst',
     name: 'gpt-image-2.5-sunburst',
     models: [
-      { value: 'gpt-image-2.5-sunburst', label: 'gpt-image-2.5-sunburst', tag: 'Mixtoken' },
+      { value: 'gpt-image-2.5-sunburst', label: 'gpt-image-2.5-sunburst', tag: 'High' },
     ],
     defaults: {
       ...BASE_PROVIDERS['gpt-image-2.5'].defaults,

@@ -73,6 +73,7 @@ test('Mixtoken route isolates credentials and supports generations, edits, valid
       ...process.env, PORT: String(port), REQUIRE_MAIN_APP_SSO: 'false', DATABASE_URL: '',
       TEMP_ASSET_SIGNING_SECRET: 'mixtoken-test-assets', VIDEO_SITE_SESSION_SECRET: 'mixtoken-test-session',
       MIXTOKEN_API_BASE_URL: `${upstreamUrl}/v1/`, MIXTOKEN_API_KEY: 'mixtoken-test-key',
+      FAL_KEY: '', FAL_GPT_IMAGE2_API_KEY: '',
       GPT_IMAGE2_VIP_API_BASE_URL: upstreamUrl, GPT_IMAGE2_VIP_API_KEY: 'vip-test-key',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -107,11 +108,11 @@ test('Mixtoken route isolates credentials and supports generations, edits, valid
 
   const reference = 'data:image/png;base64,aGVsbG8='
   assert.equal((await post({ prompt: 'Make it blue', image: [reference] })).status, 200)
-  assert.equal(requests[1].url, '/v1/images/edits')
-  const form = await new Response(requests[1].body, { headers: requests[1].headers }).formData()
-  assert.equal(form.get('model'), 'gpt-image-2.5')
-  assert.equal(form.get('prompt'), 'Make it blue')
-  assert.equal(await form.get('image').text(), 'hello')
+  assert.equal(requests[1].url, '/v1/images/generations')
+  const editBody = JSON.parse(requests[1].body)
+  assert.equal(editBody.model, 'gpt-image-2.5')
+  assert.equal(editBody.prompt, 'Make it blue')
+  assert.deepEqual(editBody.image, [reference])
 
   const beforeInvalid = requests.length
   assert.equal((await post({ prompt: '' })).status, 400)
@@ -160,12 +161,12 @@ test('Mixtoken route isolates credentials and supports generations, edits, valid
       if (expectedStatus === 200) assert.equal(result.headers.get('x-image-model'), expectedModels.at(-1))
       for (const request of attempts) {
         assert.equal(request.headers.authorization, 'Bearer mixtoken-test-key')
-        assert.equal(request.url, edit ? '/v1/images/edits' : '/v1/images/generations')
+        assert.equal(request.url, '/v1/images/generations')
         if (edit) {
-          const form = await new Response(request.body, { headers: request.headers }).formData()
-          assert.equal(await form.get('image').text(), 'hello')
-          assert.equal(form.get('prompt'), 'Draw a circle')
-          assert.equal(form.get('size'), '1024x1024')
+          const editBody = JSON.parse(request.body)
+          assert.deepEqual(editBody.image, [reference])
+          assert.equal(editBody.prompt, 'Draw a circle')
+          assert.equal(editBody.size, '1024x1024')
         } else {
           assert.equal(JSON.parse(request.body).prompt, 'Draw a circle')
         }

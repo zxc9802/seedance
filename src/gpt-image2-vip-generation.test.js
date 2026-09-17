@@ -50,7 +50,7 @@ test('gpt-image2-vip backend switches between JSON generations and multipart edi
   assert.match(serverSource, /process\.env\.GPT_IMAGE2_VIP_API_BASE_URL/)
   assert.match(serverSource, /process\.env\.GPT_IMAGE2_VIP_API_KEY/)
   assert.match(serverSource, /app\.post\('\/api\/gpt-image2-vip\/generations', handleGptImage2VipGenerateRequest\)/)
-  assert.match(serverSource, /\/v1\/images\/\$\{isImageEdit \? 'edits' : 'generations'\}/)
+  assert.match(serverSource, /\/v1\/images\/\$\{isImageEdit && !isMixtoken \? 'edits' : 'generations'\}/)
   assert.match(serverSource, /formData\.append\('model', body\.model\)/)
   assert.match(serverSource, /formData\.append\('size', body\.size\)/)
   assert.match(serverSource, /formData\.append\(\s*'image'/s)
