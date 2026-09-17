@@ -21,6 +21,7 @@ import { createSeedanceRelayRouter } from './relay/api.js'
 import { createApiKeyAuthenticator, findStoredRelayApiKey } from './relay/apiKeys.js'
 import { createPostgresRelayRepository } from './relay/postgresRepository.js'
 import { resolveSeedanceUpstreamConfig } from './relay/upstreamCredentials.js'
+import { generateFalGptImage25 } from './integrations/falGptImage25.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -46,6 +47,7 @@ const imageApiBaseUrl = normalizeGeminiImageBaseUrl(process.env.IMAGE_API_BASE_U
 const imageAggregationApiBaseUrl = stripTrailingSlash(process.env.IMAGE_AGGREGATION_API_BASE_URL || process.env.VIDEO_API_BASE_URL || 'http://8.137.157.96:9220')
 const gptImage2ApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_API_BASE_URL || 'https://yunwu.ai')
 const gptImage2VipApiBaseUrl = stripTrailingSlash(process.env.GPT_IMAGE2_VIP_API_BASE_URL || 'https://api.apiyi.com')
+const mixtokenApiBaseUrl = stripTrailingSlash(process.env.MIXTOKEN_API_BASE_URL || 'https://api.mixtoken.ai/v1').replace(/\/v1$/, '')
 const kieGptImage2ApiBaseUrl = stripTrailingSlash(process.env.KIE_GPT_IMAGE2_API_BASE_URL || 'https://api.kie.ai')
 const falGptImage2ApiBaseUrl = stripTrailingSlash(process.env.FAL_GPT_IMAGE2_API_BASE_URL || 'https://queue.fal.run')
 const bcaiApiUrl = normalizeChatCompletionsUrl(process.env.BCAI_API_URL || process.env.BCAI_API_BASE_URL || 'https://bcai.online/v1/chat/completions')
@@ -827,6 +829,8 @@ app.post('/api/image/chat/completions', handleGeminiImageGenerateRequest)
 app.post('/api/image/generate-content', handleGeminiImageGenerateRequest)
 app.post('/api/gpt-image2/generations', handleGptImage2GenerateRequest)
 app.post('/api/gpt-image2-vip/generations', handleGptImage2VipGenerateRequest)
+app.post('/api/gpt-image-2.5/generations', handleGptImage2VipGenerateRequest)
+app.post('/api/gpt-image-2.5-sunburst/generations', handleGptImage2VipGenerateRequest)
 app.post('/api/kie/gpt-image2/generate', handleKieGptImage2GenerateRequest)
 app.post('/api/kie/gpt-image2/query', handleKieGptImage2QueryRequest)
 app.post('/api/fal/gpt-image2/generate', handleFalGptImage2GenerateRequest)
@@ -999,11 +1003,15 @@ async function handleGptImage2GenerateRequest(req, res) {
 }
 
 async function handleGptImage2VipGenerateRequest(req, res) {
-  const apiKey = process.env.GPT_IMAGE2_VIP_API_KEY?.trim()
-  if (!apiKey) {
+  const isSunburst = req.route.path === '/api/gpt-image-2.5-sunburst/generations'
+  const isMixtoken = isSunburst || req.route.path === '/api/gpt-image-2.5/generations'
+  const providerId = isSunburst ? 'gpt-image-2.5-sunburst' : isMixtoken ? 'gpt-image-2.5' : 'gpt-image2-vip'
+  const apiKey = isMixtoken ? process.env.MIXTOKEN_API_KEY?.trim() : process.env.GPT_IMAGE2_VIP_API_KEY?.trim()
+  const falKey = isMixtoken && (process.env.FAL_KEY?.trim() || process.env.FAL_GPT_IMAGE2_API_KEY?.trim())
+  if (!apiKey && !falKey) {
     res.status(500).json({
       error: {
-        message: 'Missing backend config: GPT_IMAGE2_VIP_API_KEY',
+        message: `Missing backend config: ${isMixtoken ? 'FAL_KEY / FAL_GPT_IMAGE2_API_KEY / MIXTOKEN_API_KEY' : 'GPT_IMAGE2_VIP_API_KEY'}`,
         type: 'config_error',
       },
     })
@@ -1011,7 +1019,7 @@ async function handleGptImage2VipGenerateRequest(req, res) {
   }
 
   const body = req.body || {}
-  const upstreamBody = normalizeGptImage2VipGenerateBody(body)
+  const upstreamBody = normalizeGptImage2VipGenerateBody(isMixtoken ? { ...body, model: providerId } : body)
   if (!upstreamBody.prompt) {
     res.status(400).json({
       error: {
@@ -1025,7 +1033,7 @@ async function handleGptImage2VipGenerateRequest(req, res) {
   if (upstreamBody.image.length > 3) {
     res.status(400).json({
       error: {
-        message: 'gpt-image2-vip supports at most 3 reference images',
+        message: `${providerId} supports at most 3 reference images`,
         type: 'request_error',
       },
     })
@@ -1033,7 +1041,8 @@ async function handleGptImage2VipGenerateRequest(req, res) {
   }
 
   const isImageEdit = upstreamBody.image.length > 0
-  const upstreamUrl = `${gptImage2VipApiBaseUrl}/v1/images/${isImageEdit ? 'edits' : 'generations'}`
+  const apiBaseUrl = isMixtoken ? mixtokenApiBaseUrl : gptImage2VipApiBaseUrl
+  let upstreamUrl = `${apiBaseUrl}/v1/images/${isImageEdit && !isMixtoken ? 'edits' : 'generations'}`
   const upstreamHeaders = {
     Accept: 'application/json',
     Authorization: `Bearer ${apiKey}`,
@@ -1041,13 +1050,50 @@ async function handleGptImage2VipGenerateRequest(req, res) {
   const mediaSummary = parseUsageMediaSummaryHeader(req)
 
   try {
-    const result = isImageEdit
-      ? await fetchGptImage2VipEditResult(upstreamUrl, upstreamBody, upstreamHeaders)
-      : await fetchProxyJsonResult(req, upstreamUrl, {
-          model: upstreamBody.model,
-          prompt: upstreamBody.prompt,
-          ...(upstreamBody.size ? { size: upstreamBody.size } : {}),
-        }, upstreamHeaders)
+    if (isMixtoken) upstreamBody.image.forEach(decodeGptImage2VipReference)
+    const maxAttempts = isSunburst ? 5 : 1 // Initial Sunburst call, three retries, then one fallback.
+    let attempts = 0
+    let result
+    let falError = null
+    let imageProvider = isMixtoken ? 'mixtoken' : 'apiyi'
+    if (falKey) {
+      try {
+        const generated = await generateFalGptImage25(upstreamBody, { apiKey: falKey, baseUrl: falGptImage2ApiBaseUrl })
+        upstreamUrl = generated.endpoint
+        upstreamBody.model = generated.model
+        imageProvider = 'fal'
+        result = await readProxyResponseResult(Response.json({ data: generated.data, requestId: generated.requestId }))
+      } catch (error) {
+        if (!apiKey) throw error
+        falError = error.message
+      }
+    }
+    while (!result && attempts < maxAttempts) {
+      attempts += 1
+      if (isSunburst && attempts === 5) upstreamBody.model = 'gpt-image-2.5'
+      try {
+        result = isImageEdit && !isMixtoken
+          ? await fetchGptImage2VipEditResult(upstreamUrl, upstreamBody, upstreamHeaders)
+          : await fetchProxyJsonResult(req, upstreamUrl, {
+              model: upstreamBody.model,
+              prompt: upstreamBody.prompt,
+              ...(upstreamBody.size ? { size: upstreamBody.size } : {}),
+              ...(isMixtoken && isImageEdit ? { image: upstreamBody.image } : {}),
+            }, upstreamHeaders)
+        if (!isSunburst || (result.response.ok && extractImageResponseResult(result.parsedPayload, upstreamBody.prompt))) break
+        if (attempts < maxAttempts) result = null
+      } catch (error) {
+        if (attempts === maxAttempts) throw error
+      }
+      if (attempts < maxAttempts) await sleep(1000)
+    }
+    if (isMixtoken && result.response.ok && !extractImageResponseResult(result.parsedPayload, upstreamBody.prompt)) {
+      throw createHttpError(502, buildImageResponseParseError(result.parsedPayload))
+    }
+    if (isMixtoken) {
+      res.setHeader('X-Image-Model', upstreamBody.model)
+      res.setHeader('X-Image-Provider', imageProvider)
+    }
 
     await sendProxyJsonResult(
       res,
@@ -1062,7 +1108,7 @@ async function handleGptImage2VipGenerateRequest(req, res) {
         insertUsageLog({
           session: req.videoSiteSession,
           channel: 'image',
-          providerId: body.providerId || 'gpt-image2-vip',
+          providerId: isMixtoken ? providerId : body.providerId || providerId,
           model: upstreamBody.model,
           generationMode: isImageEdit ? 'image-to-image' : 'text-to-image',
           prompt: upstreamBody.prompt,
@@ -1070,6 +1116,8 @@ async function handleGptImage2VipGenerateRequest(req, res) {
           sampleCount: 1,
           requestParams: attachUsageMediaSummary({
             model: upstreamBody.model,
+            ...(isSunburst ? { requestedModel: providerId, attempts: attempts + (falKey ? 1 : 0) } : {}),
+            ...(isMixtoken ? { imageProvider, ...(imageProvider === 'fal' ? { quality: 'high' } : {}), ...(falError ? { falError } : {}) } : {}),
             size: upstreamBody.size || null,
             mediaCounts: { images: upstreamBody.image.length, videos: 0, audios: 0 },
           }, mediaSummary),
@@ -1080,14 +1128,14 @@ async function handleGptImage2VipGenerateRequest(req, res) {
           errorMessage,
         }).catch(() => {})
       },
-      { attempts: 1 },
+      { attempts: attempts + (falKey ? 1 : 0) },
     )
   } catch (error) {
     const statusCode = Number(error.statusCode) || 502
     applyUpstreamTraceHeaders(res, error)
     res.status(statusCode).json({
       error: {
-        message: error.message || 'gpt-image2-vip upstream request failed',
+        message: error.message || `${providerId} upstream request failed`,
         type: statusCode < 500 ? 'request_error' : 'upstream_error',
       },
     })

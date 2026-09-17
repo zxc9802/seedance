@@ -1,5 +1,22 @@
 # Seedance Studio
 
+## GPT Image 2.5
+
+Both `gpt-image-2.5` and `gpt-image-2.5-sunburst` prefer fal.ai Sunburst with
+`quality: high`. The server submits to `openai/gpt-image-2.5/sunburst/text-to-image`
+or `/edit` when reference images are present, then polls the task URLs returned
+by fal. A completed queue task must contain an image before it counts as success.
+
+Set the server environment variable `FAL_KEY` and redeploy. The existing
+`FAL_GPT_IMAGE2_API_KEY` is also accepted when `FAL_KEY` is empty; keys are never
+sent to the frontend. The separate GPT Image 2 Medium model is unchanged.
+
+If fal fails or no fal key is configured, `MIXTOKEN_API_KEY` enables the existing
+Mixtoken fallback: the Sunburst selector tries Mixtoken Sunburst four times,
+then GPT Image 2.5 once; the GPT Image 2.5 selector tries that model once.
+Mixtoken reference images use JSON `image` on `/v1/images/generations`.
+`X-Image-Provider`, `X-Image-Model`, and usage records identify the actual backend.
+
 ## Seedance 2.0 relay API
 
 The server exposes a small API-key relay on `/v1`. It reuses the configured
