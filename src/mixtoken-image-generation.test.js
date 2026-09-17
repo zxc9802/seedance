@@ -1,3 +1,4 @@
+import { postImageAndWait } from './testHelpers/imageJobs.js'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
@@ -96,9 +97,7 @@ test('Mixtoken route isolates credentials and supports generations, edits, valid
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
   assert.ok(ready, logs)
-  const post = (body, route = '/api/gpt-image-2.5/generations') => fetch(`${url}${route}`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-  })
+  const post = (body, route = '/api/gpt-image-2.5/generations') => postImageAndWait(`${url}${route}`, body)
   const response = await post({ prompt: 'Draw a circle', model: 'wrong-model', providerId: 'gpt-image2-vip', size: '1024x1024' })
   assert.equal(response.status, 200)
   assert.deepEqual((await response.json()).data, [{ b64_json: 'aW1hZ2U=' }])

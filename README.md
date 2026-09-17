@@ -15,7 +15,18 @@ If fal fails or no fal key is configured, `MIXTOKEN_API_KEY` enables the existin
 Mixtoken fallback: the Sunburst selector tries Mixtoken Sunburst four times,
 then GPT Image 2.5 once; the GPT Image 2.5 selector tries that model once.
 Mixtoken reference images use JSON `image` on `/v1/images/generations`.
-`X-Image-Provider`, `X-Image-Model`, and usage records identify the actual backend.
+Both generation endpoints return HTTP `202` immediately with `jobId`, `status`
+and `pollUrl`. Query `GET /api/gpt-image-2.5/jobs/:jobId` with the same logged-in
+account. Status is `queued`, `processing`, `completed` (with `result`) or `failed`
+(with `error`). The frontend polls every two seconds; queries never submit a new
+paid generation. Fal and any Mixtoken fallback share the same job ID.
+
+`result.provider`, `result.model`, the query response headers `X-Image-Provider`
+and `X-Image-Model`, and usage records identify the actual backend. Jobs are held
+in the current server process, with results retained for 30 minutes. This targets
+the existing single-instance deployment; a restart clears jobs and queries return
+404. Each worker has a 12-minute deadline. No new database or environment variable
+is required.
 
 ## Seedance 2.0 relay API
 

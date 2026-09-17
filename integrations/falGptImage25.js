@@ -5,6 +5,7 @@ export async function generateFalGptImage25({ prompt, size, image = [] }, {
   baseUrl = 'https://queue.fal.run',
   timeoutMs = 360_000,
   pollIntervalMs = 1500,
+  signal,
 }) {
   const model = `openai/gpt-image-2.5/sunburst/${image.length ? 'edit' : 'text-to-image'}`
   const endpoint = `${baseUrl}/${model}`
@@ -22,7 +23,9 @@ export async function generateFalGptImage25({ prompt, size, image = [] }, {
       ...init,
       headers: { Authorization: `Key ${apiKey}`, 'Content-Type': 'application/json' },
       redirect: 'error',
-      signal: AbortSignal.timeout(Math.min(30_000, remaining)),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(Math.min(30_000, remaining))])
+        : AbortSignal.timeout(Math.min(30_000, remaining)),
     })
     const payload = await response.json().catch(() => ({}))
     if (!response.ok || payload.error) {
