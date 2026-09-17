@@ -22,6 +22,7 @@ import { createApiKeyAuthenticator, findStoredRelayApiKey } from './relay/apiKey
 import { createPostgresRelayRepository } from './relay/postgresRepository.js'
 import { resolveSeedanceUpstreamConfig } from './relay/upstreamCredentials.js'
 import { generateFalGptImage25 } from './integrations/falGptImage25.js'
+import { startImageGenerationJob, getImageGenerationJob } from './integrations/imageGenerationJobs.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -831,6 +832,20 @@ app.post('/api/gpt-image2/generations', handleGptImage2GenerateRequest)
 app.post('/api/gpt-image2-vip/generations', handleGptImage2VipGenerateRequest)
 app.post('/api/gpt-image-2.5/generations', handleGptImage2VipGenerateRequest)
 app.post('/api/gpt-image-2.5-sunburst/generations', handleGptImage2VipGenerateRequest)
+app.get('/api/gpt-image-2.5/jobs/:jobId', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  const ownerId = imageJobOwnerId(req)
+  const job = ownerId && getImageGenerationJob(req.params.jobId, ownerId)
+  if (!job) {
+    res.status(404).json({ error: { message: '图片任务不存在、已过期或服务已重启，请重新生成。' } })
+    return
+  }
+  if (job.result) {
+    res.setHeader('X-Image-Model', job.result.model)
+    res.setHeader('X-Image-Provider', job.result.provider)
+  }
+  res.json(job)
+})
 app.post('/api/kie/gpt-image2/generate', handleKieGptImage2GenerateRequest)
 app.post('/api/kie/gpt-image2/query', handleKieGptImage2QueryRequest)
 app.post('/api/fal/gpt-image2/generate', handleFalGptImage2GenerateRequest)
@@ -1049,8 +1064,7 @@ async function handleGptImage2VipGenerateRequest(req, res) {
   }
   const mediaSummary = parseUsageMediaSummaryHeader(req)
 
-  try {
-    if (isMixtoken) upstreamBody.image.forEach(decodeGptImage2VipReference)
+  async function generate(jobId, signal) {
     const maxAttempts = isSunburst ? 5 : 1 // Initial Sunburst call, three retries, then one fallback.
     let attempts = 0
     let result
@@ -1058,13 +1072,13 @@ async function handleGptImage2VipGenerateRequest(req, res) {
     let imageProvider = isMixtoken ? 'mixtoken' : 'apiyi'
     if (falKey) {
       try {
-        const generated = await generateFalGptImage25(upstreamBody, { apiKey: falKey, baseUrl: falGptImage2ApiBaseUrl })
+        const generated = await generateFalGptImage25(upstreamBody, { apiKey: falKey, baseUrl: falGptImage2ApiBaseUrl, signal })
         upstreamUrl = generated.endpoint
         upstreamBody.model = generated.model
         imageProvider = 'fal'
         result = await readProxyResponseResult(Response.json({ data: generated.data, requestId: generated.requestId }))
       } catch (error) {
-        if (!apiKey) throw error
+        if (!apiKey || signal?.aborted) throw error
         falError = error.message
       }
     }
@@ -1079,57 +1093,73 @@ async function handleGptImage2VipGenerateRequest(req, res) {
               prompt: upstreamBody.prompt,
               ...(upstreamBody.size ? { size: upstreamBody.size } : {}),
               ...(isMixtoken && isImageEdit ? { image: upstreamBody.image } : {}),
-            }, upstreamHeaders)
+            }, upstreamHeaders, signal)
         if (!isSunburst || (result.response.ok && extractImageResponseResult(result.parsedPayload, upstreamBody.prompt))) break
         if (attempts < maxAttempts) result = null
       } catch (error) {
-        if (attempts === maxAttempts) throw error
+        if (attempts === maxAttempts || signal?.aborted) throw error
       }
       if (attempts < maxAttempts) await sleep(1000)
     }
     if (isMixtoken && result.response.ok && !extractImageResponseResult(result.parsedPayload, upstreamBody.prompt)) {
       throw createHttpError(502, buildImageResponseParseError(result.parsedPayload))
     }
-    if (isMixtoken) {
-      res.setHeader('X-Image-Model', upstreamBody.model)
-      res.setHeader('X-Image-Provider', imageProvider)
+    const { parsedPayload: payload, traceMetadata } = result
+    const status = result.response.status
+    const url = upstreamUrl
+    const imageResult = status < 400 ? extractImageResponseResult(payload, upstreamBody.prompt) : null
+    const errorMessage = status >= 400
+      ? (payload?.error?.message || payload?.message || null)
+      : (imageResult ? null : buildImageResponseParseError(payload))
+
+    insertUsageLog({
+      session: req.videoSiteSession,
+      channel: 'image',
+      providerId: isMixtoken ? providerId : body.providerId || providerId,
+      model: upstreamBody.model,
+      generationMode: isImageEdit ? 'image-to-image' : 'text-to-image',
+      prompt: upstreamBody.prompt,
+      resolution: upstreamBody.size || null,
+      sampleCount: 1,
+      requestParams: attachUsageMediaSummary({
+        model: upstreamBody.model,
+        ...(isSunburst ? { requestedModel: providerId, attempts: attempts + (falKey ? 1 : 0) } : {}),
+        ...(isMixtoken ? { imageProvider, ...(imageProvider === 'fal' ? { quality: 'high' } : {}), ...(falError ? { falError } : {}) } : {}),
+        size: upstreamBody.size || null,
+        mediaCounts: { images: upstreamBody.image.length, videos: 0, audios: 0 },
+      }, mediaSummary),
+      engineTaskId: jobId || null,
+      upstreamRequestId: traceMetadata?.requestId || null,
+      upstreamTraceId: traceMetadata?.traceId || null,
+      upstreamUrl: url,
+      status: imageResult ? 'succeeded' : 'failed',
+      errorMessage,
+    }).catch(() => {})
+    if (isMixtoken && !result.response.ok) {
+      throw createHttpError(status, payload?.error?.message || payload?.message || '图片生成失败', traceMetadata)
     }
+    return { result, upstreamUrl, model: upstreamBody.model, provider: imageProvider, attempts: attempts + (falKey ? 1 : 0) }
+  }
 
-    await sendProxyJsonResult(
-      res,
-      upstreamUrl,
-      result,
-      ({ payload, traceMetadata, status, url }) => {
-        const imageResult = status < 400 ? extractImageResponseResult(payload, upstreamBody.prompt) : null
-        const errorMessage = status >= 400
-          ? (payload?.error?.message || payload?.message || null)
-          : (imageResult ? null : buildImageResponseParseError(payload))
-
-        insertUsageLog({
-          session: req.videoSiteSession,
-          channel: 'image',
-          providerId: isMixtoken ? providerId : body.providerId || providerId,
-          model: upstreamBody.model,
-          generationMode: isImageEdit ? 'image-to-image' : 'text-to-image',
-          prompt: upstreamBody.prompt,
-          resolution: upstreamBody.size || null,
-          sampleCount: 1,
-          requestParams: attachUsageMediaSummary({
-            model: upstreamBody.model,
-            ...(isSunburst ? { requestedModel: providerId, attempts: attempts + (falKey ? 1 : 0) } : {}),
-            ...(isMixtoken ? { imageProvider, ...(imageProvider === 'fal' ? { quality: 'high' } : {}), ...(falError ? { falError } : {}) } : {}),
-            size: upstreamBody.size || null,
-            mediaCounts: { images: upstreamBody.image.length, videos: 0, audios: 0 },
-          }, mediaSummary),
-          upstreamRequestId: traceMetadata?.requestId || null,
-          upstreamTraceId: traceMetadata?.traceId || null,
-          upstreamUrl: url,
-          status: imageResult ? 'succeeded' : 'failed',
-          errorMessage,
-        }).catch(() => {})
-      },
-      { attempts: attempts + (falKey ? 1 : 0) },
-    )
+  try {
+    if (isMixtoken) {
+      upstreamBody.image.forEach(decodeGptImage2VipReference)
+      const ownerId = imageJobOwnerId(req)
+      if (!ownerId) throw createHttpError(401, '无法识别当前账号，请重新登录。')
+      const job = startImageGenerationJob(ownerId, async (jobId, signal) => {
+        const output = await generate(jobId, signal)
+        return {
+          ...injectUpstreamTraceMetadata(output.result.parsedPayload, output.result.traceMetadata),
+          model: output.model,
+          provider: output.provider,
+        }
+      })
+      res.setHeader('Cache-Control', 'no-store')
+      res.status(202).json({ ...job, pollUrl: `/api/gpt-image-2.5/jobs/${job.jobId}` })
+      return
+    }
+    const output = await generate()
+    await sendProxyJsonResult(res, output.upstreamUrl, output.result, null, { attempts: output.attempts })
   } catch (error) {
     const statusCode = Number(error.statusCode) || 502
     applyUpstreamTraceHeaders(res, error)
@@ -1140,6 +1170,12 @@ async function handleGptImage2VipGenerateRequest(req, res) {
       },
     })
   }
+}
+
+function imageJobOwnerId(req) {
+  const user = req.videoSiteSession?.user
+  const id = user && (user.id || user.userId || user.uid || user.uuid || user.memberId || user.account || user.email)
+  return id ? String(id) : requireMainAppSso ? null : 'local-development'
 }
 
 async function fetchGptImage2VipEditResult(url, body, headers) {
@@ -3968,7 +4004,7 @@ async function proxyJsonWithBody(req, res, url, body, extraHeaders = {}, onRespo
   sendProxyError(res, finalError)
 }
 
-async function fetchProxyJsonResult(req, url, body, extraHeaders) {
+async function fetchProxyJsonResult(req, url, body, extraHeaders, signal) {
   const response = await fetch(url, {
     method: req.method,
     headers: {
@@ -3976,6 +4012,7 @@ async function fetchProxyJsonResult(req, url, body, extraHeaders) {
       ...extraHeaders,
     },
     body: JSON.stringify(body),
+    signal,
   })
 
   return readProxyResponseResult(response)

@@ -17,6 +17,7 @@ import PromptInput from './components/PromptInput'
 import ParameterPanel from './components/ParameterPanel'
 import VideoPreview from './components/VideoPreview'
 import './App.css'
+import { pollImageGenerationJob } from './imageGenerationJobs'
 
 const VIDEO_PROVIDERS = new Set(
   PROVIDER_ORDER.filter((key) => (PROVIDERS[key].outputType || 'video') === 'video')
@@ -971,7 +972,10 @@ function App() {
             throw new Error(await formatHttpError(response))
           }
 
-          const data = await response.json()
+          const submitted = await response.json()
+          const data = response.status === 202
+            ? await pollImageGenerationJob(submitted.jobId)
+            : submitted
           window.clearInterval(progressTimer)
           const imageResults = parseImageChatResponses(data, finalPrompt)
           if (imageResults.length > 0) {

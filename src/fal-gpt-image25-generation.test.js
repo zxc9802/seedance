@@ -1,3 +1,4 @@
+import { postImageAndWait } from './testHelpers/imageJobs.js'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
@@ -86,9 +87,12 @@ async function fixture(t, overrides = {}) {
   assert.ok(ready, logs)
   return {
     baseUrl, requests,
-    post: (body, provider = 'gpt-image-2.5') => fetch(`${url}/api/${provider}/generations`, {
+    post: (body, provider = 'gpt-image-2.5') => postImageAndWait(`${url}/api/${provider}/generations`, body),
+    submit: (body) => fetch(`${url}/api/gpt-image-2.5/generations`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
     }),
+    poll: (pollUrl) => fetch(new URL(pollUrl, url)),
+    completeTasks: () => { for (const task of tasks.values()) task.prompt = 'Poster' },
   }
 }
 
@@ -165,4 +169,32 @@ test('existing FAL_GPT_IMAGE2_API_KEY is supported when FAL_KEY is empty', async
   const { post, requests } = await fixture(t, { FAL_KEY: '' })
   assert.equal((await post({ prompt: 'Poster' })).status, 200)
   assert.ok(requests.every((call) => call.headers.authorization === 'Key legacy-fal-key'))
+})
+
+
+test('HTTP submission returns a job ID while fal is still running; GET polls never create another generation', async (t) => {
+  const { submit, poll, completeTasks, requests } = await fixture(t)
+  const response = await submit({ prompt: 'wait forever' })
+  assert.equal(response.status, 202)
+  const submitted = await response.json()
+  assert.equal(submitted.status, 'queued')
+  assert.ok(submitted.jobId)
+  for (let i = 0; i < 3; i++) {
+    const job = await (await poll(submitted.pollUrl)).json()
+    assert.equal(job.status, 'processing')
+    assert.equal(job.result, undefined)
+    assert.equal(job.ownerId, undefined)
+  }
+  completeTasks()
+  let final
+  for (let i = 0; i < 60; i++) {
+    final = await (await poll(submitted.pollUrl)).json()
+    if (final.status === 'completed') break
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  assert.equal(final.status, 'completed')
+  assert.equal(final.result.provider, 'fal')
+  assert.equal(final.result.model, 'openai/gpt-image-2.5/sunburst/text-to-image')
+  assert.equal(requests.filter((req) => req.body).length, 1)
+  assert.equal((await poll('/api/gpt-image-2.5/jobs/nonexistent')).status, 404)
 })
