@@ -36,7 +36,7 @@ test('seedance1 exposes Seedance 2.5 on the same channel', async () => {
 
   assert.ok(seedance1.models.some((model) => (
     model.value === seedance25Model
-      && model.label === 'Seedance 2.5'
+      && model.label === '起芽·影创（旗舰）'
   )))
   assert.equal(seedance1.modelMaterialTypeDefaults?.[seedance25Model], 'role')
   assert.deepEqual(seedance1.modelReferenceLimits?.[seedance25Model], {

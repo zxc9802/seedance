@@ -20,9 +20,9 @@ const BASE_PROVIDERS = {
     vendor: '聚合 API',
     color: '#2563eb',
     models: [
-      { value: 'doubao-seedance-2-0-260128', label: 'seedance2', tag: '已接入' },
-      { value: 'doubao-seedance-2-0-fast-260128', label: 'Seedance 2 Fast', tag: 'Fast' },
-      { value: 'doubao-seedance-2-5-260628', label: 'Seedance 2.5', tag: '新' },
+      { value: 'doubao-seedance-2-0-260128', label: '起芽·影创（标准）' },
+      { value: 'doubao-seedance-2-0-fast-260128', label: '起芽·影创（极速）' },
+      { value: 'doubao-seedance-2-5-260628', label: '起芽·影创（旗舰）' },
     ],
     aspectRatios: ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'],
     resolutions: {
