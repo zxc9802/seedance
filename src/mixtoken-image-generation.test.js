@@ -18,12 +18,14 @@ for (const model of ['gpt-image-2.5', 'gpt-image-2.5-sunburst']) {
   test(`${model} is selectable under Image and builds its own backend request`, async () => {
     const { MODEL_TYPES, PROVIDERS } = await loadModelConfig()
     const provider = PROVIDERS[model]
+    const name = model.endsWith('sunburst') ? '起芽·臻绘' : '起芽·精绘'
+    const tier = model.endsWith('sunburst') ? '旗舰' : '均衡'
     assert.ok(provider, `${model} must be registered`)
     assert.ok(MODEL_TYPES.image.providers.includes(provider.id))
-    assert.equal(provider.selectorLabel, model)
-    assert.equal(provider.name, model)
+    assert.equal(provider.selectorLabel, `${name}（${tier}）`)
+    assert.equal(provider.name, name)
     assert.equal(provider.defaults.model, model)
-    assert.equal(MODEL_TYPES.image.providers[0], 'gpt-image-2.5-sunburst')
+    assert.deepEqual(MODEL_TYPES.image.providers, ['gemini-image-aggregation', 'gpt-image-2.5', 'gpt-image-2.5-sunburst'])
 
     const source = await readFile('src/App.jsx', 'utf8')
     const names = ['isGptImage2Provider', 'isGptImage2VipProvider', 'buildGptImage2Request', 'resolveImageSizeForParams', 'buildGptImage2Prompt']

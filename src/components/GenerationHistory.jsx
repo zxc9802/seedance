@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, History, Image as ImageIcon, Loader2, Video, X } from 'lucide-react'
+import { PROVIDERS } from '../modelConfig'
 import './GenerationHistory.css'
 
 export default function GenerationHistory({
@@ -53,7 +54,7 @@ export default function GenerationHistory({
                       <span className="generation-history-prompt">{entry.promptSummary}</span>
                     </span>
                     <span className="generation-history-meta">
-                      <span>{entry.provider}</span>
+                      <span>{PROVIDERS[entry.provider]?.selectorLabel || entry.provider}</span>
                       {entry.paramsSummary?.aspectRatio && <span>{entry.paramsSummary.aspectRatio}</span>}
                       {entry.paramsSummary?.duration && <span>{entry.paramsSummary.duration}s</span>}
                       <span>

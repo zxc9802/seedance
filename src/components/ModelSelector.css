@@ -79,6 +79,13 @@
   pointer-events: none;
 }
 
+.model-selector-description {
+  margin: 10px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 @media (max-width: 640px) {
   .model-selector-head {
     align-items: center;

@@ -1,4 +1,4 @@
-import { YUNWU_PROVIDER_ORDER, YUNWU_PROVIDERS } from './yunwuProviders'
+import { YUNWU_PROVIDERS } from './yunwuProviders'
 
 const IMAGE_PROVIDER_NAME = readClientEnv('VITE_IMAGE_PROVIDER_NAME', 'nanobanana1')
 const IMAGE_PROVIDER_SELECTOR_LABEL = readClientEnv('VITE_IMAGE_PROVIDER_SELECTOR_LABEL', 'nanobanana1')
@@ -6,20 +6,17 @@ const IMAGE_PROVIDER_VENDOR = readClientEnv('VITE_IMAGE_PROVIDER_VENDOR', 'Gemin
 const IMAGE_MODEL_ID = readClientEnv('VITE_IMAGE_MODEL_ID', 'gemini-3.1-flash-image-preview')
 const IMAGE_MODEL_LABEL = readClientEnv('VITE_IMAGE_MODEL_LABEL', 'Gemini 3.1 Flash')
 const IMAGE_MODEL_TAG = readClientEnv('VITE_IMAGE_MODEL_TAG', 'native')
-const IMAGE_AGGREGATION_PROVIDER_NAME = readClientEnv('VITE_IMAGE_AGGREGATION_PROVIDER_NAME', 'nanobanana2')
-const IMAGE_AGGREGATION_PROVIDER_SELECTOR_LABEL = readClientEnv('VITE_IMAGE_AGGREGATION_PROVIDER_SELECTOR_LABEL', 'nanobanana2')
 const IMAGE_AGGREGATION_PROVIDER_VENDOR = readClientEnv('VITE_IMAGE_AGGREGATION_PROVIDER_VENDOR', 'AI Aggregation')
 const IMAGE_AGGREGATION_MODEL_ID = readClientEnv('VITE_IMAGE_AGGREGATION_MODEL_ID', 'gemini-3.1-flash-image-preview')
-const IMAGE_AGGREGATION_MODEL_LABEL = readClientEnv('VITE_IMAGE_AGGREGATION_MODEL_LABEL', 'Gemini 3.1 Flash')
-const IMAGE_AGGREGATION_MODEL_TAG = readClientEnv('VITE_IMAGE_AGGREGATION_MODEL_TAG', 'aggregation')
 
 const BASE_PROVIDERS = {
   veo: {
     id: 'veo',
     typeId: 'seedance',
-    typeLabel: 'Seedance',
-    selectorLabel: 'seedance1',
-    name: 'Seedance 1',
+    typeLabel: '视频模型',
+    selectorLabel: '起芽·影创',
+    name: '起芽·影创',
+    description: '用文字或参考素材创作视频，支持首尾帧与融合参考。',
     vendor: '聚合 API',
     color: '#2563eb',
     models: [
@@ -459,14 +456,15 @@ const BASE_PROVIDERS = {
   'gpt-image-2.5': {
     id: 'gpt-image-2.5',
     typeId: 'image',
-    typeLabel: 'Image',
-    selectorLabel: 'gpt-image-2.5',
-    name: 'gpt-image-2.5',
+    typeLabel: '图像模型',
+    selectorLabel: '起芽·精绘（均衡）',
+    name: '起芽·精绘',
+    description: '速度与画质均衡，适合日常创作。',
     vendor: 'fal.ai',
     color: '#0f9f7a',
     outputType: 'image',
     models: [
-      { value: 'gpt-image-2.5', label: 'gpt-image-2.5', tag: 'High' },
+      { value: 'gpt-image-2.5', label: '起芽·精绘', tag: '均衡' },
     ],
     aspectRatios: ['1:1', '16:9', '9:16', '3:4'],
     resolutions: { default: ['1024x1024', '1536x864', '864x1536', '1152x1536'] },
@@ -624,17 +622,18 @@ const BASE_PROVIDERS = {
   'gemini-image-aggregation': {
     id: 'gemini-image-aggregation',
     typeId: 'image',
-    typeLabel: 'Image',
-    selectorLabel: IMAGE_AGGREGATION_PROVIDER_SELECTOR_LABEL,
-    name: IMAGE_AGGREGATION_PROVIDER_NAME,
+    typeLabel: '图像模型',
+    selectorLabel: '起芽·闪绘（极速）',
+    name: '起芽·闪绘',
+    description: '出图最快，画质基础，适合快速试稿。',
     vendor: IMAGE_AGGREGATION_PROVIDER_VENDOR,
     color: '#ef4444',
     outputType: 'image',
     models: [
       {
         value: IMAGE_AGGREGATION_MODEL_ID,
-        label: IMAGE_AGGREGATION_MODEL_LABEL,
-        tag: IMAGE_AGGREGATION_MODEL_TAG,
+        label: '起芽·闪绘',
+        tag: '极速',
       },
     ],
     aspectRatios: ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9', '1:4', '1:8', '4:1', '8:1'],
@@ -725,10 +724,11 @@ export const PROVIDERS = {
   'gpt-image-2.5-sunburst': {
     ...BASE_PROVIDERS['gpt-image-2.5'],
     id: 'gpt-image-2.5-sunburst',
-    selectorLabel: 'gpt-image-2.5-sunburst',
-    name: 'gpt-image-2.5-sunburst',
+    selectorLabel: '起芽·臻绘（旗舰）',
+    name: '起芽·臻绘',
+    description: '画质最佳，适合对细节要求高的成图。',
     models: [
-      { value: 'gpt-image-2.5-sunburst', label: 'gpt-image-2.5-sunburst', tag: 'High' },
+      { value: 'gpt-image-2.5-sunburst', label: '起芽·臻绘', tag: '旗舰' },
     ],
     defaults: {
       ...BASE_PROVIDERS['gpt-image-2.5'].defaults,
@@ -738,25 +738,12 @@ export const PROVIDERS = {
   ...YUNWU_PROVIDERS,
 }
 
-const BASE_PROVIDER_ORDER = [
+export const PROVIDER_ORDER = [
   'veo',
-  've31p',
-  'veo31fast',
-  'kling',
-  'wan1',
-  'gpt-image-2.5-sunburst',
-  'gemini-image',
-  'gpt-image2',
-  'gpt-image-2.5',
-  'gpt-image2-vip',
-  'gpt-image2-2',
-  'fal-gpt-image2-medium',
   'gemini-image-aggregation',
-  'claude1-copywriting',
-  'bcai-copywriting',
+  'gpt-image-2.5',
+  'gpt-image-2.5-sunburst',
 ]
-
-export const PROVIDER_ORDER = [...BASE_PROVIDER_ORDER, ...YUNWU_PROVIDER_ORDER]
 
 export const MODEL_TYPES = PROVIDER_ORDER.reduce((acc, providerId) => {
   const config = PROVIDERS[providerId]

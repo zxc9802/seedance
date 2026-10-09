@@ -1862,7 +1862,7 @@ function resolveAvailableModels(config, mode) {
 }
 
 function isSupportedProvider(value) {
-  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(PROVIDERS, value)
+  return typeof value === 'string' && PROVIDER_ORDER.includes(value)
 }
 
 function getSafeGenerationMode(provider, mode) {

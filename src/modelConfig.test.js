@@ -26,7 +26,7 @@ test('Seedance 1 exposes 480p and 720p resolution options while defaulting to 72
   assert.equal(providers.veo.defaults.imageMaterialType, 'role')
 })
 
-test('happyhorse exposes an open reference-image video provider locked to 720P', async () => {
+test('happyhorse retains its configuration but is hidden from the model selector', async () => {
   const { MODEL_TYPES, PROVIDERS, PROVIDER_ORDER } = await loadModelConfig()
   const provider = PROVIDERS.happyhorse
 
@@ -45,8 +45,8 @@ test('happyhorse exposes an open reference-image video provider locked to 720P',
   assert.deepEqual(provider.durations, [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
   assert.deepEqual(provider.maxReferenceImages, { ref: 10 })
   assert.deepEqual(provider.generationModes.map((mode) => mode.value), ['ref'])
-  assert.ok(PROVIDER_ORDER.includes('happyhorse'))
-  assert.deepEqual(MODEL_TYPES.happyhorse.providers, ['happyhorse'])
+  assert.ok(!PROVIDER_ORDER.includes('happyhorse'))
+  assert.equal(MODEL_TYPES.happyhorse, undefined)
 })
 
 test('gpt-image2 exposes Yunwu image generation parameters in the frontend config', async () => {

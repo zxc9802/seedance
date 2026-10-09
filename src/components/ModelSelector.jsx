@@ -33,6 +33,9 @@ export default function ModelSelector({ provider, onChange }) {
         </select>
         <ChevronDown size={16} className="model-selector-icon" />
       </div>
+      {currentProvider?.description && (
+        <p className="model-selector-description">{currentProvider.description}</p>
+      )}
     </section>
   )
 }
