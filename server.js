@@ -429,6 +429,19 @@ app.use(async (req, res, next) => {
   }
 })
 
+app.use((error, _, res, next) => {
+  if (error.code !== 'SSO_UNAVAILABLE') {
+    next(error)
+    return
+  }
+
+  res.status(503).json({
+    success: false,
+    code: error.code,
+    message: '主站登录验证暂时不可用，请稍后重试。',
+  })
+})
+
 app.post('/api/upload', upload.array('files', 32), async (req, res) => {
   const files = Array.isArray(req.files) ? req.files : []
   if (files.length === 0) {
@@ -7576,13 +7589,21 @@ async function validateVideoSiteSession(session) {
       headers: {
         Authorization: `Bearer ${session.token}`,
       },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(5000),
     })
 
-    return response.ok
+    if (response.ok) return true
+    if (response.status === 401 || response.status === 403) return false
+
+    console.error('[video-sso] Main-site session validation unavailable:', response.status)
   } catch (error) {
     console.error('[video-sso] Main-site session validation failed:', error)
-    return false
   }
+
+  const error = new Error('Main-site session validation is temporarily unavailable.')
+  error.code = 'SSO_UNAVAILABLE'
+  throw error
 }
 
 async function exchangeVideoSsoTicket(ticket, baseUrl) {
