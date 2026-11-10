@@ -7580,6 +7580,12 @@ async function requireFreshVideoSiteSession(req, res) {
   return null
 }
 
+function videoWorkbenchSsoHeaders(targetMainAppUrl) {
+  const secret = process.env.VIDEO_WORKBENCH_SSO_SECRET?.trim()
+  if (!secret || stripTrailingSlash(targetMainAppUrl) !== mainAppUrl) return {}
+  return { 'x-video-workbench-secret': secret }
+}
+
 async function validateVideoSiteSession(session) {
   if (!session?.token) return false
 
@@ -7588,6 +7594,7 @@ async function validateVideoSiteSession(session) {
     const response = await fetch(`${stripTrailingSlash(sessionMainAppUrl)}/api/sso/session`, {
       headers: {
         Authorization: `Bearer ${session.token}`,
+        ...videoWorkbenchSsoHeaders(sessionMainAppUrl),
       },
       redirect: 'manual',
       signal: AbortSignal.timeout(5000),
@@ -7611,7 +7618,9 @@ async function exchangeVideoSsoTicket(ticket, baseUrl) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...videoWorkbenchSsoHeaders(baseUrl),
     },
+    redirect: 'manual',
     body: JSON.stringify({ ticket }),
   })
 

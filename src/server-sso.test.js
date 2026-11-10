@@ -6,12 +6,13 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 import { once } from 'node:events'
 import express from 'express'
 
-async function startSsoTestServer(t, upstreamFetch) {
+async function startSsoTestServer(t, upstreamFetch, workbenchSecret) {
   const source = await fs.readFile(path.resolve('server.js'), 'utf8')
   const app = express()
   const bindings = {
     app,
     fetch: upstreamFetch,
+    process: { env: { VIDEO_WORKBENCH_SSO_SECRET: workbenchSecret } },
     Buffer,
     URL,
     AbortSignal,
@@ -113,6 +114,26 @@ test('the same session works again when main-site validation recovers', async (t
     assert.equal(response.status, 200)
     assert.equal(response.headers.get('set-cookie'), null)
   }
+})
+
+test('ticket exchange and session validation authenticate to the configured main site', async (t) => {
+  const calls = []
+  const secret = 'test-only-workbench-secret'
+  const request = await startSsoTestServer(t, async (url, options) => {
+    calls.push(url)
+    assert.equal(options.headers['x-video-workbench-secret'], secret)
+    assert.equal(options.redirect, 'manual')
+    if (url.endsWith('/exchange')) {
+      return Response.json({ data: { token: 'test-token', user: { id: 'test-user' }, redirectPath: '/' } })
+    }
+    return new Response(null, { status: 200 })
+  }, secret)
+  const launch = await request('/?ticket=example&mainApp=https://untrusted.example')
+  assert.equal(launch.status, 302)
+  assert.equal(launch.headers.get('location'), '/')
+  const session = await request('/api/session')
+  assert.equal(session.status, 200)
+  assert.deepEqual(calls, ['https://main.example/api/video-sso/exchange', 'https://main.example/api/sso/session'])
 })
 
 test('an explicitly revoked main-site session still clears the cookie and requires SSO', async (t) => {
