@@ -25,7 +25,7 @@ for (const model of ['gpt-image-2.5', 'gpt-image-2.5-sunburst']) {
     assert.equal(provider.selectorLabel, `${name}（${tier}）`)
     assert.equal(provider.name, name)
     assert.equal(provider.defaults.model, model)
-    assert.deepEqual(MODEL_TYPES.image.providers, ['gemini-image-aggregation', 'gpt-image-2.5', 'gpt-image-2.5-sunburst'])
+    assert.deepEqual(MODEL_TYPES.image.providers, ['gemini-image-aggregation', 'gpt-image-2.5', 'gpt-image-2.5-sunburst', 'nano-banana-2.1'])
 
     const source = await readFile('src/App.jsx', 'utf8')
     const names = ['isGptImage2Provider', 'isGptImage2VipProvider', 'buildGptImage2Request', 'resolveImageSizeForParams', 'buildGptImage2Prompt']

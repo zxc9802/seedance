@@ -1,5 +1,21 @@
 # Seedance Studio
 
+## Nano Banana 2.1
+
+The Image selector includes **起芽·灵绘（全能）**, powered by fal's
+`google/nano-banana-2.1` and `/edit` endpoints. It defaults to one 1K image and
+supports 2K, 4K, and up to 14 Base64 reference images. Thinking is fixed to
+`medium`; web search is off.
+
+It reuses the server-side `FAL_KEY` (or `FAL_GPT_IMAGE2_API_KEY`) and
+`FAL_GPT_IMAGE2_API_BASE_URL`. No additional key is needed. Submit to
+`POST /api/nano-banana-2.1/generations` with `prompt`, `resolution`,
+`aspect_ratio`, and optional `image` array. The HTTP 202 response returns a
+`jobId` and `pollUrl`; poll the existing image-job endpoint with the same
+account. Polling does not submit additional paid generations. Both success
+and failure are recorded in usage logs with the fal request ID when available.
+Costs are token-based; no fixed per-image billing estimate is added.
+
 ## GPT Image 2.5
 
 Both `gpt-image-2.5` and `gpt-image-2.5-sunburst` prefer fal.ai Sunburst with

@@ -22,6 +22,7 @@ import { createApiKeyAuthenticator, findStoredRelayApiKey } from './relay/apiKey
 import { createPostgresRelayRepository } from './relay/postgresRepository.js'
 import { resolveSeedanceUpstreamConfig } from './relay/upstreamCredentials.js'
 import { generateFalGptImage25 } from './integrations/falGptImage25.js'
+import { generateFalNanoBanana21, normalizeNanoBanana21Input } from './integrations/falNanoBanana21.js'
 import { startImageGenerationJob, getImageGenerationJob } from './integrations/imageGenerationJobs.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -845,6 +846,7 @@ app.post('/api/gpt-image2/generations', handleGptImage2GenerateRequest)
 app.post('/api/gpt-image2-vip/generations', handleGptImage2VipGenerateRequest)
 app.post('/api/gpt-image-2.5/generations', handleGptImage2VipGenerateRequest)
 app.post('/api/gpt-image-2.5-sunburst/generations', handleGptImage2VipGenerateRequest)
+app.post('/api/nano-banana-2.1/generations', handleNanoBanana21GenerateRequest)
 app.get('/api/gpt-image-2.5/jobs/:jobId', (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
   const ownerId = imageJobOwnerId(req)
@@ -1028,6 +1030,52 @@ async function handleGptImage2GenerateRequest(req, res) {
       }).catch(() => {})
     },
   )
+}
+
+async function handleNanoBanana21GenerateRequest(req, res) {
+  const apiKey = process.env.FAL_KEY?.trim() || process.env.FAL_GPT_IMAGE2_API_KEY?.trim()
+  if (!apiKey) {
+    res.status(500).json({ error: { message: 'Missing backend config: FAL_KEY / FAL_GPT_IMAGE2_API_KEY', type: 'config_error' } })
+    return
+  }
+  try {
+    const input = normalizeNanoBanana21Input(req.body || {})
+    const ownerId = imageJobOwnerId(req)
+    if (!ownerId) throw createHttpError(401, '无法识别当前账号，请重新登录。')
+    const model = `google/nano-banana-2.1${input.image_urls?.length ? '/edit' : ''}`
+    const mediaSummary = parseUsageMediaSummaryHeader(req)
+    const job = startImageGenerationJob(ownerId, async (jobId, signal) => {
+      let generated
+      let failure
+      try {
+        generated = await generateFalNanoBanana21(input, { apiKey, baseUrl: falGptImage2ApiBaseUrl, signal })
+        return { data: generated.data, model: generated.model, provider: 'fal', requestId: generated.requestId }
+      } catch (error) {
+        failure = error
+        throw error
+      } finally {
+        insertUsageLog({
+          session: req.videoSiteSession,
+          channel: 'image', providerId: 'nano-banana-2.1', model,
+          generationMode: input.image_urls?.length ? 'image-to-image' : 'text-to-image',
+          prompt: input.prompt, aspectRatio: input.aspect_ratio, resolution: input.resolution, sampleCount: 1,
+          requestParams: attachUsageMediaSummary({
+            model, resolution: input.resolution, aspect_ratio: input.aspect_ratio,
+            imageProvider: 'fal', thinking_level: input.thinking_level,
+            mediaCounts: { images: input.image_urls?.length || 0, videos: 0, audios: 0 },
+          }, mediaSummary),
+          engineTaskId: jobId, upstreamRequestId: generated?.requestId || failure?.requestId || null,
+          upstreamUrl: `${falGptImage2ApiBaseUrl}/${model}`,
+          status: generated ? 'succeeded' : 'failed', errorMessage: failure?.message || null,
+        }).catch(() => {})
+      }
+    })
+    res.setHeader('Cache-Control', 'no-store')
+    res.status(202).json({ ...job, pollUrl: `/api/gpt-image-2.5/jobs/${job.jobId}` })
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 502
+    res.status(statusCode).json({ error: { message: error.message, type: statusCode < 500 ? 'request_error' : 'upstream_error' } })
+  }
 }
 
 async function handleGptImage2VipGenerateRequest(req, res) {

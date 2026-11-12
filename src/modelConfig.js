@@ -657,6 +657,27 @@ const BASE_PROVIDERS = {
     referenceHelpText: 'Supports text-to-image and multi-image generation. The backend uploads references first and sends their URLs in payload.resources. Up to 14 reference images.',
     backendKind: 'aggregation-image',
   },
+  'nano-banana-2.1': {
+    id: 'nano-banana-2.1',
+    typeId: 'image',
+    typeLabel: '图像模型',
+    selectorLabel: '起芽·灵绘（全能）',
+    name: '起芽·灵绘',
+    description: '支持多图融合、人物一致性与文字排版，适合复杂创作。',
+    vendor: 'Google',
+    color: '#7c3aed',
+    outputType: 'image',
+    models: [{ value: 'google/nano-banana-2.1', label: '起芽·灵绘', tag: '全能' }],
+    aspectRatios: ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9', '1:4', '1:8', '4:1', '8:1'],
+    resolutions: { default: ['1K', '2K', '4K'] },
+    durations: [],
+    sampleCounts: [1],
+    features: { generateAudio: false, negativePrompt: false, referenceImage: true },
+    maxReferenceImages: 14,
+    defaults: { model: 'google/nano-banana-2.1', aspectRatio: '9:16', resolution: '1K', sampleCount: 1 },
+    referenceHelpText: '支持文生图和最多 14 张参考图的编辑、融合；可选择 1K、2K、4K。',
+    backendKind: 'fal-nano-banana21',
+  },
   'claude1-copywriting': {
     id: 'claude1-copywriting',
     typeId: 'copywriting',
@@ -743,6 +764,7 @@ export const PROVIDER_ORDER = [
   'gemini-image-aggregation',
   'gpt-image-2.5',
   'gpt-image-2.5-sunburst',
+  'nano-banana-2.1',
 ]
 
 export const MODEL_TYPES = PROVIDER_ORDER.reduce((acc, providerId) => {

@@ -960,8 +960,10 @@ function App() {
           }
         }
       } else if (!isVideoProvider(provider)) {
-        if (isGptImage2Provider(provider)) {
-          const requestInfo = buildGptImage2Request(provider, params, finalPrompt, generationMode, referenceMedia)
+        if (isGptImage2Provider(provider) || PROVIDERS[provider]?.backendKind === 'fal-nano-banana21') {
+          const requestInfo = PROVIDERS[provider]?.backendKind === 'fal-nano-banana21'
+            ? buildNanoBanana21Request(params, finalPrompt, generationMode, referenceMedia)
+            : buildGptImage2Request(provider, params, finalPrompt, generationMode, referenceMedia)
           const response = await fetch(requestInfo.url, {
             method: 'POST',
             headers: withUsageMediaSummaryHeaders(requestInfo.headers, usageMediaSummary),
@@ -2204,6 +2206,17 @@ function buildOpenAiImageRequest(provider, params, prompt, mode, mediaList) {
       model: params.model,
       contents: [{ parts }],
       ...(generationConfig ? { generationConfig } : {}),
+    },
+  }
+}
+
+function buildNanoBanana21Request(params, prompt, mode, mediaList) {
+  return {
+    url: '/api/nano-banana-2.1/generations',
+    headers: { 'Content-Type': 'application/json' },
+    body: {
+      prompt, resolution: params.resolution, aspect_ratio: params.aspectRatio,
+      ...(mode === 'i2v' && mediaList.length > 0 ? { image: mediaList } : {}),
     },
   }
 }
