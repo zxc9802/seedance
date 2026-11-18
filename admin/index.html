@@ -757,6 +757,11 @@ function formatMoney(value) {
   return `¥${Number(value).toFixed(2)}`
 }
 
+function formatTaskCost(task) {
+  if (task.referenceCostCny == null) return formatMoney(task.estimated_cost)
+  return `<span title="参考成本，按图片模型定价的基准规格和参考图数量估算">≈${formatMoney(task.referenceCostCny)}</span>`
+}
+
 function formatDurationLabel(value) {
   if (value === null || value === undefined || value === '') return '-'
   const duration = Number(value)
@@ -1289,7 +1294,7 @@ async function loadTasks(page) {
         <td>${renderClipCell(task.engine_task_id || '-', 180)}</td>
         <td>${renderClipCell(task.upstream_url || '-', 260)}</td>
         <td>${renderClipCell(task.error_message || '-', 240)}</td>
-        <td>${formatMoney(task.estimated_cost)}</td>
+        <td>${formatTaskCost(task)}</td>
       </tr>
     `).join('')
 
@@ -1455,7 +1460,7 @@ async function showUserDetail(userId, userName) {
         <td>${renderClipCell(task.engine_task_id || '-', 180)}</td>
         <td>${renderClipCell(task.upstream_url || '-', 260)}</td>
         <td>${renderClipCell(task.error_message || '-', 240)}</td>
-        <td>${formatMoney(task.estimated_cost)}</td>
+        <td>${formatTaskCost(task)}</td>
       </tr>
     `).join('')
   } catch (error) {
