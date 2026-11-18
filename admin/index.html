@@ -759,7 +759,7 @@ function formatMoney(value) {
 
 function formatTaskCost(task) {
   if (task.referenceCostCny == null) return formatMoney(task.estimated_cost)
-  return `<span title="参考成本，按图片模型定价的基准规格和参考图数量估算">≈${formatMoney(task.referenceCostCny)}</span>`
+  return `<span title="参考成本，按图片模型定价的基准规格和参考图数量估算">${formatMoney(task.referenceCostCny)}</span>`
 }
 
 function formatDurationLabel(value) {
