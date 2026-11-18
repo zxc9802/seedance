@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import ExcelJS from 'exceljs'
 import express from 'express'
 import multer from 'multer'
+import { calculateConfirmedMediaBilling } from '../db/monitorPricing.js'
 import { getPool } from '../db/postgres.js'
 import { getSeedanceRelayPricing } from '../relay/api.js'
 import {
@@ -1306,6 +1307,42 @@ router.post('/cost-import/apply', async (req, res) => {
     const status = getCostImportErrorStatus(err)
     res.status(status).json({ error: err.message || '费用导入失败' })
   }
+})
+
+router.get('/image-pricing', (_req, res) => {
+  const exchangeRate = 6.7118
+  const usdToCny = (usd) => Number((usd * exchangeRate).toFixed(2))
+  const { costCnyPerUnit } = calculateConfirmedMediaBilling({ providerId: 'gemini-image-aggregation', sampleCount: 1 })
+  const sunburst = {
+    details: 'GPT Image 2.5 Sunburst · fal · 1024×1024 · High',
+    costs: [
+      { label: '文生图', cny: usdToCny(0.0528) },
+      { label: '带 1 张参考图', cny: usdToCny(0.061) },
+    ],
+  }
+
+  res.json({
+    checkedOn: '2026-11-18',
+    exchangeRate,
+    models: [
+      {
+        name: '起芽·闪绘（极速）',
+        details: 'Gemini 3.1 Flash Image · 聚合通道',
+        costs: [{ label: '项目计价', cny: costCnyPerUnit }],
+      },
+      { name: '起芽·精绘（均衡）', ...sunburst },
+      { name: '起芽·臻绘（旗舰）', ...sunburst },
+      {
+        name: '起芽·灵绘（全能）',
+        details: 'Nano Banana 2.1 · fal · 文生图',
+        costs: [
+          { label: '1K', cny: usdToCny(0.04) },
+          { label: '2K', cny: usdToCny(0.059) },
+          { label: '4K', cny: usdToCny(0.134) },
+        ],
+      },
+    ],
+  })
 })
 
 router.get('/pricing', async (req, res) => {
