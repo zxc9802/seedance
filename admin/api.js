@@ -276,7 +276,7 @@ const TASK_EXPORT_COLUMNS = Object.freeze([
   { header: '\u72b6\u6001', width: 12, align: 'center', value: (log) => formatStatusLabel(log.status) },
   { header: 'engine_task_id', width: 30, value: (log) => log.engine_task_id || '' },
   { header: 'upstream_url', width: 42, value: (log) => log.upstream_url || '' },
-  { header: '\u8d39\u7528', width: 14, align: 'right', type: 'amount', value: (log) => safeExcelAmount(log.estimated_cost) },
+  { header: '\u8d39\u7528', width: 14, align: 'right', type: 'amount', value: (log) => safeExcelAmount(log.estimated_cost ?? log.referenceCostCny) },
 ])
 
 const USAGE_CHANNEL_SQL = buildUsageChannelSql()
@@ -424,6 +424,7 @@ async function buildUsageWorkbook(logs, sheetName) {
 
       if (column.type === 'amount') {
         cell.numFmt = '\u00a5#,##0.00'
+        if (log.referenceCostCny != null) cell.note = '参考成本，按图片模型定价估算'
       }
     })
   })

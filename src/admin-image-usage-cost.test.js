@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 import test from 'node:test'
+import ExcelJS from 'exceljs'
 import express from 'express'
 import pg from 'pg'
 import adminRouter from '../admin/api.js'
@@ -48,12 +49,41 @@ test('admin task details show a reference cost for an existing successful image 
   t.after(() => new Promise((resolve) => server.close(resolve)))
   await once(server, 'listening')
 
-  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/admin/tasks`, {
+  const adminUrl = `http://127.0.0.1:${server.address().port}/api/admin`
+  const auth = {
     headers: { Authorization: 'Bearer fixture-password' },
-  })
+  }
+  const response = await fetch(`${adminUrl}/tasks`, auth)
   assert.equal(response.status, 200)
   const { items } = await response.json()
   assert.equal(items[0].estimated_cost, null)
   assert.equal(items[1].estimated_cost, '0.00')
   assert.deepEqual(items.map((item) => item.referenceCostCny), [0.52, null, null, null, null, 0.60, 0.42, 0.35, null])
+
+  for (const route of ['tasks/export', 'user-detail/export?userId=fixture']) {
+    await t.test(`/api/admin/${route} exports the same costs as the detail page`, async () => {
+      const download = await fetch(`${adminUrl}/${route}`, auth)
+      assert.equal(download.status, 200)
+      const workbook = new ExcelJS.Workbook()
+      await workbook.xlsx.load(Buffer.from(await download.arrayBuffer()))
+      const [sheet] = workbook.worksheets
+      const headers = sheet.getRow(1).values
+      const modelColumn = headers.indexOf('模型')
+      const costColumn = headers.indexOf('费用')
+      assert.equal(sheet.rowCount, rows.length + 2)
+
+      for (const [index, item] of items.entries()) {
+        const row = sheet.getRow(index + 2)
+        assert.equal(row.getCell(modelColumn).value, item.model)
+        const cost = row.getCell(costColumn)
+        const expectedCost = item.estimated_cost === null ? item.referenceCostCny : Number(item.estimated_cost)
+        assert.equal(cost.value, expectedCost, `cost for row ${index + 2} (${item.model})`)
+        assert.equal(typeof cost.note === 'string', item.referenceCostCny !== null)
+      }
+
+      const total = sheet.lastRow.getCell(costColumn)
+      const columnLetter = sheet.getColumn(costColumn).letter
+      assert.equal(total.formula, `SUM(${columnLetter}2:${columnLetter}${items.length + 1})`)
+    })
+  }
 })
